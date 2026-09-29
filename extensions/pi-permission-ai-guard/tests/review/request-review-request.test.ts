@@ -215,7 +215,7 @@ describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
 });
 
 describe("cache-identity key set (single source pinned)", () => {
-  it("materializes exactly the twelve decision-relevant facts — no silent additions or drops", () => {
+  it("materializes exactly the thirteen decision-relevant facts — no silent additions or drops", () => {
     // The exclusion doctrine makes tripwires one-way: adding an excluded
     // field breaks the compile, but DROPPING a keyed field from the
     // material would compile silently. This pins the key set at runtime:
@@ -227,6 +227,7 @@ describe("cache-identity key set (single source pinned)", () => {
       }),
     ) as Record<string, unknown>;
     expect(Object.keys(material).toSorted()).toEqual([
+      "agentReason",
       "canonicalBoundary",
       "commandContext",
       "executedUnit",
