@@ -34,6 +34,7 @@ type KeyedAskFields =
   | "fullCommand"
   | "flaggedElements"
   | "toolInputPreview"
+  | "agentReason"
   | "readPath"
   | "resolvedAlias"
   | "canonicalBoundary"
@@ -100,5 +101,6 @@ export function reviewRequestCacheMaterial(request: ReviewRequestContext): strin
     readPath: normalizeEmpty(ask.readPath),
     resolvedAlias: normalizeEmpty(ask.resolvedAlias),
     toolInputPreview: normalizeEmpty(ask.toolInputPreview),
+    agentReason: normalizeEmpty(ask.agentReason),
   });
 }

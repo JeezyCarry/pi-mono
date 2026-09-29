@@ -196,6 +196,10 @@ async function executeCall(
       apiKey: ctx.auth.apiKey,
       headers: ctx.auth.headers,
       maxTokens,
+      // Force OpenAI-compatible providers (OpenRouter/DeepSeek) to emit valid
+      // JSON via response_format, so malformed verdicts like {"allow",...}
+      // can't happen. Ignored by non-OpenAI-compatible APIs.
+      samplingParams: { response_format: { type: "json_object" } },
       // Provider-level retry (429/408/409/5xx per pi-ai's classifier,
       // backoff and retry-after honored) — the signal spans every attempt,
       // so timeoutMs stays the TOTAL budget, retries included. The

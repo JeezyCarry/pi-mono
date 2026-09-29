@@ -97,6 +97,8 @@ export interface AskContext {
   readonly flaggedElements: readonly string[];
   /** Evidence `input` text — the tool-input preview (tool kind). */
   readonly toolInputPreview?: string;
+  /** Evidence `reason` text — the agent's stated intent (from reason-bash). */
+  readonly agentReason?: string;
   /** Evidence `read path` text — the path a skill read reached its skill through. */
   readonly readPath?: string;
   /**
@@ -166,6 +168,7 @@ interface FlaggedFields {
   fullCommand?: string;
   flaggedElements: readonly string[];
   toolInputPreview?: string;
+  agentReason?: string;
   readPath?: string;
   resolvedAlias?: string;
 }
@@ -186,6 +189,7 @@ function flaggedFields(payload: PromptPayload): FlaggedFields {
   const flagged = flaggedElements(payload);
   const fullCommandEvidence = findEvidence(payload, "full command")?.text;
   const toolInputPreview = findEvidence(payload, "input")?.text;
+  const agentReason = findEvidence(payload, "reason")?.text;
   const readPath = findEvidence(payload, "read path")?.text;
 
   // resolvedAlias: "resolves to" evidence, else the detail of the first
@@ -212,6 +216,7 @@ function flaggedFields(payload: PromptPayload): FlaggedFields {
     ...(fullCommand !== undefined ? { fullCommand } : {}),
     flaggedElements: flagged,
     ...(toolInputPreview !== undefined ? { toolInputPreview } : {}),
+    ...(agentReason !== undefined ? { agentReason } : {}),
     ...(readPath !== undefined ? { readPath } : {}),
     ...(resolvedAlias !== undefined ? { resolvedAlias } : {}),
   };

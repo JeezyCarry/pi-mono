@@ -195,6 +195,9 @@ Reply with ONLY one JSON object — no markdown, no prose, no other text.
 {"verdict":"deny","reason":"<risk; safer alternative if useful>","riskLevel":"low|medium|high|critical"}
 {"verdict":"defer","reason":"<what needs clarification>","lean":"allow|deny"}
 
+- Reply with ONLY the JSON object. Do NOT use alternate shapes such as
+  {"allow": true}, {"decision": "allow"}, or {"verdict":true} — the verdict
+  field must always be the string "allow", "deny", or "defer".
 - Omit fields that do not apply; never use empty strings.
 - For deny or defer, reason must be one concise sentence grounded in
   visible request context, at most ~150 characters. Never assert what
@@ -256,6 +259,10 @@ function buildPermissionRequestSection(request: ReviewRequestContext): string {
 
   if (ask.toolInputPreview) {
     lines.push(`- tool input: ${encodeActionTextForPrompt(ask.toolInputPreview)}`);
+  }
+
+  if (ask.agentReason) {
+    lines.push(`- agent reason: ${encodeActionTextForPrompt(ask.agentReason)}`);
   }
 
   if (ask.readPath) {
