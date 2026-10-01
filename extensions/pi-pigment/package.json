@@ -1,7 +1,7 @@
 {
   "name": "pi-pigment",
-  "version": "0.3.0",
-  "description": "Pigment for your pi: Shiki-highlighted diffs, shell commands, grep hits, and file listings — every color from your active pi theme",
+  "version": "0.3.2",
+  "description": "Pigment for your pi: syntax highlighting for diffs, shell, grep and listings in your theme's colors — ships the Shiki bundle, imports TextMate (.tmTheme) themes",
   "keywords": [
     "diff",
     "pi",
@@ -12,7 +12,9 @@
     "pigment",
     "shiki",
     "syntax-highlighting",
-    "terminal"
+    "terminal",
+    "textmate",
+    "tmtheme"
   ],
   "homepage": "https://github.com/kuoruan/pi-mono/tree/master/extensions/pi-pigment#readme",
   "bugs": {
@@ -76,8 +78,8 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.87.1",
-    "@earendil-works/pi-tui": "^0.87.1",
+    "@earendil-works/pi-coding-agent": "^0.99.1",
+    "@earendil-works/pi-tui": "^0.99.1",
     "@tsconfig/node22": "catalog:",
     "@types/node": "catalog:",
     "memfs": "catalog:",

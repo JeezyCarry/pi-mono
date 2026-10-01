@@ -12,14 +12,15 @@
 
 import { APIConnectionError, APIError, APITimeoutError, APIUserAbortError } from "@typesafe-ai/sdk";
 
+import { emitCallFailure } from "#src/audit/call-failure.ts";
 import type { TypesafeConfig } from "#src/config/config-schema.ts";
-import { emitCallFailure } from "#src/model/model-review.ts";
 import type { ModelCallDeferKind, ReviewOutcome } from "#src/model/model-verdict.ts";
 import { switchableStatusReason } from "#src/model/model-verdict.ts";
 import type {
   AttemptResult,
   AttemptSpec,
   JevPoolEndpoint,
+  JevProvider,
   LaneAdapter,
   PoolEndpoint,
 } from "#src/review/pool.ts";
@@ -38,7 +39,7 @@ export interface JevAdapterDeps {
    * Production prebuilds every endpoint's client at registration so an
    * unresolvable key/baseUrl fails fast, not per ask.
    */
-  createClient?: (provider: JevPoolEndpoint["provider"]) => TypesafeClientLike;
+  createClient?: (provider: JevProvider) => TypesafeClientLike;
   /** Injected clock (tests only). */
   now?: () => number;
 }
