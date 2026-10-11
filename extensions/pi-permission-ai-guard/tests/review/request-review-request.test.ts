@@ -246,6 +246,27 @@ describe("reviewRequestCacheMaterial", () => {
     // Same verdict → same key (intentional collision).
     expect(reviewRequestCacheMaterial(direct)).toBe(reviewRequestCacheMaterial(viaAlias));
   });
+
+  it("collides asks that differ only in the agent's stated reason", () => {
+    // The reason is free text and its wording changes per call. Keying on it
+    // would make every ask a cache miss, even for the same command.
+    const base = {
+      ask: buildAskContext(
+        makeDetails({
+          surface: "bash",
+          value: "npm test",
+          command: "npm test",
+          payload: payload("bash", { surface: "bash", value: "npm test" }),
+        }),
+        "/p",
+      ),
+      target: "npm test",
+    };
+    const first = { ...base, ask: { ...base.ask, agentReason: "Run the test suite" } };
+    const second = { ...base, ask: { ...base.ask, agentReason: "Verify the recent change" } };
+
+    expect(reviewRequestCacheMaterial(first)).toBe(reviewRequestCacheMaterial(second));
+  });
 });
 
 describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
@@ -254,7 +275,7 @@ describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
     // any new field on AskContext or upstream's PromptRequestFacts breaks
     // the compile until it is keyed or documented here. This test pins the
     // CURRENT sets so a deliberate edit is an explicit, reviewed change.
-    expect(Object.keys(EXCLUDED_ASK_FIELDS).toSorted()).toEqual(["annotations"]);
+    expect(Object.keys(EXCLUDED_ASK_FIELDS).toSorted()).toEqual(["agentReason", "annotations"]);
     expect(Object.keys(EXCLUDED_REQUEST_FACTS).toSorted()).toEqual([
       "invokedToolName",
       "matchedPattern",
@@ -272,7 +293,7 @@ describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
 });
 
 describe("cache-identity key set (single source pinned)", () => {
-  it("materializes exactly the thirteen decision-relevant facts — no silent additions or drops", () => {
+  it("materializes exactly the twelve decision-relevant facts — no silent additions or drops", () => {
     // The exclusion doctrine makes tripwires one-way: adding an excluded
     // field breaks the compile, but DROPPING a keyed field from the
     // material would compile silently. This pins the key set at runtime:
@@ -284,7 +305,6 @@ describe("cache-identity key set (single source pinned)", () => {
       }),
     ) as Record<string, unknown>;
     expect(Object.keys(material).toSorted()).toEqual([
-      "agentReason",
       "canonicalBoundary",
       "commandContext",
       "executedUnit",

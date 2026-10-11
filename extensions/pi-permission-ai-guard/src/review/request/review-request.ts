@@ -34,7 +34,6 @@ type KeyedAskFields =
   | "fullCommand"
   | "flaggedElements"
   | "toolInputPreview"
-  | "agentReason"
   | "readPath"
   | "resolvedAlias"
   | "canonicalBoundary"
@@ -46,6 +45,8 @@ type KeyedRequestFacts = "value" | "commandContext" | "executedUnit" | "matchedS
 /** Every other AskContext field — excluded by doctrine, one entry each. */
 export const EXCLUDED_ASK_FIELDS: Record<Exclude<keyof AskContext, KeyedAskFields>, string> = {
   annotations: "model advisories — not rendered, not keyed",
+  agentReason:
+    "agent's free-text intent — rendered for the reviewer, but its wording varies per call, so keying on it defeats the cache",
 };
 
 /** Every other upstream request fact — excluded by doctrine, one entry each. */
@@ -70,7 +71,7 @@ export const EXCLUDED_REQUEST_FACTS: Record<
  *
  * Excluded by design (do not affect the verdict the model can reach):
  * `matchedPattern`, `invokedToolName`, `requester`, `annotations`, `toolName`,
- * and `surface`.
+ * `surface`, and `agentReason` (free text whose wording varies per call).
  *
  * `matchedPattern` is excluded and `matchedSpelling` is not: the pattern is a
  * rule name the prompt teaches the model to ignore, while the spelling is the
@@ -107,6 +108,5 @@ export function reviewRequestCacheMaterial(request: ReviewRequestContext): strin
     readPath: normalizeEmpty(ask.readPath),
     resolvedAlias: normalizeEmpty(ask.resolvedAlias),
     toolInputPreview: normalizeEmpty(ask.toolInputPreview),
-    agentReason: normalizeEmpty(ask.agentReason),
   });
 }
