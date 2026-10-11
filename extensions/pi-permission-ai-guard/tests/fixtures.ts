@@ -42,6 +42,7 @@ export function payload(
       toolName: null,
       invokedToolName: null,
       matchedPattern: null,
+      matchedSpelling: null,
       commandContext: null,
       executedUnit: null,
       ...request,
@@ -72,6 +73,9 @@ export function bashPayload(sub: string, full?: string): PromptPayload {
 export function makeDetails(overrides: Record<string, unknown> = {}): PromptPermissionDetails {
   const value = typeof overrides.value === "string" ? overrides.value : "ls -la";
   const payloadOverride = overrides.payload as PromptPayload | undefined;
+  // `overrides` is deliberately untyped: callers inject real fields and, in
+  // the invalid-input cases, junk keys the type forbids. One assertion covers
+  // both, rather than a signature that would reject those callers.
   return {
     requestId: "test-1",
     source: "tool_call",

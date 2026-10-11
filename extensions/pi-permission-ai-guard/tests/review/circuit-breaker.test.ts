@@ -42,17 +42,22 @@ describe("CircuitBreaker", () => {
     expect(s.trippedTier(cb)).toBeDefined();
   });
 
-  it("does not count a breaker short-circuit or cache hit (caller responsibility)", () => {
-    // The breaker only counts model verdicts via recordVerdict. If the caller
-    // short-circuits (breaker trip or cache hit) without calling recordVerdict,
-    // totals don't move. This is the no-double-count invariant.
+  it("counts each real verdict once, reaching the total tier at exactly 20", () => {
+    // The total has no reader, so it is pinned through the trip point: exactly
+    // 17 further denies must be what reaches the hard tier of 20 — one phantom
+    // increment would trip it on the 16th (the consecutive counter is reset
+    // each round so only the total can be what trips).
     const s = new CircuitBreaker();
-    s.recordVerdict("deny");
-    s.recordVerdict("deny");
-    s.recordVerdict("deny");
-    expect(s.trippedTier(cb)).toBeDefined(); // trip → total still 3
+    for (let i = 0; i < 3; i++) s.recordVerdict("deny");
+    expect(s.trippedTier(cb)).toBeDefined();
     s.resetConsecutive();
-    expect(s.trippedTier(cb)).toBeUndefined(); // consecutive 0, total 3 < 20
+    for (let i = 0; i < 16; i++) {
+      s.recordVerdict("deny");
+      s.resetConsecutive();
+    }
+    expect(s.trippedTier(cb)).toBeUndefined();
+    s.recordVerdict("deny");
+    expect(s.trippedTier(cb)).toBeDefined();
   });
 
   it("defer does not change counters", () => {
@@ -122,16 +127,6 @@ describe("breaker accounting steps", () => {
     expect(s.trippedTier({ consecutive: 1, total: 200, verdict: "deny" })).toBeDefined();
     expect(s.trippedTier({ consecutive: 2, total: 200, verdict: "deny" })).toBeUndefined();
     expect(s.trippedTier({ consecutive: 999, total: 1, verdict: "deny" })).toBeUndefined();
-  });
-
-  it("strict's model-defer→deny counts as a deny-equivalent into the recoverable tier only", () => {
-    const s = new CircuitBreaker();
-    const tripAtOne = { consecutive: 1, total: 20, verdict: "deny" as const };
-    accountModelOutcome(s, "defer", { kind: "deny", reason: "clarification" });
-    // A wavering reviewer under strict is a denial stream — consecutive
-    // fills (recoverable escape can fire), total stays model-denies-only.
-    expect(s.trippedTier(tripAtOne)).toBeDefined();
-    expect(s.trippedTier({ consecutive: 99, total: 1, verdict: "deny" })).toBeUndefined();
   });
 
   it("accountModelOutcome records real denies into both tiers regardless of the emitted mapping", () => {

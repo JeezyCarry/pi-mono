@@ -18,11 +18,12 @@ import {
 } from "#src/config/config-layer.ts";
 import { MODE_VALUES, NOTIFY_LEVEL_VALUES } from "#src/config/config-schema.ts";
 import { CYCLE_MODE_VALUES, EMPHASIZED_MODE, MODE_BLURBS } from "#src/config/mode-table.ts";
-import { type ModelCallFn, createModelCall } from "#src/model/model-review.ts";
 import { warn } from "#src/notice.ts";
+import { type ModelCallFn, createModelCall } from "#src/review/engines/chat/call.ts";
 import { type ReviewPipelineDeps, createReviewPipeline } from "#src/review/review-pipeline.ts";
 import { RuntimeSettings, type EnumSettingSpec } from "#src/session/runtime-settings.ts";
 import { SessionLifecycle } from "#src/session/session-lifecycle.ts";
+import { normalizeText } from "#src/utils.ts";
 
 /**
  * Optional overrides for testing. In production (default export) all
@@ -93,8 +94,9 @@ export function createAiGuardExtension(
     // The authorizer factory defaults to the real ReviewPipeline. Tests
     // inject a stub to exercise lifecycle timing without the model stack.
     createPipeline: dependencies.createPipeline ?? createReviewPipeline,
-    // Model calls go through `ModelRegistry.complete` — the agent's own
-    // call path, never the provider layer directly.
+    // Model calls go through `ModelRegistry.streamSimple` — the agent's own
+    // call path, never the provider layer directly. `complete` is avoided on
+    // purpose: its low-level `stream` drops the simple-layer `reasoning` option.
     modelCall: dependencies.modelCall ?? createModelCall(() => lifecycle.session?.registry),
   });
 
@@ -151,7 +153,13 @@ export function createAiGuardExtension(
     settings.restore(ctx.sessionManager);
     settings.syncFooter(ctx);
     for (const issue of result.issues) {
-      warn(`config issue at ${issue.sourcePath ?? "(merged)"} — ${issue.path}: ${issue.message}`);
+      // The message carries config-file text (a key name, a rejected value)
+      // straight to a terminal, so the control sequences go before it does.
+      warn(
+        normalizeText(
+          `config issue at ${issue.sourcePath ?? "(merged)"} — ${issue.path}: ${issue.message}`,
+        ),
+      );
     }
   });
 

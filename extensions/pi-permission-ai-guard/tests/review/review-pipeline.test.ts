@@ -7,10 +7,11 @@
  * review-pipeline-devices.test.ts.
  */
 
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { DECISION_EVENT, MODEL_REPLY_EVENT } from "#src/audit/events.ts";
+import { PRE_CALL_MACHINERY_KINDS } from "#src/model/machinery-kinds.ts";
+import type { ModelCallFn } from "#src/review/engines/chat/call.ts";
 import { createReviewPipeline, type DenyRecord } from "#src/review/review-pipeline.ts";
 import { withAgentInstruction } from "#src/review/verdict-copy.ts";
 import { makeDetails } from "#test/fixtures.ts";
@@ -35,35 +36,17 @@ describe("createReviewPipeline — guard clauses", () => {
   // request-ask.test.ts (pure function, no model stack needed).
 
   it("defers without a model call when policy already allows", async () => {
-    let modelCalled = false;
-    const authorize = createReviewPipeline(
-      makePipeline({
-        engine: makeEngine({
-          modelCall: async () => {
-            modelCalled = true;
-            return {} as AssistantMessage;
-          },
-        }),
-      }),
-    );
+    const modelCall = vi.fn<ModelCallFn>(makeFakeCompleteSimple([]));
+    const authorize = createReviewPipeline(makePipeline({ engine: makeEngine({ modelCall }) }));
     await expectVerdict(authorize, { value: "ls -la" }, { kind: "defer" }, "allow");
-    expect(modelCalled).toBe(false);
+    expect(modelCall).not.toHaveBeenCalled();
   });
 
   it("defers without a model call when policy already denies", async () => {
-    let modelCalled = false;
-    const authorize = createReviewPipeline(
-      makePipeline({
-        engine: makeEngine({
-          modelCall: async () => {
-            modelCalled = true;
-            return {} as AssistantMessage;
-          },
-        }),
-      }),
-    );
+    const modelCall = vi.fn<ModelCallFn>(makeFakeCompleteSimple([]));
+    const authorize = createReviewPipeline(makePipeline({ engine: makeEngine({ modelCall }) }));
     await expectVerdict(authorize, { value: "cat .env" }, { kind: "defer" }, "deny");
-    expect(modelCalled).toBe(false);
+    expect(modelCall).not.toHaveBeenCalled();
   });
 
   it("queries the deterministic engine at gate parity", async () => {
@@ -183,11 +166,81 @@ describe("createReviewPipeline — guard clauses", () => {
     const verdict = await authorize(makeDetails({ value: "ls" }), throwingQuery, noLog);
 
     expect(verdict).toEqual({ kind: "defer" });
-    // Structure pinned, copy unpinned: the crash must surface at error
-    // grade with a non-empty message — the exact wording is free to evolve.
+    // The crash must surface at error grade and carry its own cause — that
+    // text is the only thing telling the operator which failure this was. The
+    // framing around it stays free to evolve.
     expect(notifications).toHaveLength(1);
     expect(notifications[0][1]).toBe("error");
-    expect(notifications[0][0]).toEqual(expect.any(String));
+    expect(notifications[0][0]).toContain("policy exploded");
+  });
+
+  it("records the crash defer in the review log too", async () => {
+    // The notify is the operator channel; the review log is the audit trail —
+    // without a record there, a crashed review looks like a silent pass.
+    const { notify } = makeNotifySpy();
+    const authorize = createReviewPipeline(makePipeline({ notify }));
+    const { log, reviewCalls } = makeRecordingLog();
+    const throwingQuery = {
+      ...makeQuery("ask"),
+      checkPermission: () => {
+        throw new Error("policy exploded");
+      },
+    };
+
+    const verdict = await authorize(makeDetails({ value: "ls" }), throwingQuery, log);
+
+    expect(verdict).toEqual({ kind: "defer" });
+    expect(reviewCalls).toHaveLength(1);
+    expect(reviewCalls[0].event).toBe(DECISION_EVENT);
+    expect(reviewCalls[0].data.gate).toBe(PRE_CALL_MACHINERY_KINDS.internalError);
+  });
+
+  it("records the crash defer even when the debug sink throws", async () => {
+    // The two writes are best-effort independently: a throwing debug sink must
+    // not cost the audit trail the record that says the review crashed.
+    const { notify } = makeNotifySpy();
+    const authorize = createReviewPipeline(makePipeline({ notify }));
+    const { log, reviewCalls } = makeRecordingLog();
+    log.debug = () => {
+      throw new Error("debug sink down");
+    };
+    const throwingQuery = {
+      ...makeQuery("ask"),
+      checkPermission: () => {
+        throw new Error("policy exploded");
+      },
+    };
+
+    const verdict = await authorize(makeDetails({ value: "ls" }), throwingQuery, log);
+
+    expect(verdict).toEqual({ kind: "defer" });
+    expect(reviewCalls).toHaveLength(1);
+    expect(reviewCalls[0].event).toBe(DECISION_EVENT);
+  });
+
+  it("records the crash defer even when the notify bridge throws", async () => {
+    // The operator channel is the first write on this path and the likeliest to
+    // die (a disposed runner window); the audit record must not ride on it.
+    const authorize = createReviewPipeline(
+      makePipeline({
+        notify: () => {
+          throw new Error("notify bridge down");
+        },
+      }),
+    );
+    const { log, reviewCalls } = makeRecordingLog();
+    const throwingQuery = {
+      ...makeQuery("ask"),
+      checkPermission: () => {
+        throw new Error("policy exploded");
+      },
+    };
+
+    const verdict = await authorize(makeDetails({ value: "ls" }), throwingQuery, log);
+
+    expect(verdict).toEqual({ kind: "defer" });
+    expect(reviewCalls).toHaveLength(1);
+    expect(reviewCalls[0].event).toBe(DECISION_EVENT);
   });
 });
 
@@ -297,14 +350,11 @@ describe("createReviewPipeline — verdicts", () => {
     const authorize = createReviewPipeline(
       makePipeline({
         engine: makeEngine({
-          modelCall: async () =>
-            ({
-              role: "assistant",
-              content: [],
-              stopReason: "aborted",
-              rawStopReason: "max_tokens",
-              errorMessage: "provider hiccup",
-            }) as unknown as AssistantMessage,
+          modelCall: makeFakeCompleteSimple([], {
+            stopReason: "aborted",
+            rawStopReason: "max_tokens",
+            errorMessage: "provider hiccup",
+          }),
         }),
       }),
     );
@@ -375,8 +425,9 @@ describe("createReviewPipeline — verdicts", () => {
     // The review stream is always on — never carry raw model text there.
     expect(raw).not.toContain(credential);
     // …but the redacted text must still BE there (kept-but-redacted, not
-    // dropped entirely — the defer-failure raw reply is the replay material).
-    expect(raw).toBeTruthy();
+    // dropped entirely — the defer-failure raw reply is the replay material),
+    // so the marker is what proves the text survived, not merely non-empty.
+    expect(raw).toContain("[REDACTED]");
   });
 });
 
@@ -387,6 +438,33 @@ describe("createReviewPipeline — deny history (the /ai-guard denied panel's da
   // did the reviewer itself refuse", and each exclusion below is one of
   // those rules. (The read side — the panel — is pinned in
   // runtime-settings tests; this block pins what lands in the array.)
+
+  it("bounds the denied-panel history", async () => {
+    // The panel reads the newest handful; a long session must not grow the
+    // array without bound.
+    const denyHistory: DenyRecord[] = Array.from({ length: 50 }, (_, i) => ({
+      requestId: `old-${i}`,
+      surface: "bash",
+      target: "ls",
+      reason: "unsafe",
+      riskLevel: undefined,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    }));
+    const authorize = createReviewPipeline(
+      makePipeline({
+        denyHistory,
+        engine: makeEngine({
+          modelCall: makeFakeCompleteSimple([
+            { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"high"}' },
+          ]),
+        }),
+      }),
+    );
+    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
+    expect(denyHistory).toHaveLength(50);
+    expect(denyHistory[49]).toMatchObject({ target: "rm -rf /" });
+    expect(denyHistory[0]?.requestId).toBe("old-1");
+  });
 
   it("records a fresh model deny with its teaching reason (un-instructed)", async () => {
     const denyHistory: DenyRecord[] = [];

@@ -7,8 +7,7 @@
  * - `resolveReviewTarget` — does the ask's surface match the configured list, and if so, what value
  *   is being authorized?
  * - `buildAskContext` — project the structured `payload` into a typed `AskContext` that the prompt
- *   renderer and cache key both consume. The one piece of mutable state it touches (the warn-once
- *   annotation-drift flag) is INJECTED — the module stays pure, the caller owns the state.
+ *   renderer and cache key both consume. Pure: no injected state.
  * - `openAsk` — the composed seam: one call resolves the target and projects the context, so "the ask
  *   under review" is a single value produced at a single call, not a pair of projections glued by
  *   the caller.
@@ -29,19 +28,8 @@ import type {
 } from "@gotgenes/pi-permission-system";
 
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
-import { warn } from "#src/notice.ts";
-import { PRE_CALL_MACHINERY_KINDS } from "#src/review/machinery-kinds.ts";
+import { PRE_CALL_MACHINERY_KINDS } from "#src/model/machinery-kinds.ts";
 import { globMatch } from "#src/utils.ts";
-
-/**
- * Injected warn-once state for the annotation-drift integrity check:
- * buildAskContext stays pure, and the owner (currently the review
- * pipeline — one instance per session) controls the warn scope.
- */
-export interface DriftWarnState {
-  /** Whether the drift warning has fired for this state's owner. */
-  warned: boolean;
-}
 
 /** A resolved review target: the surface and value being authorized. */
 export interface ReviewTarget {
@@ -107,7 +95,7 @@ export interface AskContext {
    * path) this is exact. For `bash_external_directory` (possibly many flagged
    * paths) this is the alias of the first external-path entry that carries
    * one, not per-path attribution — a known, bounded limitation (see
-   * CONTEXT.md: `allow` is capped to `defer` on this surface regardless).
+   * GLOSSARY.md: `allow` is capped to `defer` on this surface regardless).
    */
   readonly resolvedAlias?: string;
   /** Canonical boundary from `details.accessIntent.boundaryValue` (path surfaces). */
@@ -323,7 +311,7 @@ function matchSurface(configured: readonly string[], surface: string): boolean {
  *
  * Note: `external_directory`/`path` allows are capped to `defer` by the host's
  * bounded-delegation checkpoint regardless of target correctness (see
- * CONTEXT.md "Ask eligibility") — the link's value there is limited to a
+ * GLOSSARY.md "Ask eligibility") — the link's value there is limited to a
  * confident `deny`.
  *
  * @param details - The permission ask details.
@@ -408,18 +396,16 @@ export type OpenAskResult =
  * @param details - The permission ask details.
  * @param config - The validated config (surface list).
  * @param cwd - The session working directory.
- * @param driftState - Injected warn-once state, forwarded to the projection.
  * @returns The tagged reason or the complete review context.
  */
 export function openAsk(
   details: PromptPermissionDetails,
   config: Pick<AiGuardConfig, "surfaces">,
   cwd: string,
-  driftState?: DriftWarnState,
 ): OpenAskResult {
   const resolved = resolveReviewTarget(details, config);
   if ("reason" in resolved) return resolved;
-  return { ...resolved, ask: buildAskContext(details, cwd, driftState) };
+  return { ...resolved, ask: buildAskContext(details, cwd) };
 }
 
 /**
@@ -432,28 +418,11 @@ export function openAsk(
  *
  * @param details - The permission ask details (the structured `payload` is read directly).
  * @param cwd - The session working directory (policy containment boundary).
- * @param driftState - Injected warn-once state for the annotation-drift check;
- *   absent = the check stays silent (test callers that don't care about the warning).
  * @returns The structured {@link AskContext} with evidence pre-parsed into named fields.
  */
-export function buildAskContext(
-  details: PromptPermissionDetails,
-  cwd: string,
-  driftState?: DriftWarnState,
-): AskContext {
+export function buildAskContext(details: PromptPermissionDetails, cwd: string): AskContext {
   const payload = details.payload;
   const boundaryValue = details.accessIntent?.boundaryValue;
-
-  // Invariant: the verdict cache keys WITHOUT annotations (see the
-  // exclusion doctrine in review-request.ts), valid only while no
-  // annotator is registered upstream. Warn once per injected state when
-  // that assumption breaks — silent stale cache hits are the alternative.
-  if (payload.annotations.length > 0 && driftState !== undefined && !driftState.warned) {
-    driftState.warned = true;
-    warn(
-      "ask carries model annotations (an upstream annotator is registered) — annotations can change verdicts but are excluded from the verdict-cache key; cache hits may be stale until the key includes them",
-    );
-  }
 
   return {
     kind: payload.kind,

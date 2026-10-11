@@ -57,24 +57,30 @@ import { type Authorizer, getPermissionsService } from "@gotgenes/pi-permission-
 import { type LoadConfigResult } from "#src/config/config-layer.ts";
 import { LINK_NAME } from "#src/config/config-schema.ts";
 import { effectiveOverride, type SessionOverrides } from "#src/config/session-overrides.ts";
-import { type ModelCallFn, type ModelRegistryLike } from "#src/model/model-review.ts";
+import type { ModelRegistryLike } from "#src/model/model-registry.ts";
 import { NOTIFY_PREFIX, warn, type NotifyLevel } from "#src/notice.ts";
 import { buildReviewerPool } from "#src/review/build-pool.ts";
 import { type BreakerTier, CircuitBreaker } from "#src/review/circuit-breaker.ts";
+import type { ModelCallFn } from "#src/review/engines/chat/call.ts";
 import type { SessionManagerLike } from "#src/review/request/transcript-stripper.ts";
 import { type DenyRecord, type ReviewPipelineDeps } from "#src/review/review-pipeline.ts";
 import type { ReviewerEngine } from "#src/review/reviewer-engine.ts";
 import { VerdictCache } from "#src/review/verdict-cache.ts";
-import { errorMessage, isObjectRecord } from "#src/utils.ts";
-
-import type { AiGuardUiContext } from "./command/ui-context.ts";
+import type { AiGuardUiContext } from "#src/session/command/ui-context.ts";
+import {
+  attempt,
+  errorMessage,
+  isObjectRecord,
+  normalizeEmpty,
+  normalizeText,
+} from "#src/utils.ts";
 
 /**
  * Host-provided per-session services — immutable once the session starts.
  * The live event ctx is NOT here: it re-points on tree navigation and
  * lives in a separate mutable slot (see `SessionLifecycle`).
  */
-export interface SessionInputs {
+interface SessionInputs {
   /** Model registry from the session context — resolves the reviewer model. */
   registry: ModelRegistryLike;
   /**
@@ -109,7 +115,7 @@ export interface SessionSeed extends SessionInputs {
  * permissions:ready (ready only completes a missing registration; the
  * session and the registered link are never rebuilt).
  */
-export interface SessionState extends SessionInputs {
+interface SessionState extends SessionInputs {
   /** As in `SessionSeed` — the load result travels with the session. */
   load: LoadConfigResult;
   /** Per-session circuit breaker — trips on consecutive denials. */
@@ -121,7 +127,7 @@ export interface SessionState extends SessionInputs {
 }
 
 /** Injectable collaborators the lifecycle registers the pipeline with. */
-export interface SessionLifecycleDeps {
+interface SessionLifecycleDeps {
   /** The authorizer factory (the real ReviewPipeline, or a stub in tests). */
   createPipeline: (deps: ReviewPipelineDeps) => Authorizer["authorize"];
   /** Model-call function (lazy registry resolution happens per call). */
@@ -160,11 +166,9 @@ function isDuplicateAuthorizerError(error: unknown, linkName: string): boolean {
  * @returns The session id, or null when the host has none.
  */
 export function readSessionId(sessionManager: SessionManagerLike): string | null {
-  try {
-    return sessionManager.getSessionId() || null;
-  } catch {
-    return null;
-  }
+  // A host that throws here has no session id to offer — the same answer as
+  // returning an empty one.
+  return attempt(() => normalizeEmpty(sessionManager.getSessionId())) ?? null;
 }
 
 /**
@@ -228,16 +232,23 @@ export class SessionLifecycle {
    * @param level - The notification level.
    */
   #safeNotify(message: string, level?: NotifyLevel): void {
+    const target = this.#eventCtx;
+    // Before the first session there is no UI context to notify through: the
+    // reachable producers are command/panel feedback (the fail-safe start
+    // notices run after the context is assigned, so they take the branch
+    // below), and a dropped message is warned here exactly as it is there.
+    if (!target) {
+      warn(`notify had no active session, escalation message lost (${message})`);
+      return;
+    }
     try {
-      const target = this.#eventCtx;
-      if (!target) return;
       target.ui.notify(`${NOTIFY_PREFIX} ${message}`, level);
     } catch (e) {
       // The disposed-runner window is expected, but a lost escalation
       // message must not be silent: in manual mode this notify is the
       // only channel carrying the reviewer's reasoning to a human
       // about to adjudicate.
-      warn(`notify failed (${errorMessage(e)}) — escalation message lost: ${message}`);
+      warn(`notify failed (${errorMessage(e)}), escalation message lost (${message})`);
     }
   }
 
@@ -349,8 +360,8 @@ export class SessionLifecycle {
     if (!seed.load.config) {
       this.feedbackNotify(
         seed.load.outcome === "failed"
-          ? `config not applied (${formatConfigIssues(seed.load.issues)}) — running with no auto-review; fix the config and restart the session`
-          : "no config found — running with no auto-review; add one and restart the session",
+          ? `config not applied (${formatConfigIssues(seed.load.issues)}); no auto-review until you fix it and restart the session`
+          : "no config found; no auto-review until you add one and restart the session",
         "error",
       );
     }
@@ -380,7 +391,6 @@ export class SessionLifecycle {
     if (typeof id === "string" && id !== "") {
       this.#sessionId = id;
     }
-    if (this.#registered) return;
     this.#tryRegister();
   }
 
@@ -427,9 +437,18 @@ export class SessionLifecycle {
       // unresolvable endpoint throws here → caught below → fail-safe
       // session start (no auto-review), never a per-ask surprise.
       const config = session.load.config;
+      // Hard host floor: `registry.streamSimple` (pi >= 0.86) is the chat
+      // lane's only correct call path. A host below the floor lacks the
+      // method entirely; fail safe at session start with a clear cause
+      // instead of letting every ask silently defer as `call-failed`.
+      if (typeof session.registry.streamSimple !== "function") {
+        throw new Error("registry.streamSimple missing — ai-guard needs pi >= 0.86; upgrade pi");
+      }
       const engine: ReviewerEngine = buildReviewerPool(config, {
         registry: session.registry,
         modelCall: this.#deps.modelCall,
+        onSkippedFallback: (issue) =>
+          this.feedbackNotify(`fallback skipped (${issue.path}, ${issue.message})`, "warning"),
       });
       const deps: ReviewPipelineDeps = {
         config,
@@ -455,14 +474,11 @@ export class SessionLifecycle {
         // service, so a duplicate means a STALE registration survived
         // disposal (the /reload dispose glitch) and still governs asks
         // with the previous session's deps.
-        this.feedbackNotify(
-          "stale ai-guard registration survived disposal — asks are governed by the previous session's pipeline (deferring to the prompt)",
-          "error",
-        );
+        this.feedbackNotify("stale ai-guard registration still governs asks", "error");
         return;
       }
       this.feedbackNotify(
-        `failed to register the reviewer — running with no auto-review (${errorMessage(e)})`,
+        `failed to register the reviewer; no auto-review (${errorMessage(e)})`,
         "error",
       );
     }
@@ -470,15 +486,19 @@ export class SessionLifecycle {
 }
 
 /**
- * First config-load issue, truncated. Callers guarantee a non-empty list.
+ * First config-load issue, whole — the operator has to be able to read what
+ * the config failed on. Callers guarantee a non-empty list.
+ *
+ * Sanitized here as well: the text is config-file content on its way to a
+ * terminal, and this is the other place it is rendered (`warn()` is the
+ * first).
  *
  * @param issues - The load result's issues.
- * @returns A short parenthetical naming the failure.
+ * @returns A parenthetical naming the failure.
  */
 function formatConfigIssues(issues: LoadConfigResult["issues"]): string {
   const [first, ...rest] = issues;
   if (!first) return "unknown error";
-  const message = first.message.length > 100 ? `${first.message.slice(0, 97)}...` : first.message;
   const tail = rest.length > 0 ? ` (+${rest.length} more)` : "";
-  return `${first.path}: ${message}${tail}`;
+  return normalizeText(`${first.path}: ${first.message}${tail}`);
 }

@@ -26,12 +26,12 @@ import type { AuthorizerLog, AuthorizerVerdict } from "@gotgenes/pi-permission-s
 import { type DecisionRecordEntry, mapped } from "#src/audit/decision-record.ts";
 import { DECISION_EVENT } from "#src/audit/events.ts";
 import type { Mode } from "#src/config/config-schema.ts";
+import type { PreCallMachineryKind } from "#src/model/machinery-kinds.ts";
 import type { RiskLevel } from "#src/model/model-verdict.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import { isBoundedDelegationSurface } from "#src/review/request/ask.ts";
 
 import { type CircuitBreaker } from "./circuit-breaker.ts";
-import type { PreCallMachineryKind } from "./machinery-kinds.ts";
 import {
   approvalNotice,
   machineryDenyReason,
@@ -186,17 +186,20 @@ export function releaseVerdictGate(
       "info",
     );
   }
+  // resolveMapping sets the source exactly on the deny path; guessing a default
+  // here would grade a machinery deny with the content instruction ("do not
+  // retry") instead of "retry later".
+  let finalVerdict = emitted;
+  if (emitted.kind === "deny") {
+    const source = decision.instructionSource;
+    if (source === null) throw new Error("mapping decision lost its deny instruction source");
+    finalVerdict = { kind: "deny", reason: withAgentInstruction(emitted.reason, source) };
+  }
   const released: VerdictRelease = {
     record: decision.annotate
       ? mapped(record, ctx.mode, emitted.kind, decision.emittedReason)
       : record,
-    verdict:
-      emitted.kind === "deny"
-        ? {
-            kind: "deny",
-            reason: withAgentInstruction(emitted.reason, decision.instructionSource ?? "content"),
-          }
-        : emitted,
+    verdict: finalVerdict,
   };
   return { ...released, markNoticeShown: decision.markNoticeShown };
 }

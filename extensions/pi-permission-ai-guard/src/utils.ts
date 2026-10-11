@@ -27,8 +27,11 @@ const SECRET_PATTERNS: RegExp[] = [
   // keys still warrant redaction).
   /sk-ant-[a-zA-Z0-9_-]{40,}/g,
   // Generic OpenAI / "sk-" keys (require ≥20 chars after sk- to avoid matching "skip").
-  // Must come AFTER the sk-ant- pattern so Anthropic keys are caught first.
-  /sk-[a-zA-Z0-9]{20,}/g,
+  // The body allows `-`/`_` because current keys nest a scope segment
+  // (`sk-proj-…`, `sk-svcacct-…`, `sk-admin-…`); the lookbehind keeps prose
+  // like "risk-assessment-of-…" from being mangled. Must come AFTER the
+  // sk-ant- pattern so Anthropic keys are caught by their own rule first.
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
   // GitHub tokens: ghp_/gho_/ghu_/ghs_/ghr_ (exactly 36 chars per GitHub spec).
   /gh[pousr]_[A-Za-z0-9]{36}/g,
   // GitHub fine-grained PAT (github_pat_ + ≥60 chars, per Quell).
@@ -80,6 +83,26 @@ const GENERIC_ASSIGNMENT_PATTERN =
  * prompt, a notify line, or the audit log.
  */
 const FORMAT_CHARACTERS = /[\u200B-\u200D\u2060\uFEFF\u202A-\u202E\u2066-\u2069]+/gu;
+
+/**
+ * URL userinfo: the credentials in `scheme://user:pass@host` (also the
+ * bare-token form `scheme://token@host`) carry no separator a generic
+ * assignment pattern could key on, so they get their own pass. The userinfo
+ * class allows `@` and matches greedily, so a password containing one
+ * (`user:p@ssw0rd@host`) is swallowed whole instead of up to the first `@`;
+ * it cannot cross `/`, `?` or `#`, so a path like `example.com/@user` is left
+ * alone. The scheme and host survive, the credentials go away.
+ */
+const URL_USERINFO_PATTERN = /([a-z][a-z0-9+.-]*:\/\/)[^/\s?#]*@/gi;
+
+/** A run of whitespace — how every collapsed-text site splits and joins. */
+export const WHITESPACE_RUN = /\s+/g;
+
+/** Wording a provider uses when a call timed out or was cut short. */
+export const TIMEOUT_PHRASE = /timed out|timeout|aborted/i;
+
+/** The wider abort wording — see {@link classifyAbortish}. */
+const ABORTISH_PHRASE = /timeout|abort/i;
 
 /**
  * Remove invisible characters that can obscure prompt-injection payloads.
@@ -150,8 +173,28 @@ const STRIP_CONTROL_PATTERN =
  * @returns Sanitized text with zero-width and terminal control chars removed, whitespace collapsed.
  */
 export function normalizeText(text: string): string {
-  return stripZeroWidthChars(text).replace(STRIP_CONTROL_PATTERN, "").replace(/\s+/g, " ").trim();
+  return stripZeroWidthChars(text)
+    .replace(STRIP_CONTROL_PATTERN, "")
+    .replace(WHITESPACE_RUN, " ")
+    .trim();
 }
+
+/**
+ * Render an enum-style identifier as words (`resource_abuse_dos` →
+ * `resource abuse dos`).
+ *
+ * @param id - The identifier.
+ * @returns The same words, space separated.
+ */
+export function underscoresToWords(id: string): string {
+  return id.replaceAll("_", " ");
+}
+
+/**
+ * The placeholder every redaction writes. Exported so consumers can recognize
+ * redacted text — a permission rule built on one would allow a placeholder.
+ */
+export const REDACTED_PLACEHOLDER = "[REDACTED]";
 
 /**
  * Redact common secret/credential patterns from text, replacing values with
@@ -172,9 +215,10 @@ export function normalizeText(text: string): string {
 export function redactSecrets(text: string): string {
   let out = text;
   for (const pattern of SECRET_PATTERNS) {
-    out = out.replaceAll(pattern, "[REDACTED]");
+    out = out.replaceAll(pattern, REDACTED_PLACEHOLDER);
   }
-  out = out.replaceAll(GENERIC_ASSIGNMENT_PATTERN, "$1$2[REDACTED]");
+  out = out.replaceAll(GENERIC_ASSIGNMENT_PATTERN, `$1$2${REDACTED_PLACEHOLDER}`);
+  out = out.replaceAll(URL_USERINFO_PATTERN, `$1${REDACTED_PLACEHOLDER}@`);
   return out;
 }
 
@@ -222,7 +266,7 @@ export function shortHash(str: string): string {
  * @returns The value when non-empty, else `null`.
  */
 export function normalizeEmpty(value: string | undefined | null): string | null {
-  return value && value.length > 0 ? value : null;
+  return value || null;
 }
 
 /**
@@ -310,6 +354,45 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
+ * Run a best-effort side effect: a throw is swallowed.
+ *
+ * For writes the caller cannot recover from and must not be cancelled by. The
+ * notify and log sinks are injected and can throw, and by the time they run the
+ * outcome is already decided — so each write stands on its own. Never use it
+ * where a failure has to become a value: those sites return a sentinel instead
+ * (`safeStringify`, `errorMessage`, the parsers).
+ *
+ * @param run - The side effect to attempt.
+ */
+export function bestEffort(run: () => void): void {
+  try {
+    run();
+  } catch {
+    // Swallowed on purpose: the caller has already committed to its outcome.
+  }
+}
+
+/**
+ * Run a value-producing step, treating a throw as absence.
+ *
+ * Only for sites whose failure sentinel is `undefined` — an unreadable file, an
+ * unreadable field, a registry entry that vanished. Keep the `try`/`catch` when
+ * the sentinel is a specific value (`null`, `String(x)`), when a `finally` has
+ * to run, or when the failure must become a domain outcome (a refusal, a
+ * defer): those need the catch body, not a generic absence.
+ *
+ * @param run - The step to attempt.
+ * @returns Its value, or `undefined` when it threw.
+ */
+export function attempt<T>(run: () => T): T | undefined {
+  try {
+    return run();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Classify an abort-family error: a DOMException timeout/abort or an
  * error whose message names timeout/abort/aborted.
  *
@@ -323,6 +406,6 @@ export function classifyAbortish(error: unknown): "timeout" | undefined {
   ) {
     return "timeout";
   }
-  if (/timeout|abort/i.test(errorMessage(error))) return "timeout";
+  if (ABORTISH_PHRASE.test(errorMessage(error))) return "timeout";
   return undefined;
 }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  attempt,
+  bestEffort,
   encodeActionTextForPrompt,
   isObjectRecord,
   normalizeAndRedactText,
@@ -8,6 +10,31 @@ import {
   redactSecrets,
   truncateMiddle,
 } from "#src/utils.ts";
+
+describe("bestEffort / attempt", () => {
+  it("bestEffort swallows a throw and keeps going", () => {
+    let ran = 0;
+    bestEffort(() => {
+      ran++;
+      throw new Error("sink down");
+    });
+    expect(ran).toBe(1);
+  });
+
+  it("attempt returns the value, and undefined only for a throw", () => {
+    expect(attempt(() => "ok")).toBe("ok");
+    // Falsy is a value: the call sites branch on `=== undefined` / `?? null`, so
+    // an empty string or a zero must not collapse into absence.
+    expect(attempt(() => "")).toBe("");
+    expect(attempt(() => 0)).toBe(0);
+    expect(attempt(() => null)).toBeNull();
+    expect(
+      attempt(() => {
+        throw new Error("gone");
+      }),
+    ).toBeUndefined();
+  });
+});
 
 describe("normalizeText", () => {
   it("collapses whitespace to single spaces", () => {
@@ -210,6 +237,33 @@ describe("redactSecrets", () => {
     expect(redactSecrets(input)).toBe("AWS_ACCESS_KEY_ID=[REDACTED] && aws s3 ls");
   });
 
+  it("redacts URL userinfo credentials", () => {
+    // Credentials in a URL have no assignment separator, and a token-only
+    // userinfo has no colon either.
+    expect(redactSecrets("clone https://user:s3cret@example.com/repo.git")).toBe(
+      "clone https://[REDACTED]@example.com/repo.git",
+    );
+    expect(redactSecrets("remote add origin https://ghp_Token1234@github.com/x/y")).toBe(
+      "remote add origin https://[REDACTED]@github.com/x/y",
+    );
+  });
+
+  it("redacts a userinfo password that itself contains @", () => {
+    // The userinfo may hold `@` of its own; matching only to the first one
+    // would leave the rest of the password on the line.
+    expect(redactSecrets("clone https://user:p@ssw0rd@example.com/repo.git")).toBe(
+      "clone https://[REDACTED]@example.com/repo.git",
+    );
+  });
+
+  it("leaves an @ inside a URL path or query alone", () => {
+    // Userinfo ends at the first `/`, `?` or `#`, so an address later in the
+    // URL is not mistaken for credentials.
+    expect(redactSecrets("open https://example.com/?email=a@b.com")).toBe(
+      "open https://example.com/?email=a@b.com",
+    );
+  });
+
   it("redacts aws_secret_access_key assignments", () => {
     const input = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
     expect(redactSecrets(input)).toBe("aws_secret_access_key = [REDACTED]");
@@ -223,17 +277,37 @@ describe("redactSecrets", () => {
     expect(out).toContain("[REDACTED]");
   });
 
-  it("redacts a bare sk-ant- key without assignment", () => {
-    const input = "Authorization: sk-ant-api03-1234567890abcdefABCDEF1234567890abcdefABCDEF";
+  it("redacts a bare sk-ant- key without any assignment label", () => {
+    // No `key=` / `Authorization:` context: only the sk-ant- pattern itself
+    // can redact this, so the assertion is about that pattern.
+    const input =
+      "GET https://api.anthropic.com?k=sk-ant-api03-1234567890abcdefABCDEF1234567890abcdefABCDEF";
     const out = redactSecrets(input);
     expect(out).not.toContain("sk-ant-api03-1234567890abcdefABCDEF1234567890abcdefABCDEF");
     expect(out).toContain("[REDACTED]");
   });
 
-  it("redacts generic sk- keys with >=20 chars after sk-", () => {
-    const input = "curl -H 'Authorization: sk-projabcdefghijklmnop1234' https://api";
-    expect(redactSecrets(input)).toContain("[REDACTED]");
-    expect(redactSecrets(input)).not.toContain("sk-projabcdefghijklmnop1234");
+  it("redacts generic sk- keys, including the scoped OpenAI prefixes", () => {
+    // A legacy bare key plus the current `sk-proj-…` / `sk-svcacct-…` shapes:
+    // the scope hyphen used to end the match after four characters, leaving
+    // the rest of the key in cleartext.
+    for (const key of [
+      "sk-abcdefghijklmnopqrstuvwx",
+      "sk-proj-abcdefghijklmnopqrstuvwx",
+      "sk-svcacct-abcdefghijklmnopqrstuvwx",
+    ]) {
+      // No `key: value` label in the context: the assignment pattern must not
+      // be what redacts this, or the assertion proves nothing about the key
+      // pattern itself.
+      const out = redactSecrets(`GET https://api.example.com?k=${key}`);
+      expect(out).toContain("[REDACTED]");
+      expect(out).not.toContain(key);
+    }
+  });
+
+  it("does NOT redact hyphenated prose that merely contains sk-", () => {
+    const input = "risk-assessment-of-a-critical-system is the topic";
+    expect(redactSecrets(input)).toBe(input);
   });
 
   it("does NOT redact short sk- prefixes like 'skip'", () => {

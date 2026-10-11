@@ -1,5 +1,29 @@
 # pi-pigment
 
+## 0.4.1
+
+### Patch Changes
+
+- 165efc1: Fix rendering falling back to pi's plain output in sessions that spawn an in-process subagent (e.g. `@gotgenes/pi-subagents`). The SDK caches the extension factory per working directory, so a child session reuses the parent's module instance and fires `session_start`/`session_shutdown` again; the render kit lived in module state, so the child overwrote or cleared the parent's. The parent, which never re-fires `session_start`, then decorated with the child's `cwd`/config (the write channel's self-check dropped every diff) or stopped decorating at all: no syntax colors, no diff preview, no header ellipsis. The kit and the write stashes now live in the extension instance's closure.
+
+## 0.4.0
+
+### Minor Changes
+
+- 7782b9d: pi-pigment no longer registers any tool: it contributes a single `registerToolRenderer` resolver for the eight built-in names (`write`, `edit`, `bash`, `powershell`, `grep`, `ls`, `find`, `read`), so execution, the model-facing result, and name ownership stay pi's own. This ends the same-name registration that silently shadowed a later extension's tool, and drops the shell-settings rebuild (`commandPrefix`/`shellPath` flow through pi's own bash tool untouched). The write diff — which the SDK's write tool does not carry — is captured through the `tool_call`/`tool_result` hooks and emitted only when the file that landed byte-equals the supplied content.
+
+  Breaking for consumers:
+
+  - The public `pi-pigment/render-kit` entry (import module and `globalThis` publication) is removed; it existed only because pi lacked a renderer-only override.
+  - Requires `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` >= 1.0.1 < 2.0.0 (previously >= 0.85.0) — `registerToolRenderer` landed in 1.0.1.
+  - Replayed rows may now show a `Took` footer on pi 1.1.0+ (pi's recorded execution time; the render-state clock remains the fallback on 1.0.1, HTML export, and partial frames).
+
+## 0.3.3
+
+### Patch Changes
+
+- 020a1b5: Drop the duplicate expand hint on compact read headers (skill/docs): the folded body's tail already carries the shared collapse affordance, so the header suffix keeps only the line range and the sensitive warning (which the hint used to shadow on compact reads).
+
 ## 0.3.2
 
 ### Patch Changes

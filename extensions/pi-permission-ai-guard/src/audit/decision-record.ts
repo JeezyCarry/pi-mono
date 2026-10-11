@@ -25,12 +25,9 @@ import type {
 } from "@gotgenes/pi-permission-system";
 
 import type { BreakerVerdict } from "#src/config/config-schema.ts";
+import { PRE_CALL_MACHINERY_KINDS, type PreCallMachineryKind } from "#src/model/machinery-kinds.ts";
 import type { ReviewOutcome, VerdictKind } from "#src/model/model-verdict.ts";
-import {
-  PRE_CALL_MACHINERY_KINDS,
-  type PreCallMachineryKind,
-} from "#src/review/machinery-kinds.ts";
-import { normalizeAndRedactText } from "#src/utils.ts";
+import { normalizeAndRedactText, truncateMiddle } from "#src/utils.ts";
 
 /** The audit-log correlation slice every call context carries (log + request id). */
 export interface AuditCorrelation {
@@ -80,6 +77,8 @@ export interface PolicyGateFacts {
   origin: PermissionCheckResult["origin"];
   /** The matched rule pattern, or null if none. */
   matchedPattern: string | null;
+  /** The command spelling the matched rule matched, or null when the typed text decided. */
+  matchedSpelling: string | null;
 }
 
 /** A short-circuit debug record (supplementary to the decision gates). */
@@ -139,43 +138,54 @@ export interface CoverageRecord {
 export const BREAKER_DENY_REASON = "Circuit breaker tripped: too many denials this session";
 
 /**
- * Sentinel for the `rawReply` audit field when no verbatim reply is recorded.
- * The model call produced a parseable clean verdict (allow/deny); the JSON is
- * already captured in the structured verdict fields, so the raw text is
+ * Sentinel for the `rawReply` audit field when a clean verdict's raw text is
  * omitted. Distinct from null so it can't be confused with the throw-based
- * absence (timeout / call-failed / empty-reply).
+ * absence — see the field comment in {@link DecisionRecord.model}.
  */
 const CLEAN_VERDICT_OMITTED = "(clean verdict, rawReply omitted)";
 
 /**
- * Pick the rawReply value for the decision record, distinguishing the
- * three reply states (defer-with-text / defer-threw / clean verdict). See
- * the field comment in {@link DecisionRecord.model} for the rationale.
+ * Longest raw model reply the audit streams keep. The record is written to the
+ * review log, and ADR 0010 bounds what the logs accumulate; mid-truncation
+ * keeps the tail, so a defer stays replayable.
+ */
+export const MAX_RAW_REPLY_CHARS = 2000;
+
+/**
+ * Sanitize a raw model reply for the audit streams: redact once, then bound.
+ *
+ * @param text - The raw reply text.
+ * @returns The reply with credentials redacted and its length bounded.
+ */
+export function sanitizeRawReply(text: string): string {
+  return truncateMiddle(normalizeAndRedactText(text), MAX_RAW_REPLY_CHARS);
+}
+
+/**
+ * Pick the rawReply value for the decision record; the three reply states it
+ * distinguishes are documented on the field in {@link DecisionRecord.model}.
  *
  * @param reviewOutcome - The full-review call outcome.
- * @param preRedacted - The caller's already-redacted defer reply, when it
- *   redacted one for its own debug stream (the pipeline does — same text,
- *   same redaction). Redacted here only when absent.
- * @returns The rawReply value for the audit record: a sentinel for a clean verdict, the raw text
- *   for defer-with-reply, or null when the call threw.
+ * @param preSanitized - The caller's already-sanitized defer reply, when it
+ *   sanitized one for its own debug stream (the pipeline does — same text).
+ *   Sanitized here only when absent.
+ * @returns The rawReply value for the audit record: a sentinel for a clean verdict, the sanitized
+ *   text for defer-with-reply, or null when the call threw.
  */
-function rawReplyForRecord(reviewOutcome: ReviewOutcome, preRedacted?: string): string | null {
+function rawReplyForRecord(reviewOutcome: ReviewOutcome, preSanitized?: string): string | null {
   if (reviewOutcome.verdict.kind === "defer") {
-    // defer: keep the raw text when the call produced any (no-json / invalid-
-    // verdict-value / model-defer); null when it threw before replying
-    // (timeout / call-failed) or returned an empty body (empty-reply), so the
-    // absence of text stays a genuine null. The reply is redacted exactly
-    // once — by the caller when it hands `preRedacted`, here otherwise — so
-    // the audit record carries no more than the debug stream does (the
-    // model may parrot prompt content: credentials, working directory).
+    // The reply is redacted exactly once — by the caller when it hands
+    // `preSanitized`, here otherwise — so the record carries no more than the
+    // debug stream does (the model may parrot prompt content: credentials,
+    // working directory). Bounded on the same reasoning: how long a reply is
+    // belongs to the log's budget, not to the model's.
     return reviewOutcome.rawReply !== undefined
-      ? (preRedacted ?? normalizeAndRedactText(reviewOutcome.rawReply))
+      ? truncateMiddle(
+          preSanitized ?? normalizeAndRedactText(reviewOutcome.rawReply),
+          MAX_RAW_REPLY_CHARS,
+        )
       : null;
   }
-  // Clean allow/deny: the JSON parsed; verdict, reason (deny only), and
-  // riskLevel are already in the structured record fields, so the raw text is
-  // omitted via a sentinel (not null, to stay distinct from the throw-based
-  // defer absence above).
   return CLEAN_VERDICT_OMITTED;
 }
 
@@ -195,7 +205,10 @@ export const DecisionRecord = {
       verdict: "defer",
       policyState: policy.state,
       policyOrigin: policy.origin,
-      matchedPattern: policy.matchedPattern,
+      matchedPattern:
+        policy.matchedPattern === null ? null : normalizeAndRedactText(policy.matchedPattern),
+      matchedSpelling:
+        policy.matchedSpelling === null ? null : normalizeAndRedactText(policy.matchedSpelling),
       deferKind: `policy-${policy.state}`,
     };
   },
@@ -255,6 +268,26 @@ export const DecisionRecord = {
       modelCalled: false,
       verdict: "defer",
       deferKind: PRE_CALL_MACHINERY_KINDS.noTarget,
+    };
+  },
+
+  /**
+   * The pipeline threw outside its wrapped paths — nothing was judged, and
+   * the ask fell back to the human decision.
+   *
+   * @param requestId - The ask's request id.
+   * @param surface - The resolved surface, if any.
+   * @returns A decision record for the internal-error gate.
+   */
+  internalError(requestId: string, surface: string | undefined): DecisionRecordEntry {
+    return {
+      requestId,
+      surface,
+      target: undefined,
+      gate: PRE_CALL_MACHINERY_KINDS.internalError,
+      modelCalled: false,
+      verdict: "defer",
+      deferKind: PRE_CALL_MACHINERY_KINDS.internalError,
     };
   },
 
@@ -325,10 +358,10 @@ export const DecisionRecord = {
    *   as the verdict-cache key's context hash) — lets audit readers tell
    *   same-context repetitions (routine) from cross-context ones (each
    *   occurrence was a separate judgment call).
-   * @param deferReplyRedacted - The caller's pre-redacted defer reply (the
-   *   pipeline redacts one for its debug event and hands it here so the
-   *   same text is not redacted twice). Optional: without it the record
-   *   redacts the outcome's raw reply itself.
+   * @param deferReplySanitized - The caller's pre-sanitized defer reply (the
+   *   pipeline sanitizes one for its debug event and hands it here so the
+   *   same text is not processed twice). Optional: without it the record
+   *   sanitizes the outcome's raw reply itself.
    * @returns A decision record for the model gate.
    */
   model(
@@ -337,7 +370,7 @@ export const DecisionRecord = {
     strippedCount: number,
     reviewOutcome: ReviewOutcome,
     contextHash: string,
-    deferReplyRedacted?: string,
+    deferReplySanitized?: string,
   ): DecisionRecordEntry {
     return {
       ...base,
@@ -379,7 +412,7 @@ export const DecisionRecord = {
       //    and riskLevel are already in the structured fields above, so the
       //    raw text is omitted via a sentinel (NOT null, so it can't be
       //    confused with the throw-based defer absence above).
-      rawReply: rawReplyForRecord(reviewOutcome, deferReplyRedacted),
+      rawReply: rawReplyForRecord(reviewOutcome, deferReplySanitized),
     };
   },
 };

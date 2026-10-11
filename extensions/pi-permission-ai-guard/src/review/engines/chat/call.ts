@@ -1,0 +1,432 @@
+/**
+ * Chat lane model call: ask the reviewer model to assess a permission
+ * request. Chat-only by construction — the classifier lane reaches its
+ * model through the System One SDK (`classifier/client.ts`), never
+ * `ModelRegistry.complete`, so this call machinery lives with its lane
+ * instead of the lane-neutral `model/` directory.
+ *
+ * {@link reviewModel} is the single entry point — it takes a resolved
+ * {@link ModelCallContext} (model + auth + call config) and the prompt pair,
+ * runs `modelCall`, and returns a {@link ReviewOutcome}. The call
+ * machinery (AbortSignal, auth headers, maxTokens, reasoning, error
+ * classification) is private to this module.
+ *
+ * Fail-safe — all errors (timeout, unparseable reply, thrown) resolve to
+ * defer. Verdict is extracted from the model's JSON text reply; the prompt is
+ * the primary enforcement mechanism. Call failures and diagnostics land in
+ * the same audit log as the decision record (keyed by `requestId`).
+ */
+
+import {
+  type Api,
+  type AssistantMessage,
+  type Context,
+  type Model,
+  type ModelsSimpleStreamOptions,
+  type SimpleStreamOptions,
+  contentText,
+} from "@earendil-works/pi-ai";
+
+import { MAX_PROVIDER_ERROR_CHARS, emitCallFailure } from "#src/audit/call-failure.ts";
+import type { AuditCorrelation } from "#src/audit/decision-record.ts";
+import { MODEL_REPLY_EVENT } from "#src/audit/events.ts";
+import type { AiGuardConfig } from "#src/config/config-schema.ts";
+import type { ModelRegistryLike } from "#src/model/model-registry.ts";
+import type {
+  AvailabilityReason,
+  ModelCallDeferKind,
+  ReviewOutcome,
+  ReviewOutcomeDiagnostic,
+} from "#src/model/model-verdict.ts";
+import { parseTextFallback } from "#src/review/engines/chat/verdict-parser.ts";
+import { availabilityReason } from "#src/review/failure-taxonomy.ts";
+import { classifyAbortish, normalizeAndRedactText, truncateMiddle } from "#src/utils.ts";
+
+/**
+ * One model-call round trip: (model, context, options) → the full reply.
+ *
+ * The options type is the registry's own `ModelsSimpleStreamOptions` rather
+ * than a hand-written `SimpleStreamOptions`. That is the bug this seam used
+ * to carry: a simple-layer options bag (with `reasoning`) handed to a
+ * lower-level `reasoningEffort` signature is structurally assignable, so the
+ * transport silently dropped `reasoning` with no compile error. Naming the
+ * registry's parameter keeps the seam honest about which layer it feeds.
+ */
+export type ModelCallFn = (
+  model: Model<Api>,
+  context: Context,
+  options?: ModelsSimpleStreamOptions,
+) => Promise<AssistantMessage>;
+
+/**
+ * Result of the shared call scaffolding in {@link executeCall}.
+ * Success carries the raw assistant reply; failure carries the classified
+ * defer kind. Both carry latency so the public methods can populate their
+ * outcome shapes without re-timing.
+ */
+type CallResult =
+  | { ok: true; reply: AssistantMessage; deferKind?: never; latencyMs: number }
+  | {
+      ok: false;
+      reply?: never;
+      deferKind: ModelCallDeferKind;
+      latencyMs: number;
+      availabilityReason?: AvailabilityReason;
+    };
+
+/**
+ * Resolved auth fields needed to make a model call. Extracted from
+ * {@link ResolvedRequestAuth} after the engine's auth step has passed.
+ */
+export type ModelCallAuth = Pick<SimpleStreamOptions, "apiKey" | "headers">;
+
+/**
+ * Everything a model review call needs, captured once. The chat engine builds
+ * this from its resolved model + auth + call context; {@link reviewModel}
+ * consumes it.
+ */
+export interface ModelCallContext extends AuditCorrelation {
+  /** The resolved reviewer model. */
+  model: Model<Api>;
+  /** The one-shot model call (see `ModelCallFn`). */
+  modelCall: ModelCallFn;
+  /** Resolved auth fields for the call. */
+  auth: ModelCallAuth;
+  /** Reasoning level ("off" omits the option). */
+  reasoning: AiGuardConfig["reasoning"];
+  /**
+   * Reviewer answer budget. On budget-based reasoning providers (Anthropic,
+   * Bedrock) pi-ai adds the thinking budget on top, so the outbound cap can
+   * exceed this (bounded by the model's own `maxTokens`); effort-based
+   * providers use it as the cap. See README's `maxTokens` row.
+   */
+  maxTokens: number;
+  /**
+   * Sampling temperature. `undefined` omits the field, so the provider
+   * default applies — the behavior of every build that predates the key.
+   */
+  temperature: number | undefined;
+}
+
+/**
+ * Build the model completer on top of `ModelRegistry.streamSimple` — the
+ * agent's own call path (raw `Context` in, auth + transcript normalization
+ * handled inside the registry).
+ *
+ * Deliberately not `complete`, which delegates to the provider's low-level
+ * `stream` and therefore only understands `reasoningEffort`, silently
+ * discarding the simple-layer `reasoning` option and pinning every review
+ * to the provider's `off` level. And deliberately not the provider layer
+ * (`getProvider().streamSimple()`): pi-ai brands the provider input, so
+ * that call breaks whenever upstream tightens it.
+ *
+ * `registry.streamSimple` requires pi >= 0.86 (the registry facade gained it
+ * there); the peer dependency floor matches.
+ *
+ * @param getRegistry - Function returning the model registry (or undefined if unavailable).
+ * @returns A `ModelCallFn` that completes a model call via `registry.streamSimple`.
+ */
+export function createModelCall(getRegistry: () => ModelRegistryLike | undefined): ModelCallFn {
+  return async (model, context, options) => {
+    const registry = getRegistry();
+    if (!registry) {
+      throw new Error("No model registry available");
+    }
+    return registry.streamSimple(model, context, options).result();
+  };
+}
+
+/**
+ * Shared call scaffolding for {@link reviewModel}: builds the context +
+ * options, runs `modelCall`, and normalizes a thrown error into a defer
+ * reason. {@link reviewModel} owns the parser and the outcome-shape mapping;
+ * this owns the call machinery — AbortSignal, auth headers, maxTokens,
+ * reasoning, and the timeout/call-failed classification.
+ *
+ * @param ctx - The resolved model-call context.
+ * @param systemPrompt - The system prompt for the call.
+ * @param userPrompt - The user prompt for the call.
+ * @param timeoutMs - Per-call timeout in milliseconds.
+ * @param maxTokens - Maximum tokens for the model reply.
+ * @param providerRetries - Pi-ai provider-layer retries for this call
+ *   (attempt 1 passes 1; the empty-reply retry passes 0 — see reviewModel).
+ * @returns A `CallResult`: success with the reply, or failure with the classified defer reason.
+ */
+async function executeCall(
+  ctx: ModelCallContext,
+  systemPrompt: string,
+  userPrompt: string,
+  timeoutMs: number,
+  maxTokens: number,
+  providerRetries: number,
+): Promise<CallResult> {
+  // The Authorizer callback receives no ExtensionContext, so the agent's
+  // ctx.signal can't be threaded here; this timeout is the only abort source.
+  const signal = AbortSignal.timeout(timeoutMs);
+  const startedAt = Date.now();
+  try {
+    const context: Context = {
+      systemPrompt,
+      messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
+    };
+    const options: SimpleStreamOptions = {
+      signal,
+      apiKey: ctx.auth.apiKey,
+      headers: ctx.auth.headers,
+      maxTokens,
+      // Force OpenAI-compatible providers (OpenRouter/DeepSeek) to emit valid
+      // JSON via response_format, so malformed verdicts like {"allow",...}
+      // can't happen. Ignored by non-OpenAI-compatible APIs.
+      samplingParams: { response_format: { type: "json_object" } },
+      // Provider-level retry (429/408/409/5xx per pi-ai's classifier,
+      // backoff and retry-after honored) — the signal spans every attempt,
+      // so timeoutMs stays the TOTAL budget, retries included.
+      maxRetries: providerRetries,
+    };
+    // reasoning: "off" → don't pass reasoning option → pi-ai sets
+    // thinkingEnabled: false → sends thinking: {type: "disabled"}.
+    // Non-off values pass through as the reasoning level.
+    if (ctx.reasoning && ctx.reasoning !== "off") {
+      options.reasoning = ctx.reasoning;
+    }
+    // Absent, not 0: an unpinned temperature is not a choice of zero.
+    if (ctx.temperature !== undefined) {
+      options.temperature = ctx.temperature;
+    }
+    const reply = await ctx.modelCall(ctx.model, context, options);
+    return { ok: true, reply, latencyMs: Date.now() - startedAt };
+  } catch (e) {
+    const deferKind: ModelCallDeferKind = classifyAbortish(e) ?? "call-failed";
+    emitCallFailure(ctx, deferKind, e);
+    return {
+      ok: false,
+      deferKind,
+      latencyMs: Date.now() - startedAt,
+      availabilityReason: availabilityReason(e),
+    };
+  }
+}
+
+/**
+ * Review one permission request with the model and return the structured
+ * outcome. Fail-safe: timeout, unparseable reply, or thrown → defer.
+ *
+ * @param ctx - The resolved model-call context (model, auth, call config).
+ * @param systemPrompt - The system prompt for the review call.
+ * @param userPrompt - The user prompt containing the permission request.
+ * @param timeoutMs - Per-call timeout in milliseconds.
+ * @param providerRetries - Preserve the legacy single-model retry unless an alternate is
+ *   configured.
+ * @returns A `ReviewOutcome` with the parsed verdict, or a defer outcome on failure.
+ */
+export async function reviewModel(
+  ctx: ModelCallContext,
+  systemPrompt: string,
+  userPrompt: string,
+  timeoutMs: number,
+  providerRetries = 1,
+): Promise<ReviewOutcome> {
+  // Attempt 1: provider-level retries enabled (maxRetries: 1 in pi-ai —
+  // its classifier, backoff, and retry-after handling apply; the signal
+  // spans them, so timeoutMs is the total budget). Up to 2 HTTP requests
+  // live inside this one executeCall.
+  const result = await executeCall(
+    ctx,
+    systemPrompt,
+    userPrompt,
+    timeoutMs,
+    ctx.maxTokens,
+    providerRetries,
+  );
+  if (!result.ok) {
+    // Provider errors do NOT re-fire here — pi-ai's retry budget is
+    // already spent inside executeCall; this loop only owns the
+    // empty-reply retry.
+    return {
+      verdict: { kind: "defer" },
+      deferKind: result.deferKind,
+      availabilityReason: result.availabilityReason,
+      latencyMs: result.latencyMs,
+    };
+  }
+
+  // Empty-reply retry: a 200 with no usable text (e.g. an always-thinking
+  // upstream spending the whole budget on reasoning) is invisible to
+  // pi-ai's HTTP-layer retry — reviewModel owns it. Gate: only when the
+  // first attempt consumed less than half the window, so the retry always
+  // has at least half a window to run in; its budget is the REMAINING
+  // time (timeoutMs − elapsed), keeping timeoutMs a total-budget promise.
+  const retryOnEmpty = async (): Promise<CallResult> =>
+    executeCall(
+      ctx,
+      systemPrompt,
+      userPrompt,
+      // The retry's own budget: remaining window, min 1ms guard.
+      Math.max(1, timeoutMs - result.latencyMs),
+      ctx.maxTokens,
+      // No provider retry on the retry: this call IS the retry budget —
+      // a provider error here fails straight to call-failed (deliberately
+      // less robust than attempt 1, whose budget is spent).
+      0,
+    );
+
+  // Parse the verdict from the model's text reply as JSON.
+  let text = contentText(result.reply.content, "");
+  // A provider error is not model silence. With backups configured, don't
+  // repeat an auth/policy refusal before checking whether failover is safe:
+  // the adapter passes `providerRetries = 0` whenever the walk has backups,
+  // so an error reply is left to failover classification instead of getting
+  // a second local attempt.
+  if (
+    !text.trim() &&
+    result.latencyMs < timeoutMs / 2 &&
+    (providerRetries > 0 || !["error", "aborted"].includes(result.reply.stopReason))
+  ) {
+    // The first attempt's empty diagnostic goes to the debug stream here:
+    // the retry replaces the reply, and without this line the first
+    // stopReason/contentTypes would be lost (the review stream keeps the
+    // `attempts: 2` fact; this keeps the debug-level why).
+    emitEmptyReplyDiagnostic(ctx, buildEmptyReplyDiagnostic(result), result.latencyMs, 1);
+    const second = await retryOnEmpty();
+    if (second.ok) {
+      // Either attempt's usable text wins; the retry's latency
+      // accumulates into the reported latencyMs (the review's total cost).
+      const secondText = contentText(second.reply.content, "");
+      const base = {
+        ...result,
+        reply: second.reply,
+        latencyMs: result.latencyMs + second.latencyMs,
+      };
+      // A failed stream can carry partial JSON. Its stop reason, not the
+      // fragment's contents, determines whether it supplied a verdict.
+      if (["error", "aborted"].includes(second.reply.stopReason)) {
+        return classifyEmptyReply(ctx, base, 2);
+      }
+      if (secondText.trim()) {
+        return { ...parseTextFallback(secondText, base.latencyMs), attempts: 2 };
+      }
+      return classifyEmptyReply(ctx, base, 2);
+    }
+    // The retry itself failed (provider error on a budgetless attempt, or
+    // its remaining-window timeout): classify from the SECOND failure —
+    // it is the freshest failure and the one the operator waited on.
+    return {
+      verdict: { kind: "defer" },
+      deferKind: second.deferKind,
+      availabilityReason: second.availabilityReason,
+      latencyMs: result.latencyMs + second.latencyMs,
+      attempts: 2,
+    };
+  }
+  // A failed provider can return partial text resembling a valid verdict.
+  // Never treat it as an authorization when the transport said "error".
+  if (["error", "aborted"].includes(result.reply.stopReason)) {
+    return classifyEmptyReply(ctx, result);
+  }
+  if (text.trim()) {
+    return parseTextFallback(text, result.latencyMs);
+  }
+  // Empty-response diagnostic: log stopReason/contentTypes/errorMessage to
+  // distinguish provider errors from genuine empty content.
+  //
+  // AbortSignal.timeout() does NOT throw — the Anthropic provider catches
+  // the abort, resolves the stream with an empty AssistantMessage whose
+  // stopReason is "aborted". Detect that here and classify as "timeout"
+  // instead of "empty-reply" so the two root causes are distinguishable in
+  // telemetry. Local-timeout-classified outcomes never enter the retry
+  // loop (their latency already consumed the whole window); a server-side
+  // early abort can still retry — most of the window is unspent.
+  return classifyEmptyReply(ctx, result);
+}
+
+/**
+ * Build the empty-reply diagnostic — the why behind a textless reply
+ * (stopReason, content types, error message). Pure: no logging.
+ *
+ * @param result - The successful call whose reply carried no text.
+ * @returns The diagnostic payload for the decision record.
+ */
+function buildEmptyReplyDiagnostic(result: CallResult & { ok: true }): ReviewOutcomeDiagnostic {
+  return {
+    stopReason: result.reply.stopReason ?? null,
+    rawStopReason: result.reply.rawStopReason ?? null,
+    errorMessage: result.reply.errorMessage
+      ? truncateMiddle(normalizeAndRedactText(result.reply.errorMessage), MAX_PROVIDER_ERROR_CHARS)
+      : null,
+    contentTypes: result.reply.content.map((b) => b.type),
+  };
+}
+
+/**
+ * Emit an empty-reply diagnostic to the debug stream. Sink only: emits, returns nothing.
+ *
+ * @param ctx - The log + request id (a slice of either call context).
+ * @param diagnostic - The payload from {@link buildEmptyReplyDiagnostic}.
+ * @param latencyMs - The call latency to record.
+ * @param attempts - How many executeCall attempts produced this reply.
+ */
+function emitEmptyReplyDiagnostic(
+  ctx: AuditCorrelation,
+  diagnostic: ReviewOutcomeDiagnostic,
+  latencyMs: number,
+  attempts?: number,
+): void {
+  ctx.log.debug(MODEL_REPLY_EVENT, {
+    requestId: ctx.requestId,
+    diagnostic: true,
+    ...diagnostic,
+    latencyMs,
+    ...(attempts === undefined ? {} : { attempts }),
+  });
+}
+
+/**
+ * Classify an empty (no usable text) reply into the diagnostic defer
+ * outcome: timeout when the stream was aborted, empty-reply otherwise.
+ * Emits the debug diagnostic via {@link emitEmptyReplyDiagnostic}; shared by
+ * the first attempt and the empty-reply retry.
+ *
+ * @param ctx - The resolved model-call context (log target).
+ * @param result - The successful call whose reply carried no text.
+ * @param attempts - How many executeCall attempts produced this outcome.
+ * @returns The defer outcome with the empty-reply diagnostic attached.
+ */
+function classifyEmptyReply(
+  ctx: ModelCallContext,
+  result: CallResult & { ok: true },
+  attempts?: number,
+): ReviewOutcome {
+  const stopReason = result.reply.stopReason ?? null;
+  // Taxonomy of the textless reply, from the stop reason alone:
+  // - "aborted"  → timeout (the abort signal fired; pi-ai resolves the
+  //   stream instead of throwing)
+  // - "error"    → call-failed (a provider error — rate limit, proxy/WAF
+  //   block — resolved as a response rather than thrown; same bucket as
+  //   the thrown path in executeCall, so "call-failed" reads as one
+  //   thing: infrastructure, not model behavior)
+  // - anything else → empty-reply (the model completed and chose to say
+  //   nothing — the genuine model-silence pathology the empty-reply
+  //   retry exists for)
+  const deferKind: ModelCallDeferKind =
+    stopReason === "aborted" ? "timeout" : stopReason === "error" ? "call-failed" : "empty-reply";
+
+  const diagnostic = buildEmptyReplyDiagnostic(result);
+  emitEmptyReplyDiagnostic(ctx, diagnostic, result.latencyMs, attempts);
+
+  return {
+    verdict: { kind: "defer" },
+    deferKind,
+    availabilityReason:
+      stopReason === "aborted"
+        ? "timeout"
+        : stopReason === "error"
+          ? availabilityReason(result.reply.errorMessage)
+          : undefined,
+    latencyMs: result.latencyMs,
+    ...(attempts === undefined ? {} : { attempts }),
+    // Ride the outcome into the decision record: the review log itself
+    // then shows WHY the reply was empty, independent of the permission
+    // system's debug-log toggle.
+    diagnostic,
+  };
+}

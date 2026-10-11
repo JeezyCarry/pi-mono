@@ -1,6 +1,6 @@
 {
   "name": "pi-permission-ai-guard",
-  "version": "0.13.0",
+  "version": "0.14.1",
   "description": "Token-optimized LLM permission reviewer — a pi-permission-system Authorizer chain link",
   "keywords": [
     "access-control",
@@ -51,10 +51,10 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.99.1",
-    "@earendil-works/pi-coding-agent": "^0.99.1",
-    "@earendil-works/pi-tui": "^0.99.1",
-    "@gotgenes/pi-permission-system": "^36.0.0",
+    "@earendil-works/pi-ai": "^1.1.0",
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@earendil-works/pi-tui": "^1.1.0",
+    "@gotgenes/pi-permission-system": "^40.1.2",
     "@tsconfig/node22": "catalog:",
     "@types/node": "catalog:",
     "memfs": "catalog:",
@@ -62,10 +62,10 @@
     "vitest": "catalog:"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.84.0",
-    "@earendil-works/pi-coding-agent": ">=0.84.0",
-    "@earendil-works/pi-tui": ">=0.84.0",
-    "@gotgenes/pi-permission-system": ">=27.1.1 <37.0.0"
+    "@earendil-works/pi-ai": ">=0.86.0",
+    "@earendil-works/pi-coding-agent": ">=0.86.0",
+    "@earendil-works/pi-tui": ">=0.86.0",
+    "@gotgenes/pi-permission-system": ">=27.1.1 <41.0.0"
   },
   "engines": {
     "node": ">=22"

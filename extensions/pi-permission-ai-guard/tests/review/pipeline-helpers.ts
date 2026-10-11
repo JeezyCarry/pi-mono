@@ -13,15 +13,20 @@ import type {
   SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { PermissionCheckResult, PermissionQuery } from "@gotgenes/pi-permission-system";
+import type {
+  Authorizer,
+  PermissionCheckResult,
+  PermissionQuery,
+} from "@gotgenes/pi-permission-system";
 import { expect } from "vitest";
 
 import { type AiGuardConfig, configSchema } from "#src/config/config-schema.ts";
-import type { ModelCallFn, ModelRegistryLike } from "#src/model/model-review.ts";
+import type { ModelRegistryLike } from "#src/model/model-registry.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import { buildReviewerPool } from "#src/review/build-pool.ts";
 import { CircuitBreaker } from "#src/review/circuit-breaker.ts";
-import type { ReviewPipelineDeps, createReviewPipeline } from "#src/review/review-pipeline.ts";
+import type { ModelCallFn } from "#src/review/engines/chat/call.ts";
+import type { ReviewPipelineDeps } from "#src/review/review-pipeline.ts";
 import type { ReviewerEngine } from "#src/review/reviewer-engine.ts";
 import { VerdictCache } from "#src/review/verdict-cache.ts";
 import { withAgentInstruction } from "#src/review/verdict-copy.ts";
@@ -33,34 +38,49 @@ export const baseConfig: AiGuardConfig = configSchema.parse({
   cache: { maxEntries: 0 },
 });
 
+/**
+ * A `complete` stand-in returning a complete assistant reply.
+ *
+ * @param replyContent - The reply's content blocks.
+ * @param overrides - Reply fields to replace (e.g. an aborted stop reason).
+ * @returns The fake `complete` implementation.
+ */
 export function makeFakeCompleteSimple(
   replyContent: AssistantMessage["content"],
+  overrides: Partial<AssistantMessage> = {},
 ): (
   _model?: Model<Api>,
   _context?: Context,
   _options?: SimpleStreamOptions,
 ) => Promise<AssistantMessage> {
-  return async (): Promise<AssistantMessage> =>
-    ({
-      role: "assistant",
-      content: replyContent,
-      stopReason: "toolUse",
-      api: "anthropic-messages",
-      provider: "test",
-      model: "test-model",
-      timestamp: Date.now(),
-      usage: {
-        input: 100,
-        output: 50,
-        cacheRead: 0,
-        cacheWrite: 0,
-        total: 150,
-        totalTokens: 150,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      },
-    }) as AssistantMessage;
+  return async (): Promise<AssistantMessage> => ({
+    role: "assistant",
+    content: replyContent,
+    stopReason: "toolUse",
+    api: "anthropic-messages",
+    provider: "test",
+    model: "test-model",
+    timestamp: Date.now(),
+    usage: {
+      input: 100,
+      output: 50,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 150,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    ...overrides,
+  });
 }
 
+/**
+ * A session-manager fragment over loose entries. The cast is the point: the
+ * stripper's contract is tolerance, so the suites hand it entries a
+ * `SessionEntry` type would reject.
+ *
+ * @param entries - The session entries to serve.
+ * @returns The session-manager fragment.
+ */
 export function makeSessionManagerWith(entries: unknown[]) {
   return {
     getSessionId: () => "s1",
@@ -114,20 +134,38 @@ export interface RecordedLog {
   data: Record<string, unknown>;
 }
 
+/** A review/debug log pair that only records: each sink forwards its call. */
+export interface RecordingLogSink {
+  review: (event: string, details: Record<string, unknown>) => void;
+  debug: (event: string, details: Record<string, unknown>) => void;
+}
+
+/** A {@link RecordingLogSink} plus the emissions it collected, keyed by sink. */
+export interface RecordingLog {
+  log: RecordingLogSink;
+  reviewCalls: RecordedLog[];
+  debugCalls: RecordedLog[];
+}
+
+/** One merged emission (either sink), in call order. */
+export interface MergedLogEvent {
+  event: string;
+  details: Record<string, unknown>;
+}
+
+/** A {@link RecordingLogSink} plus every emission, merged in call order. */
+export interface MergedRecordingLog {
+  log: RecordingLogSink;
+  events: MergedLogEvent[];
+}
+
 /**
  * A log pair that records every review/debug emission for assertions — the
  * once-per-test collector boilerplate collapsed to one call.
  *
  * @returns The recording log and its collected review/debug emissions.
  */
-export function makeRecordingLog(): {
-  log: {
-    review: (event: string, data: Record<string, unknown>) => void;
-    debug: (event: string, data: Record<string, unknown>) => void;
-  };
-  reviewCalls: RecordedLog[];
-  debugCalls: RecordedLog[];
-} {
+export function makeRecordingLog(): RecordingLog {
   const reviewCalls: RecordedLog[] = [];
   const debugCalls: RecordedLog[] = [];
   const log = {
@@ -135,6 +173,22 @@ export function makeRecordingLog(): {
     debug: (event: string, data: Record<string, unknown>) => debugCalls.push({ event, data }),
   };
   return { log, reviewCalls, debugCalls };
+}
+
+/**
+ * A log pair that funnels every review/debug emission into ONE ordered
+ * `events` array — for assertions that care about the sequence across both
+ * sinks ({@link makeRecordingLog} splits them by sink instead).
+ *
+ * @returns The log and its merged emissions.
+ */
+export function makeMergedRecordingLog(): MergedRecordingLog {
+  const events: MergedLogEvent[] = [];
+  const log = {
+    review: (event: string, details: Record<string, unknown>) => events.push({ event, details }),
+    debug: (event: string, details: Record<string, unknown>) => events.push({ event, details }),
+  };
+  return { events, log };
 }
 
 /**
@@ -169,7 +223,7 @@ export function makeNotifySpy(): {
  *   (default `"content"`; `"machinery"` for reviewer-failure denies).
  */
 export async function expectVerdict(
-  authorize: ReturnType<typeof createReviewPipeline>,
+  authorize: Authorizer["authorize"],
   details: Record<string, unknown>,
   expected: { kind: string; reason?: string },
   state: PermissionCheckResult["state"] = "ask",
@@ -199,11 +253,13 @@ export const defaultRegistry = (
   overrides: Partial<{
     find: ModelRegistryLike["find"];
     getApiKeyAndHeaders: ModelRegistryLike["getApiKeyAndHeaders"];
+    classify: ModelRegistryLike["classify"];
+    findOfType: ModelRegistryLike["findOfType"];
   }> = {},
 ): ModelRegistryLike => ({
   // Unit tests drive the pipeline through the `modelCall` seam, never
-  // the registry — `complete` is unreachable here.
-  complete: () => {
+  // the registry — `streamSimple` is unreachable here.
+  streamSimple: () => {
     throw new Error("unreachable in unit tests");
   },
   find: () => fakeModel,
@@ -215,7 +271,7 @@ export const defaultRegistry = (
  * Default pooled engine: registry + modelCall wrapped behind the engine seam.
  *
  * @param opts - Optional `modelCall`/`registry` overrides for fixtures.
- * @returns A pooled reviewer engine (single LLM endpoint, no fallbacks).
+ * @returns A pooled reviewer engine (single chat endpoint, no fallbacks).
  */
 export const makeEngine = (
   opts: { modelCall?: ModelCallFn; registry?: ModelRegistryLike } = {},

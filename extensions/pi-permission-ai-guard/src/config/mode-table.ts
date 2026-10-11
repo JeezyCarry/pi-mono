@@ -6,7 +6,7 @@
  *
  * Deliberate exceptions live OUTSIDE the table: the Mode union itself
  * (config-schema — it is the config contract), and the curated human prose
- * in README/CONTEXT and the JSON schema description (different readers —
+ * in README/GLOSSARY and the JSON schema description (different readers —
  * generated prose would serve them worse). Those stay hand-edited; the
  * config-surface drift test pins the mechanical pairs.
  */
@@ -164,7 +164,7 @@ export const MODE_BLURBS: Readonly<Record<string, string>> = Object.fromEntries(
 );
 
 /** The generated shortcut description's cycle part ("default → lenient → permissive"). */
-export const CYCLE_DESCRIPTION: string = CYCLE_MODE_VALUES.join(" → ");
+export const CYCLE_DESCRIPTION = CYCLE_MODE_VALUES.join(" → ");
 
 /**
  * A ladder-owned config surprise warning. Deliberately NOT the loader's

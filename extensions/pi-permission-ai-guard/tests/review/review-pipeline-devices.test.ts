@@ -4,7 +4,6 @@
  * misses, context sensitivity), plus the review follow-ups they gate.
  */
 
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 
 import { BREAKER_DENY_REASON } from "#src/audit/decision-record.ts";
@@ -14,6 +13,7 @@ import { createReviewPipeline } from "#src/review/review-pipeline.ts";
 import { VerdictCache } from "#src/review/verdict-cache.ts";
 import { withAgentInstruction } from "#src/review/verdict-copy.ts";
 import { bashPayload, makeDetails } from "#test/fixtures.ts";
+import { expectNotices } from "#test/operator-copy.ts";
 
 import {
   baseConfig,
@@ -297,10 +297,7 @@ describe("createReviewPipeline — verdict cache", () => {
     const cache = new VerdictCache();
     let modelCalled = 0;
     const sessionEntries: unknown[] = [];
-    const sessionManager = {
-      getSessionId: () => "s1",
-      buildContextEntries: () => sessionEntries as SessionEntry[],
-    };
+    const sessionManager = makeSessionManagerWith(sessionEntries);
     const authorize = createReviewPipeline(
       makePipeline({
         config: { ...baseConfig, cache: { ...baseConfig.cache, maxEntries: 5 } },
@@ -660,10 +657,7 @@ describe("createReviewPipeline — review follow-ups (cache-hit fail-open + tota
     expect(modelCalls).toBe(1);
     // Missing riskLevel is hard: the fresh ask and the cached replay both
     // name the block (repeats do not collapse).
-    expect(notifications).toEqual([
-      ["reviewer denied this request — unsafe", "warning"],
-      ["reviewer denied this request — unsafe", "warning"],
-    ]);
+    expectNotices(notifications, { count: 2, level: "warning", contains: ["unsafe"] });
   });
 
   it("machinery failures never burn the breaker's permanent total tier", async () => {

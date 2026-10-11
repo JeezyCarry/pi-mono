@@ -14,8 +14,8 @@
  */
 
 import type { AuditCorrelation } from "#src/audit/decision-record.ts";
+import type { EngineMachineryKind } from "#src/model/machinery-kinds.ts";
 import type { ReviewOutcome } from "#src/model/model-verdict.ts";
-import type { EngineMachineryKind } from "#src/review/machinery-kinds.ts";
 import type { ReviewRequestContext } from "#src/review/request/review-request.ts";
 import type { StrippedTranscript } from "#src/review/request/transcript-stripper.ts";
 
@@ -31,11 +31,14 @@ export interface EngineCallContext extends AuditCorrelation {
 export interface EngineReviewResult {
   /** The review outcome for the shared downstream. */
   outcome: ReviewOutcome;
-  /** Audit identity, e.g. "cpa/lite" or "typesafe/jev-1.13". */
+  /** Audit identity, e.g. "anthropic/claude-haiku-4-5" or "typesafe/jev-1.13". */
   modelId: string;
   /** False for fallback verdicts: retry the primary on the next ask. */
   cacheable?: boolean;
 }
+
+/** What an engine attempt produced: a review result, or a pre-call machinery failure. */
+export type EngineAttemptResult = EngineReviewResult | EngineMachineryFailure;
 
 /** A reviewer backend: ask in, ReviewOutcome out. */
 export interface ReviewerEngine {
@@ -44,7 +47,7 @@ export interface ReviewerEngine {
    * Pre-call failures (the review never opened) return a tagged
    * {@link EngineMachineryFailure} for the pipeline's machinery lane.
    */
-  review(ctx: EngineCallContext): Promise<EngineReviewResult | EngineMachineryFailure>;
+  review(ctx: EngineCallContext): Promise<EngineAttemptResult>;
 }
 
 /**
@@ -55,7 +58,7 @@ export interface ReviewerEngine {
 export interface EngineMachineryFailure {
   ok: false;
   kind: EngineMachineryKind;
-  /** Audit identity of the engine that failed (e.g. "cpa/lite"). */
+  /** Audit identity of the engine that failed (e.g. "anthropic/claude-haiku-4-5"). */
   modelId: string;
   /**
    * Sanitized detail for the audit record — the auth error text.
@@ -71,8 +74,6 @@ export interface EngineMachineryFailure {
  * @param result - The engine result to narrow.
  * @returns True when the result is a machinery failure.
  */
-export function isMachineryFailure(
-  result: EngineReviewResult | EngineMachineryFailure,
-): result is EngineMachineryFailure {
+export function isMachineryFailure(result: EngineAttemptResult): result is EngineMachineryFailure {
   return typeof result === "object" && result !== null && "ok" in result && result.ok === false;
 }

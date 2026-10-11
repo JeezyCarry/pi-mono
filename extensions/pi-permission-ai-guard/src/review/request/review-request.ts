@@ -41,11 +41,11 @@ type KeyedAskFields =
   | "workingDirectory";
 
 /** Upstream request facts the cache identity keys on (via the material below). */
-type KeyedRequestFacts = "value" | "commandContext" | "executedUnit";
+type KeyedRequestFacts = "value" | "commandContext" | "executedUnit" | "matchedSpelling";
 
 /** Every other AskContext field — excluded by doctrine, one entry each. */
 export const EXCLUDED_ASK_FIELDS: Record<Exclude<keyof AskContext, KeyedAskFields>, string> = {
-  annotations: "model advisories — excluded while assumed absent; build-side warn trips when not",
+  annotations: "model advisories — not rendered, not keyed",
 };
 
 /** Every other upstream request fact — excluded by doctrine, one entry each. */
@@ -72,6 +72,11 @@ export const EXCLUDED_REQUEST_FACTS: Record<
  * `matchedPattern`, `invokedToolName`, `requester`, `annotations`, `toolName`,
  * and `surface`.
  *
+ * `matchedPattern` is excluded and `matchedSpelling` is not: the pattern is a
+ * rule name the prompt teaches the model to ignore, while the spelling is the
+ * gate's own resolution of the typed command (a relative path argument matched
+ * as its absolute spelling), which changes what the action targets.
+ *
  * `surface` is a gate label, not a decision input: the verdict is driven by
  * the command content, `executedUnit`, and `commandContext` (all in the key),
  * and the SAFETY_RULES instruct the model to treat administrative labels as
@@ -94,10 +99,11 @@ export function reviewRequestCacheMaterial(request: ReviewRequestContext): strin
     target: normalizeEmpty(request.target),
     fullCommand: normalizeEmpty(ask.fullCommand),
     flaggedElements: ask.flaggedElements.map(normalizeEmpty),
-    commandContext: ask.request.commandContext,
+    commandContext: normalizeEmpty(ask.request.commandContext),
     executedUnit: normalizeEmpty(ask.request.executedUnit),
+    matchedSpelling: normalizeEmpty(ask.request.matchedSpelling),
     canonicalBoundary: normalizeEmpty(ask.canonicalBoundary),
-    workingDirectory: ask.workingDirectory,
+    workingDirectory: normalizeEmpty(ask.workingDirectory),
     readPath: normalizeEmpty(ask.readPath),
     resolvedAlias: normalizeEmpty(ask.resolvedAlias),
     toolInputPreview: normalizeEmpty(ask.toolInputPreview),
