@@ -6,9 +6,7 @@
 
 import type {
   AgentToolResult,
-  ExtensionAPI,
   ToolDefinition,
-  ToolRendererResolver,
   ToolRenderResultOptions,
   ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
@@ -36,6 +34,7 @@ import type { RenderContext, ToolServices } from "#src/render/tool-services.ts";
 import { clearHighlightCacheForTest } from "#src/theme/highlight.ts";
 import type { RenderTheme } from "#src/theme/scheme.ts";
 import type { ThemeSelection } from "#src/theme/theme-resolver.ts";
+import { DECORATABLE_NAMES, makeTestPi, type MockEventHandler } from "#test/host.ts";
 
 /**
  * Fetch one registered tool by name — the suite's standard guard form.
@@ -472,31 +471,6 @@ export async function registerTools(
 }
 
 /**
- * The API surface driveSession's mock actually implements — declared with
- * precise member shapes so a name or signature drift fails at compile
- * time. The crossing into the SDK's full ExtensionAPI (a big overloaded
- * interface the mock never drives) narrows to one boundary cast.
- */
-interface MockPiApi {
-  on: (event: string, handler: MockEventHandler) => void;
-  // RegisteredTool is the extension's own registration shape (see above).
-  registerTool: (tool: RegisteredTool) => void;
-  // The resolver registration the extension makes once at load — captured
-  // so driveSession can drive it per tool name (the SDK runs resolvers in
-  // load order at render time; the harness calls the one resolver directly).
-  registerToolRenderer: (resolver: ToolRendererResolver) => void;
-  // Mirrors pi's merged registry entry shape the yield check reads
-  // (name + sourceInfo.source): foreign tools staged by a suite carry
-  // their owner's source, the eight builtins source "builtin".
-  getAllTools: () => Array<{ name: string; sourceInfo: { source: string } }>;
-  getCommands: () => Array<{ name: string }>;
-  registerCommand: (name: string, options: unknown) => void;
-}
-
-/** A captured non-session-start event handler (tool_call/tool_result). */
-type MockEventHandler = (event: Record<string, unknown>, ctx?: unknown) => unknown;
-
-/**
  * The session-start context slice the extension reads. `isProjectTrusted`
  * mirrors pi's ExtensionContext; the rest of pi's context surface is
  * neither mocked nor driven here.
@@ -540,9 +514,6 @@ function renderersOf(definition: ToolDefinition): ToolRenderers {
   };
 }
 
-/** The eight decoratable names, in the order the resolver is driven. */
-const TOOL_ORDER = ["write", "edit", "bash", "powershell", "grep", "ls", "find", "read"] as const;
-
 /**
  * Fire the extension's session_start like pi does, then collect the tools
  * the resolver decorates. Without `env`, the session reads the REAL
@@ -564,58 +535,11 @@ async function driveSession(
   _sharedRegistry?: RegisteredTool[],
   foreignCommands: string[] = [],
 ): Promise<RegisteredTool[]> {
-  // A prior fire's registrations never exist now (the extension registers
-  // no tools), so the mock's registry holds only foreign names + builtins.
-  let sessionStart: ((event: unknown, ctx: MockSessionContext) => void | Promise<void>) | undefined;
-  // Non-session-start handlers (the write-details channel's tool_call/
-  // tool_result pair) — captured so the execute renderer below can fire
-  // them the way pi's runner does.
-  const handlers = new Map<string, MockEventHandler[]>();
-  // The resolver the extension registers at load.
-  let toolRendererResolver: ToolRendererResolver | undefined;
-  const api: MockPiApi = {
-    on: (event: string, handler: MockEventHandler) => {
-      if (event === "session_start") {
-        sessionStart = handler as (event: unknown, ctx: MockSessionContext) => void | Promise<void>;
-        return;
-      }
-      const list = handlers.get(event) ?? [];
-      list.push(handler);
-      handlers.set(event, list);
-    },
-    registerTool: () => {},
-    registerToolRenderer: (resolver: ToolRendererResolver) => {
-      toolRendererResolver = resolver;
-    },
-    // The presence surfaces the fff probe reads (commands register at
-    // module load, before any session_start — the order-safe signal).
-    // sourceInfo mirrors real pi: foreign tools under the neighbor's
-    // path, the eight builtins with source builtin — a builtin name alone
-    // never triggers a skip (the reverse assertion pins this).
-    getAllTools: () => [
-      ...foreignTools.map((name) => ({
-        name,
-        // Real pi stamps extension TOOLS with source "local"/"temporary"
-        // (loader createExtension); "extension" is the COMMANDS mapping
-        // (agent-session getCommands). claimedByOther only reads
-        // !== "builtin", so either value exercises it — "local" is the
-        // faithful one.
-        sourceInfo: { source: "local", path: "/foreign-extension" },
-      })),
-      ...TOOL_ORDER.map((name) => ({
-        name,
-        sourceInfo: { source: "builtin", path: `<builtin:${name}>` },
-      })),
-    ],
-    // The /pigment command registers at factory time (before any
-    // session_start).
-    getCommands: () => [
-      { name: "pigment", sourceInfo: { source: "extension", path: "/pi-pigment" } },
-      ...foreignCommands.map((name) => ({ name })),
-    ],
-    registerCommand: (_name: string, _options: unknown) => {},
-  };
-  await createPigmentExtension(api as unknown as ExtensionAPI);
+  // One shared host adapter for every suite: it captures what the
+  // extension registers and replays pi's events; the registry holds only
+  // foreign names + the builtins (the extension registers no tools).
+  const host = makeTestPi({ foreignTools, foreignCommands });
+  await createPigmentExtension(host.api);
   const ctx: MockSessionContext = {
     cwd: env.cwd ?? defaultCwd ?? process.cwd(),
     // pi resolves trust before its first session_start; default to the
@@ -623,7 +547,7 @@ async function driveSession(
     // stages the untrusted one.
     isProjectTrusted: () => env.projectTrusted ?? true,
   };
-  await sessionStart?.({ type: "session_start", reason: "startup" }, ctx);
+  await host.fire("session_start", { type: "session_start", reason: "startup" }, ctx);
 
   // Rebuild each decoratable tool the resolver claims: the SDK definition
   // (execute + metadata) overlaid with the resolver's renderer triple. A
@@ -631,8 +555,9 @@ async function driveSession(
   // reference) or a missing resolver drops the name — the same "not
   // decorated" outcome the old registration path produced.
   const resolved: RegisteredTool[] = [];
+  const toolRendererResolver = host.resolver();
   if (toolRendererResolver !== undefined) {
-    for (const name of TOOL_ORDER) {
+    for (const name of DECORATABLE_NAMES) {
       const definition = BUILTIN_DEFINITIONS[name](ctx.cwd);
       const builtIn = renderersOf(definition);
       const renderers = toolRendererResolver(name, () => builtIn);
@@ -643,7 +568,9 @@ async function driveSession(
   // Round-trip each tool's execute through the captured tool_call/
   // tool_result handlers — the execution-side seam pi's runner owns in
   // production (the write-details channel depends on it).
-  return resolved.map((tool) => wrapExecuteWithHooks(tool, handlers, ctx));
+  return resolved.map((tool) =>
+    wrapExecuteWithHooks(tool, host.handlers("tool_call"), host.handlers("tool_result"), ctx),
+  );
 }
 
 /**
@@ -653,17 +580,17 @@ async function driveSession(
  * merge order (runner.js emitToolResult).
  *
  * @param tool - The registered tool.
- * @param handlers - The captured event handlers by event name.
+ * @param callHandlers - The captured `tool_call` handlers, in order.
+ * @param resultHandlers - The captured `tool_result` handlers, in order.
  * @param ctx - The session context handed to handlers.
  * @returns The tool with the wrapped execute.
  */
 function wrapExecuteWithHooks(
   tool: RegisteredTool,
-  handlers: Map<string, MockEventHandler[]>,
+  callHandlers: readonly MockEventHandler[],
+  resultHandlers: readonly MockEventHandler[],
   ctx: MockSessionContext,
 ): RegisteredTool {
-  const callHandlers = handlers.get("tool_call") ?? [];
-  const resultHandlers = handlers.get("tool_result") ?? [];
   if (callHandlers.length === 0 && resultHandlers.length === 0) return tool;
   const inner = tool.execute;
   return {

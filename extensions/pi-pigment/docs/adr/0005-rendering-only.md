@@ -36,7 +36,9 @@ The resolver reads the live registry (`getAllTools()`) per call, so — unlike t
 5. **Name in `disabledTools`** → `next()`.
 6. Otherwise build the renderer triple over `next()`.
 
-Rules 1–5 live in one function, `gate.shouldYield`, read by both the resolver and the write-details channel, so the two can never disagree about whether a name is ours. The no-kit fail-safe (4) is evaluated first at the call site (it holds no policy), and every yield rule returns `next()`, so their order is stated for reasoning, not observable — the outcome is identical whichever gate fires.
+Rules 1–5 live in one function, `gate.kitToDecorate` (the no-kit fail-safe, the registry snapshot, and the ordered rules together), read by both the resolver and the write-details channel, so the two can never disagree about whether a name is ours or how the registry is read. `kitToDecorate` returns the kit to decorate with, or `undefined` to yield; the rules' order is stated for reasoning, not observable — the outcome is identical whichever gate fires.
+
+The kit is scoped to the **extension instance**, not the process. The SDK caches the extension factory by cwd (`loader.js`), so a pi-subagents child session reuses the parent's module instance and fires `session_start` again in-process; module-level kit state would let the child overwrite or clear the parent's — and the parent, which never re-fires `session_start`, would then decorate with the wrong session's config (dropping every write diff) or stop decorating entirely. Each `createPigmentExtension` call owns its kit in its own closure: that function is the only writer (the `session_start` build, plus a `session_shutdown` clear), and readers receive only a `KitGetter`.
 
 The yield can only recognize neighbors that **register a tool name** — a neighbor that registers only a renderer is invisible to `getAllTools()`. It is also order-independent now, since the registry is read per call rather than snapshotted at startup.
 

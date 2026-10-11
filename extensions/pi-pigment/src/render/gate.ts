@@ -8,16 +8,19 @@
  *   tool; yielding is the documented default.
  * - `fffPresent`: the pi-fff compatibility signal, kept as an order-safe fast path (FFF's `/fff-mode`
  *   command registers at module load, before any `session_start`).
- * - `shouldYield`: the ordered decision (ADR 0005) both the resolver and the write-details channel
- *   read, so the two can never disagree about whether a name is ours.
+ * - `kitToDecorate`: the full yield protocol — the no-kit fail-safe, the registry snapshot, and the
+ *   ordered rules — in one function. The resolver and the write-details channel call only this, so
+ *   the protocol cannot drift between them.
  *
- * All are pure functions over the registry snapshot the caller reads and
- * the current kit; the callers (resolver.ts, write-details-channel.ts) take
- * the snapshot per tool invocation, which sees the full registry —
- * including names that registered after our own `session_start`.
+ * `shouldYield` is the ordered policy inside `kitToDecorate` (private: one entry point keeps the
+ * interface narrower than the implementation).
+ *
+ * The registry snapshot is taken per tool invocation, which sees the full
+ * registry — including names that registered after our own
+ * `session_start`.
  */
 
-import type { SlashCommandInfo, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SlashCommandInfo, ToolInfo } from "@earendil-works/pi-coding-agent";
 
 import type { RenderKit } from "./kit.ts";
 
@@ -64,15 +67,15 @@ function claimedByOther(tools: readonly ToolInfo[], name: string): boolean {
 }
 
 /**
- * Whether pi-pigment must yield `name` to pi's own renderers — the one home
- * for the ordered yield rules (ADR 0005), read by both the resolver and the
- * write-details channel so the two can never disagree.
+ * Whether pi-pigment must yield `name` to pi's own renderers — the ordered
+ * policy (ADR 0005) inside {@link kitToDecorate}, private so the module
+ * exposes one entry point.
  *
  * Rules, in the resolver's documented order:
  *
  * 1. A name this build cannot decorate; 2. a name another extension owns; 3. pi-fff present (grep/find
- *    only); 4. the name is in `disabledTools`. All four yield the name. The no-kit fail-safe is the
- *    caller's first check — it holds no policy — so `kit` is defined here.
+ *    only); 4. the name is in `disabledTools`. All four yield the name. The no-kit fail-safe is
+ *    {@link kitToDecorate}'s first check — it holds no policy — so `kit` is defined here.
  *
  * @param name - The tool name to decide.
  * @param kit - The current session kit (defined; the caller has already handled no-kit).
@@ -80,7 +83,7 @@ function claimedByOther(tools: readonly ToolInfo[], name: string): boolean {
  * @param commands - The command snapshot at the probe.
  * @returns True when pi-pigment must yield the name.
  */
-export function shouldYield(
+function shouldYield(
   name: string,
   kit: RenderKit,
   tools: readonly ToolInfo[],
@@ -100,4 +103,26 @@ export function shouldYield(
   // Readonly narrowing, not a cast: a `ToolName[]` is a `readonly string[]`.
   const disabled: readonly string[] = kit.config.disabledTools;
   return disabled.includes(name);
+}
+
+/**
+ * The full yield protocol in one seam: the kit when pi-pigment may
+ * decorate `name`, or `undefined` when the caller must hand the name back.
+ * Both the resolver and the write-details channel call only this, so the
+ * no-kit fail-safe, the registry snapshot, and the ordered rules cannot
+ * drift apart between the two call sites (ADR 0005).
+ *
+ * @param pi - The extension API (the live registry surface).
+ * @param kit - The current session kit, or undefined before the first successful build.
+ * @param name - The tool name to decide.
+ * @returns The kit when the caller may decorate, else undefined.
+ */
+export function kitToDecorate(
+  pi: ExtensionAPI,
+  kit: RenderKit | undefined,
+  name: string,
+): RenderKit | undefined {
+  if (kit === undefined) return undefined;
+  if (shouldYield(name, kit, pi.getAllTools(), pi.getCommands())) return undefined;
+  return kit;
 }

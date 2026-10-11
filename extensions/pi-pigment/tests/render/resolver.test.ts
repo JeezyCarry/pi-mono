@@ -10,8 +10,7 @@
 import type { ToolInfo, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resetCurrentKitForTest, setCurrentKit } from "#src/render/current-kit.ts";
-import { createRenderKit } from "#src/render/kit.ts";
+import { createRenderKit, type KitGetter, type RenderKit } from "#src/render/kit.ts";
 import { createPigmentToolRendererResolver } from "#src/render/resolver.ts";
 
 /** The isolated session roots (no config files, no user themes). */
@@ -51,36 +50,46 @@ const ORIG: ToolRenderers = {
   renderResult: (() => ({ kind: "builtin-result" })) as never,
 };
 
+/** The kit the resolver reads; `setKit` mirrors the extension's write point. */
+let kit: RenderKit | undefined;
+const getKit: KitGetter = () => kit;
+const setKit = (next: RenderKit): void => {
+  kit = next;
+};
+
 beforeEach(() => {
-  resetCurrentKitForTest();
+  kit = undefined;
 });
 
 describe("resolver yield chain", () => {
   it("yields an unknown name without touching the registry", () => {
-    const resolver = createPigmentToolRendererResolver(fakePi());
+    const resolver = createPigmentToolRendererResolver(fakePi(), getKit);
     expect(resolver("some_other_tool", () => ORIG)).toBe(ORIG);
   });
 
   it("fails safe to next() when no kit exists yet", () => {
-    const resolver = createPigmentToolRendererResolver(fakePi());
+    const resolver = createPigmentToolRendererResolver(fakePi(), getKit);
     expect(resolver("bash", () => ORIG)).toBe(ORIG);
   });
 
   it("yields a name another extension owns", async () => {
-    setCurrentKit(await createRenderKit(ENV));
-    const resolver = createPigmentToolRendererResolver(fakePi([{ name: "bash", source: "local" }]));
+    setKit(await createRenderKit(ENV));
+    const resolver = createPigmentToolRendererResolver(
+      fakePi([{ name: "bash", source: "local" }]),
+      getKit,
+    );
     expect(resolver("bash", () => ORIG)).toBe(ORIG);
   });
 
   it("yields a name in disabledTools", async () => {
-    setCurrentKit(await createRenderKit({ ...ENV, config: { disabledTools: ["bash"] } }));
-    const resolver = createPigmentToolRendererResolver(fakePi());
+    setKit(await createRenderKit({ ...ENV, config: { disabledTools: ["bash"] } }));
+    const resolver = createPigmentToolRendererResolver(fakePi(), getKit);
     expect(resolver("bash", () => ORIG)).toBe(ORIG);
   });
 
   it("yields grep/find on the fff-mode command signal", async () => {
-    setCurrentKit(await createRenderKit(ENV));
-    const resolver = createPigmentToolRendererResolver(fakePi([], ["fff-mode"]));
+    setKit(await createRenderKit(ENV));
+    const resolver = createPigmentToolRendererResolver(fakePi([], ["fff-mode"]), getKit);
     expect(resolver("grep", () => ORIG)).toBe(ORIG);
     expect(resolver("find", () => ORIG)).toBe(ORIG);
     // The signal is scoped to search — the other names still decorate.
@@ -88,16 +97,17 @@ describe("resolver yield chain", () => {
   });
 
   it("ignores builtin-sourced entries (a builtin name alone never yields)", async () => {
-    setCurrentKit(await createRenderKit(ENV));
+    setKit(await createRenderKit(ENV));
     const resolver = createPigmentToolRendererResolver(
       fakePi([{ name: "bash", source: "builtin" }]),
+      getKit,
     );
     expect(resolver("bash", () => ORIG)).not.toBe(ORIG);
   });
 
   it("decorates a known name with a fresh triple composed over next()", async () => {
-    setCurrentKit(await createRenderKit(ENV));
-    const resolver = createPigmentToolRendererResolver(fakePi());
+    setKit(await createRenderKit(ENV));
+    const resolver = createPigmentToolRendererResolver(fakePi(), getKit);
     const resolved = resolver("bash", () => ORIG);
     expect(resolved).not.toBe(ORIG);
     expect(resolved?.renderShell).toBe("default");
@@ -106,10 +116,10 @@ describe("resolver yield chain", () => {
   });
 
   it("delegates bash output rendering to next()'s renderResult", async () => {
-    setCurrentKit(await createRenderKit(ENV));
+    setKit(await createRenderKit(ENV));
     const spy = vi.fn<() => unknown>(() => ({ kind: "builtin-result" }));
     const orig: ToolRenderers = { ...ORIG, renderResult: spy as never };
-    const resolver = createPigmentToolRendererResolver(fakePi());
+    const resolver = createPigmentToolRendererResolver(fakePi(), getKit);
     const resolved = resolver("bash", () => orig);
     resolved?.renderResult?.(
       { content: [{ type: "text", text: "output" }] } as never,
@@ -138,8 +148,8 @@ describe("resolver yield chain", () => {
   });
 
   it("returns a defined triple composed over undefined next()", async () => {
-    setCurrentKit(await createRenderKit(ENV));
-    const resolver = createPigmentToolRendererResolver(fakePi());
+    setKit(await createRenderKit(ENV));
+    const resolver = createPigmentToolRendererResolver(fakePi(), getKit);
     // Last in the chain, next() has nothing to hand back — decoration
     // must still produce a usable triple, not undefined.
     const resolved = resolver("bash", () => undefined);
@@ -153,14 +163,14 @@ describe("resolver yield chain", () => {
     // A throw here would propagate through pi's resolveToolRenderers (no
     // guard in the SDK) into the TUI's render dispatch. ADR 0005: our bug
     // must never break pi's rendering — degrade to pi's own renderers.
-    const kit = await createRenderKit(ENV);
-    setCurrentKit({
-      ...kit,
+    const baseKit = await createRenderKit(ENV);
+    setKit({
+      ...baseKit,
       renderersFor: () => {
         throw new Error("renderer exploded");
       },
     });
-    const resolver = createPigmentToolRendererResolver(fakePi());
+    const resolver = createPigmentToolRendererResolver(fakePi(), getKit);
     expect(() => resolver("bash", () => ORIG)).not.toThrow();
     expect(resolver("bash", () => ORIG)).toBe(ORIG);
   });
@@ -168,9 +178,10 @@ describe("resolver yield chain", () => {
   it("pins gate order: foreign/FFF/disabled all precede the kit", async () => {
     // The kit exists with bash disabled — but a foreign owner also holds
     // the name: the yield must hand back next()'s value BY REFERENCE.
-    setCurrentKit(await createRenderKit({ ...ENV, config: { disabledTools: ["bash"] } }));
+    setKit(await createRenderKit({ ...ENV, config: { disabledTools: ["bash"] } }));
     const resolver = createPigmentToolRendererResolver(
       fakePi([{ name: "bash", source: "local" }], ["fff-mode"]),
+      getKit,
     );
     // Foreign + disabled both hold; the gating checks run before the kit
     // decorates, so the raw next() value returns untouched.

@@ -22,6 +22,12 @@
  * Lifecycle: one stash per in-flight `toolCallId`, deleted on its
  * `tool_result` (and on `session_start`/`session_shutdown`, so a call
  * blocked in `tool_call` cannot leak across sessions).
+ *
+ * Instance scope: the stash map lives in the registering call's closure —
+ * the SDK caches the extension factory per cwd, so a pi-subagents child
+ * session reuses the parent's module instance, and a module-level map
+ * would let one session's stashes leak into (and evict) the other's. Each
+ * `registerWriteDetailsChannel` call owns its map.
  */
 
 import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
@@ -29,8 +35,8 @@ import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
 import { createBoundedFifoMap } from "#src/core/bounded-map.ts";
 
-import { currentKit } from "./current-kit.ts";
-import { shouldYield } from "./gate.ts";
+import { kitToDecorate } from "./gate.ts";
+import type { KitGetter } from "./kit.ts";
 import { readDecorativeText, resolveToolPath } from "./paths.ts";
 import { writeResultDetails } from "./write-details.ts";
 
@@ -47,25 +53,27 @@ interface WriteStash {
 }
 
 /**
- * The stashes, keyed by toolCallId. The bound is a memory backstop, not a
- * correctness device: a blocked call (no tool_result ever fires) cannot grow it
- * without limit, and a stash evicted while its call is still in flight simply
- * yields no details — the renderer falls back to the plain line rather than
- * showing a wrong diff. Cleared at every session boundary.
- */
-const stashes = createBoundedFifoMap<string, WriteStash>(16);
-
-/** Drop every stash (session boundaries and tests). */
-function clearStashes(): void {
-  stashes.clear();
-}
-
-/**
- * Register the channel's four handlers. Called once at extension load.
+ * Register the channel's four handlers. Called once at extension load, per
+ * extension instance (the stash map is per-call state — see above).
  *
  * @param pi - The extension API.
+ * @param getKit - The extension instance's read-only kit getter.
  */
-export function registerWriteDetailsChannel(pi: ExtensionAPI): void {
+export function registerWriteDetailsChannel(pi: ExtensionAPI, getKit: KitGetter): void {
+  /**
+   * The stashes, keyed by toolCallId. The bound is a memory backstop, not a
+   * correctness device: a blocked call (no tool_result ever fires) cannot grow it
+   * without limit, and a stash evicted while its call is still in flight simply
+   * yields no details — the renderer falls back to the plain line rather than
+   * showing a wrong diff. Cleared at every session boundary.
+   */
+  const stashes = createBoundedFifoMap<string, WriteStash>(16);
+
+  /** Drop every stash (session boundaries). */
+  const clearStashes = (): void => {
+    stashes.clear();
+  };
+
   pi.on("session_start", clearStashes);
   pi.on("session_shutdown", clearStashes);
 
@@ -82,11 +90,10 @@ export function registerWriteDetailsChannel(pi: ExtensionAPI): void {
     // stash empty, and let the write proceed; the renderer then falls back
     // to the plain line rather than showing no (or a wrong) diff.
     try {
-      // Ours to feed: no kit, or the shared yield policy sends the name to
-      // pi's own renderers. FFF never claims write, so its signal never fires.
-      const kit = currentKit();
+      // Ours to feed: the shared yield protocol sends the name to pi's own
+      // renderers (or reports no kit yet). FFF never claims write.
+      const kit = kitToDecorate(pi, getKit(), "write");
       if (kit === undefined) return;
-      if (shouldYield("write", kit, pi.getAllTools(), pi.getCommands())) return;
       const input = event.input;
       const filePath = input.path ?? "";
       const content = typeof input.content === "string" ? input.content : "";
@@ -115,9 +122,4 @@ export function registerWriteDetailsChannel(pi: ExtensionAPI): void {
     if (landed === undefined || landed !== stash.content) return;
     return { details: writeResultDetails(stash.oldText, stash.content, stash.filePath) };
   });
-}
-
-/** Clear the stash map (tests only). */
-export function resetWriteDetailsChannelForTest(): void {
-  clearStashes();
 }

@@ -3,9 +3,9 @@
  * session lifecycle and the renderer resolver.
  *
  * A kit is built once per `session_start` (the config layers and the theme
- * selection are session-scoped) and published into the current-kit slot
- * (current-kit.ts); the resolver reads it at call time and asks for the
- * renderer triple of a tool name. There is no public decoration surface —
+ * selection are session-scoped) by the extension instance's write point;
+ * the resolver reads it at call time (through the {@link KitGetter}) and
+ * asks for the renderer triple of a tool name. There is no public decoration surface —
  * pi's own `registerToolRenderer` closed the upstream gap this kit used to
  * work around, so third parties compose renderers through the SDK, not by
  * importing this module.
@@ -79,6 +79,16 @@ export interface RenderKit {
    */
   renderersFor(name: string, orig: ToolRenderers | undefined): ToolRenderers;
 }
+
+/**
+ * Read the current session's kit. The extension instance owns the one
+ * write point (its `session_start` build), so consumers receive only this
+ * getter — a reader cannot clobber another session's kit by construction.
+ *
+ * @returns The kit, or undefined before the first successful build (or
+ * after a failed one).
+ */
+export type KitGetter = () => RenderKit | undefined;
 
 /**
  * Build the session's kit: resolve the config layers' theme selection and

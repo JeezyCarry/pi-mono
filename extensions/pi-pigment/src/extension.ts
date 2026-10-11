@@ -13,8 +13,11 @@
  * resolver (resolver.ts) that supplies renderCall/renderResult for the
  * built-in tool names, delegating execute and outcome to pi's own tools.
  * Each `session_start` (startup, reload, fork, resume) re-resolves the
- * two-layer config, builds the session kit, and publishes it to the
- * current-kit slot the resolver reads. The write renderer's old/new diff
+ * two-layer config, builds the session kit, and publishes it to this
+ * instance's kit (kit.ts) the resolver reads. The kit lives
+ * in the extension closure — never module state — so a pi-subagents child
+ * session reusing this module instance cannot overwrite or clear the
+ * parent's kit. The write renderer's old/new diff
  * rides the tool_call/tool_result channel (write-details-channel.ts).
  *
  * Theming (ADR 0006): the bundled themes ship as package assets (pi's
@@ -33,8 +36,7 @@ import {
 
 import { registerPigmentCommand } from "#src/command/theme-command.ts";
 import type { SessionEnv } from "#src/core/session-env.ts";
-import { bindCurrentKitBoundaries, setCurrentKit } from "#src/render/current-kit.ts";
-import { createRenderKit } from "#src/render/kit.ts";
+import { createRenderKit, type KitGetter, type RenderKit } from "#src/render/kit.ts";
 import { registerPigmentToolRenderers } from "#src/render/resolver.ts";
 import { registerWriteDetailsChannel } from "#src/render/write-details-channel.ts";
 import { listConvertedThemes } from "#src/theme/user-themes.ts";
@@ -49,24 +51,34 @@ import { listConvertedThemes } from "#src/theme/user-themes.ts";
  * @param pi - The extension API.
  */
 export function createPigmentExtension(pi: ExtensionAPI): void {
-  // The current-kit slot owns its own boundary clearing; register it before
-  // the build handler below so the clear runs first within `session_start`.
-  bindCurrentKitBoundaries(pi);
+  // The instance's session state. The SDK caches the extension factory per
+  // cwd, so a pi-subagents child session reuses this module instance: the
+  // kit must live in this closure, never in module state, or the child's
+  // session_start/session_shutdown would overwrite or clear the parent's.
+  // This function is the only writer; the resolver and the channel below
+  // receive a read-only getter.
+  let currentKit: RenderKit | undefined;
+  const getKit: KitGetter = () => currentKit;
   // The renderer resolver: registered once. It reads the live registry and
-  // the current-kit slot at call time, so no per-session re-registration
-  // is needed (the SDK collects resolvers at extension load).
-  registerPigmentToolRenderers(pi);
+  // the instance's kit at call time, so no per-session re-registration is
+  // needed (the SDK collects resolvers at extension load).
+  registerPigmentToolRenderers(pi, getKit);
   // The write renderer's execution-side channel: the SDK's write tool
   // carries `details: undefined`, so the old/new diff is captured through
   // the tool_call/tool_result hooks. Strictly scoped to write.
-  registerWriteDetailsChannel(pi);
+  registerWriteDetailsChannel(pi, getKit);
+  // Outside a session there is no kit. The build handler below always
+  // assigns on `session_start` (kit or undefined), so only the shutdown
+  // edge needs its own clear.
+  pi.on("session_shutdown", () => {
+    currentKit = undefined;
+  });
 
-  // The latest session_start environment — the `/pigment` completer's read.
+  // The latest session_start environment: the `/pigment` completer's read
+  // and the kit's own inputs, from one source.
   let sessionEnv: SessionEnv | undefined;
   pi.on("session_start", async (_event: SessionStartEvent, ctx: ExtensionContext) => {
-    const cwd = ctx.cwd;
-    const agentDir = getAgentDir();
-    sessionEnv = { cwd, agentDir };
+    sessionEnv = { cwd: ctx.cwd, agentDir: getAgentDir() };
     // Config/theme issues surface through the documented channel — the
     // TUI notification area (or RPC client) when present; stderr only in
     // headless modes (print/json), where it is the visible medium.
@@ -78,13 +90,12 @@ export function createPigmentExtension(pi: ExtensionAPI): void {
       }
     };
     // The session's kit: the resolver builds every renderer triple from it.
-    // A build failure clears the slot so the resolver fails safe to pi's
-    // own rendering rather than decorating with a stale session's config.
+    // A build failure clears it so the resolver fails safe to pi's own
+    // rendering rather than decorating with a stale session's config.
     try {
-      const kit = await createRenderKit({ cwd, agentDir, reportIssue });
-      setCurrentKit(kit);
+      currentKit = await createRenderKit({ ...sessionEnv, reportIssue });
     } catch (error) {
-      setCurrentKit(undefined);
+      currentKit = undefined;
       reportIssue(error instanceof Error ? error.message : String(error));
     }
   });

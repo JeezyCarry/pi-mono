@@ -30,6 +30,10 @@ Handing a tool name back to pi's own rendering, for a name pi-pigment must not d
 pi-pigment's rendering for a single tool; it owns no execution and no tool definition.
 _Avoid_: wrapper, tool definition
 
+**Kit slot**:
+One extension instance's session kit, and the read-only getter the renderer resolver and the write-details channel read it through. Per instance, never module state: the SDK caches the extension factory by cwd, so a pi-subagents child session reuses the parent's module instance and would clobber a shared kit. The highlight cache is the deliberate exception — content-keyed and process-global — so isolation covers session state, not memoized highlighting.
+_Avoid_: current kit, global slot
+
 **Call/result stacking**:
 A tool row is the call's rendering with the result's rendering appended below; both re-run on every redraw.
 _Avoid_: content in the call slot, summaries in the result slot

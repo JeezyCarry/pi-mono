@@ -1,35 +1,37 @@
 /**
  * The kit-build fail-safe: a session_start whose kit build throws must
- * leave the current-kit slot empty, so the resolver hands every name to
- * the next renderer (pi's built-ins) BY REFERENCE instead of decorating
- * with a stale or half-built session's kit — and the failure surfaces
- * through the documented issue channel (the TUI notification when one
- * exists).
+ * leave the instance's kit empty, so the resolver hands every name to the
+ * next renderer (pi's built-ins) BY REFERENCE instead of decorating with a
+ * stale or half-built session's kit — and the failure surfaces through the
+ * documented issue channel (the TUI notification when one exists).
+ *
+ * The kit is per-extension-instance state (the SDK caches the extension
+ * factory per cwd, so a pi-subagents child reuses the module instance);
+ * both assertions therefore drive the public seams — the registered
+ * resolver and the fired session boundaries — never the state itself.
  */
 
-import type {
-  ExtensionAPI,
-  ToolRendererResolver,
-  ToolRenderers,
-} from "@earendil-works/pi-coding-agent";
+import type { ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createPigmentExtension } from "#src/extension.ts";
-import { currentKit, resetCurrentKitForTest, setCurrentKit } from "#src/render/current-kit.ts";
 import type { createRenderKit as CreateRenderKit } from "#src/render/kit.ts";
+import { DECORATABLE_NAMES, makeTestPi, type TestPi } from "#test/host.ts";
+
+/** Kit-build call counter: the first build succeeds, later ones throw. */
+const buildState = vi.hoisted(() => ({ calls: 0 }));
 
 vi.mock("#src/render/kit.ts", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
     ...actual,
-    createRenderKit: (async () => {
-      throw new Error("kit-build exploded");
+    createRenderKit: (async (options: unknown) => {
+      buildState.calls += 1;
+      if (buildState.calls > 1) throw new Error("kit-build exploded");
+      return (actual.createRenderKit as typeof CreateRenderKit)(options as never);
     }) as typeof CreateRenderKit,
   };
 });
-
-/** The eight names the resolver decorates with no foreign occupancy. */
-const NAMES = ["write", "edit", "bash", "powershell", "grep", "ls", "find", "read"];
 
 /** The built-in renderer triple a yield must hand back by reference. */
 const ORIG: ToolRenderers = {
@@ -38,70 +40,37 @@ const ORIG: ToolRenderers = {
   renderResult: (() => ({ kind: "builtin-result" })) as never,
 };
 
-/** A captured extension event handler. */
-type Handler = (event: Record<string, unknown>, ctx?: unknown) => unknown;
+/** The context a fired session boundary carries. */
+const CTX = {
+  cwd: "/kit-failure-project",
+  isProjectTrusted: () => true,
+  hasUI: true,
+  ui: { notify: vi.fn<() => void>() },
+};
 
 /**
- * Drive the extension's session_start over a kit build that throws, and
- * return the resolver plus the UI-issue spy.
+ * Build a host and wire the extension into it.
  *
- * @returns The registered resolver and the notify spy.
+ * @returns The host (the caller fires the boundaries).
  */
-async function driveFailingSessionStart(): Promise<{
-  resolver: ToolRendererResolver;
-  notify: ReturnType<typeof vi.fn>;
-  handlers: Map<string, Handler[]>;
-}> {
-  const notify = vi.fn<() => void>();
-  const handlers = new Map<string, Handler[]>();
-  let resolver: ToolRendererResolver | undefined;
-  const api = {
-    on: (event: string, handler: Handler) => {
-      const list = handlers.get(event) ?? [];
-      list.push(handler);
-      handlers.set(event, list);
-    },
-    registerTool: () => {},
-    registerToolRenderer: (r: ToolRendererResolver) => {
-      resolver = r;
-    },
-    registerCommand: () => {},
-    getAllTools: () =>
-      NAMES.map((name) => ({ name, sourceInfo: { source: "builtin", path: `<builtin:${name}>` } })),
-    getCommands: () => [{ name: "pigment" }],
-  };
-  createPigmentExtension(api as unknown as ExtensionAPI);
-  const sessionStartHandlers = handlers.get("session_start") ?? [];
-  if (sessionStartHandlers.length === 0) throw new Error("session_start handler not registered");
-  // pi fires every registered session_start handler in order (the channel's
-  // clearStashes first, then the extension's kit build).
-  for (const handler of sessionStartHandlers) {
-    await handler(
-      { type: "session_start", reason: "startup" },
-      {
-        cwd: "/kit-failure-project",
-        isProjectTrusted: () => true,
-        hasUI: true,
-        ui: { notify },
-      },
-    );
-  }
-  if (resolver === undefined) throw new Error("resolver not registered");
-  return { resolver, notify, handlers };
+function setUp(): TestPi {
+  const host = makeTestPi();
+  createPigmentExtension(host.api);
+  return host;
 }
 
 /**
- * Fire every handler registered for `event`, in order (pi awaits each).
+ * Fire the session_start boundary.
  *
- * @param handlers - The captured handler map.
- * @param event - The event name to fire.
+ * @param host - The test host.
  */
-async function fireEvent(handlers: Map<string, Handler[]>, event: string): Promise<void> {
-  for (const handler of handlers.get(event) ?? []) await handler({ type: event });
+async function start(host: TestPi): Promise<void> {
+  await host.fire("session_start", { type: "session_start", reason: "startup" }, CTX);
 }
 
 beforeEach(() => {
-  resetCurrentKitForTest();
+  buildState.calls = 0;
+  CTX.ui.notify.mockClear();
   delete process.env.PI_CODING_AGENT_DIR;
 });
 
@@ -110,24 +79,29 @@ afterEach(() => {
 });
 
 describe("kit-build fail-safe", () => {
-  it("clears the slot and yields every name when the kit build throws", async () => {
-    // A prior session's kit must not survive the failed rebuild.
-    setCurrentKit({ cwd: "/prior-session", canDecorate: () => true } as never);
-    const { resolver, notify } = await driveFailingSessionStart();
+  it("clears the kit and yields every name when the kit build throws", async () => {
+    const host = setUp();
+    // First start builds; the rebuild then throws, and the prior kit must
+    // not survive it.
+    await start(host);
+    const toolRendererResolver = host.resolver();
+    if (toolRendererResolver === undefined) throw new Error("resolver not registered");
+    expect(toolRendererResolver("bash", () => ORIG)).not.toBe(ORIG);
 
-    expect(currentKit()).toBeUndefined();
+    await start(host);
     // The failure surfaces through the issue channel (ui.notify).
-    expect(notify).toHaveBeenCalledWith("[pi-pigment] kit-build exploded", "warning");
-    // With the slot empty the resolver falls through to next() for every name.
-    for (const name of NAMES) expect(resolver(name, () => ORIG)).toBe(ORIG);
+    expect(CTX.ui.notify).toHaveBeenCalledWith("[pi-pigment] kit-build exploded", "warning");
+    // With the kit cleared the resolver falls through to next() for every name.
+    for (const name of DECORATABLE_NAMES) expect(toolRendererResolver(name, () => ORIG)).toBe(ORIG);
   });
 
-  it("clears the slot on session_shutdown — the other boundary", async () => {
-    const { handlers } = await driveFailingSessionStart();
-    // A live session's kit, as a successful build would have published it.
-    setCurrentKit({ cwd: "/live-session", canDecorate: () => true } as never);
-    expect(currentKit()).toBeDefined();
-    await fireEvent(handlers, "session_shutdown");
-    expect(currentKit()).toBeUndefined();
+  it("clears the kit on session_shutdown — the other boundary", async () => {
+    const host = setUp();
+    await start(host);
+    const toolRendererResolver = host.resolver();
+    if (toolRendererResolver === undefined) throw new Error("resolver not registered");
+    expect(toolRendererResolver("bash", () => ORIG)).not.toBe(ORIG);
+    await host.fire("session_shutdown", { type: "session_shutdown", reason: "quit" }, CTX);
+    for (const name of DECORATABLE_NAMES) expect(toolRendererResolver(name, () => ORIG)).toBe(ORIG);
   });
 });
