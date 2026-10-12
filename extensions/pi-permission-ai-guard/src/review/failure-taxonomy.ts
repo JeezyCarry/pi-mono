@@ -4,27 +4,30 @@
  * One module behind a small interface — "given what the backend said,
  * switch or terminal, and with what defer kind".
  *
- * Two lanes feed it, each in the shape its backend produces:
- *
- * - The chat lane throws or returns untyped provider errors (strings, Error-likes, status-shaped
- *   objects) — `availabilityReason` reads them with the shared switchable table plus message
- *   regexes;
- * - The classifier lane throws typed SDK errors — `failoverReason`/`classifyFailure` read them by
- *   `instanceof`, then by the same table for the status they carry.
+ * The classifier lane feeds it through one entry, `classifyBackendError`:
+ * it reads one of the lane's own error shapes — {@link classifierError}'s
+ * product — and returns whether the backend could not serve the request (a
+ * failover reason) plus the defer kind it records: one pass, one refusal
+ * guard. The chat lane reads its untyped provider errors through
+ * `availabilityReason`; the two lanes are deliberately asymmetric, so this
+ * entry is not shared across them.
  *
  * Failover switches backends, it does not hammer the same one: a
  * different backend has no 409 conflict state, so 409/425 switch here
  * even though a same-backend retry never covered them. And failover
  * never routes around a provider's refusal: auth/policy/invalid-request
  * signals — by status or by phrase — are terminal defers for the
- * operator. Status takes precedence over message text, so a 403
- * mentioning "rate limit" cannot silently route around a refusal.
+ * operator.
  */
 
-import { APIConnectionError, APIError, APITimeoutError, APIUserAbortError } from "@typesafe-ai/sdk";
-
 import type { AvailabilityReason, ModelCallDeferKind } from "#src/model/model-verdict.ts";
-import { attempt, classifyAbortish, errorMessage, isObjectRecord } from "#src/utils.ts";
+import {
+  attempt,
+  classifyAbortish,
+  errorMessage,
+  isObjectRecord,
+  TIMEOUT_PHRASE,
+} from "#src/utils.ts";
 
 /** HTTP statuses that switch backends (failover, not same-backend retry). */
 const SWITCHABLE_STATUS: ReadonlySet<number> = new Set([402, 404, 408, 409, 410, 425, 429]);
@@ -139,36 +142,125 @@ export function availabilityReason(error: unknown): AvailabilityReason | undefin
 }
 
 /**
- * Classify a failed classifier call into the terminal defer kind.
- *
- * @param error - The thrown SDK error.
- * @returns The defer kind for the terminal record.
+ * The classifier lane's error shapes. The lane's transport (pi's
+ * `classify`) never rejects a served-but-failed request, so the facade
+ * rebuilds one of these from the result's `errorMessage`, and
+ * {@link classifyBackendError} reads them by `instanceof`. They replace
+ * the TypeSafe SDK's error classes, which the lane no longer depends on.
  */
-export function classifyFailure(error: unknown): ModelCallDeferKind {
-  if (error instanceof APITimeoutError || error instanceof APIUserAbortError) return "timeout";
-  // An untyped refusal can carry "aborted" in the same sentence — the shape
-  // `failoverReason` guards against too. The kind is operator-facing, so a
-  // policy answer must not be reported as a timeout.
-  if (mentionsRefusal(errorMessage(error))) return "call-failed";
-  return classifyAbortish(error) ?? "call-failed";
+export class ClassifierApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ClassifierApiError";
+  }
+}
+
+/** A status-less timeout/abort signal from the classifier lane. */
+export class ClassifierTimeoutError extends Error {
+  constructor(message = "classifier timed out") {
+    super(message);
+    this.name = "ClassifierTimeoutError";
+  }
+}
+
+/** A status-less, timeout-less failure the lane could not otherwise classify. */
+export class ClassifierConnectionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClassifierConnectionError";
+  }
+}
+
+/** A status embedded in a classifier error message (`"... (429): <body>"`). */
+const STATUS_PATTERN = /\((\d{3})\)/;
+
+/**
+ * The HTTP status a classifier error message carries (`"... (429): <body>"`),
+ * or undefined when it names none. One reader for the status both the
+ * rebuild ({@link classifierError}) and the facade's abort branch consult,
+ * so "does this message carry a status?" cannot drift between them.
+ *
+ * @param message - The classifier result's error message.
+ * @returns The embedded status, or undefined.
+ */
+export function classifierStatus(message: string): number | undefined {
+  const status = STATUS_PATTERN.exec(message)?.[1];
+  return status === undefined ? undefined : Number(status);
 }
 
 /**
- * Fail over only when the backend could not serve the request. Never turn a
- * valid deny/defer into a second opinion, or resend an invalid request.
+ * Rebuild one classifier failure's typed error from its `errorMessage`
+ * (`"System One API error (429): <body>"`). A status-bearing failure becomes
+ * {@link ClassifierApiError} so the failover table reads the status first —
+ * never the wording, or a refusal that mentions a timeout would route around
+ * the policy. Status-less timeout/abort wording becomes
+ * {@link ClassifierTimeoutError}; anything else {@link ClassifierConnectionError}.
  *
- * @param error - The thrown SDK error.
- * @returns The switch reason, or undefined when the failure is terminal.
+ * A refusal stays an untyped error: the wording guards decide (terminal),
+ * because failing over past a policy answer would ask a second model the
+ * refused question.
+ *
+ * @param message - The classifier result's error message.
+ * @returns The lane-shaped error for the adapter's classification.
  */
-export function failoverReason(error: unknown): AvailabilityReason | undefined {
-  if (error instanceof APIUserAbortError) return undefined;
-  if (error instanceof APIError) return switchableStatusReason(error.status);
-  if (error instanceof APITimeoutError) return "timeout";
-  if (error instanceof APIConnectionError) return "connection";
-  // Untyped SDK errors carry no status class, so a refusal can reach here with
-  // "aborted" in the same sentence — check the refusal guard first, or the pool
-  // fails over past it.
-  const message = errorMessage(error);
-  if (mentionsRefusal(message)) return undefined;
-  return classifyAbortish(error) === "timeout" ? "timeout" : undefined;
+export function classifierError(message: string): Error {
+  const status = classifierStatus(message);
+  if (status !== undefined) return new ClassifierApiError(status, message);
+  if (mentionsRefusal(message)) return new Error(message);
+  if (TIMEOUT_PHRASE.test(message)) return new ClassifierTimeoutError(message);
+  return new ClassifierConnectionError(message);
+}
+
+/** One backend failure's disposition: whether to fail over, and the defer kind it records. */
+export interface BackendFailure {
+  /**
+   * The failover reason when the backend could not serve the request (worth
+   * trying the next endpoint); undefined when the failure is terminal.
+   */
+  reason: AvailabilityReason | undefined;
+  /** The defer kind the failure records. */
+  deferKind: ModelCallDeferKind;
+}
+
+/**
+ * Classify one backend failure for the classifier lane: whether it is
+ * worth failing over (a reason) and the defer kind it records. A refusal
+ * is terminal: an auth, policy, or invalid-request answer must never be
+ * routed around (or recorded) as a retryable timeout.
+ *
+ * @param error - The thrown lane error.
+ * @returns The failure's disposition.
+ */
+export function classifyBackendError(error: unknown): BackendFailure {
+  if (error instanceof ClassifierTimeoutError) return { reason: "timeout", deferKind: "timeout" };
+  if (error instanceof ClassifierConnectionError) {
+    return { reason: "connection", deferKind: nonTimeoutKind(error) };
+  }
+  if (error instanceof ClassifierApiError) {
+    return { reason: switchableStatusReason(error.status), deferKind: nonTimeoutKind(error) };
+  }
+  // An untyped error carries no status class: a refusal is terminal and
+  // never a timeout, guarded before the abort heuristic.
+  if (mentionsRefusal(errorMessage(error))) return { reason: undefined, deferKind: "call-failed" };
+  const timedOut = classifyAbortish(error) === "timeout";
+  return {
+    reason: timedOut ? "timeout" : undefined,
+    deferKind: timedOut ? "timeout" : "call-failed",
+  };
+}
+
+/**
+ * The defer kind for a typed error whose class is not itself a timeout or
+ * abort: a refusal is "call-failed", else the shared abort heuristic.
+ *
+ * @param error - The typed lane error.
+ * @returns The terminal defer kind.
+ */
+function nonTimeoutKind(error: unknown): ModelCallDeferKind {
+  return mentionsRefusal(errorMessage(error))
+    ? "call-failed"
+    : (classifyAbortish(error) ?? "call-failed");
 }

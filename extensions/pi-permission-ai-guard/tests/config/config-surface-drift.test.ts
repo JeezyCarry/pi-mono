@@ -21,7 +21,6 @@ import {
   NOTIFY_LEVEL_VALUES,
   REASONING_VALUES,
   configSchema,
-  directFallbackSchema,
   registryFallbackSchema,
 } from "#src/config/config-schema.ts";
 import { isObjectRecord } from "#src/utils.ts";
@@ -33,7 +32,8 @@ interface SchemaNode {
   enum?: unknown[];
   properties?: Record<string, SchemaNode>;
   anyOf?: SchemaNode[];
-  items?: { oneOf?: SchemaNode[] };
+  oneOf?: SchemaNode[];
+  items?: SchemaNode;
   propertyNames?: { enum?: unknown[] };
 }
 
@@ -160,31 +160,26 @@ function anyOfDefaults(node: SchemaNode, base = ""): Record<string, unknown> {
 }
 
 describe("config surface drift", () => {
-  it("JSON-schema defaults match both zod config variants", () => {
-    for (const provider of ["x", { type: "typesafe" }] as const) {
-      const zodSide = flatLeafPaths(configSchema.parse({ provider, model: "x" }));
-      // Required fields carry no default; everything else is the default set.
-      for (const key of Object.keys(zodSide)) {
-        if (key === "model" || key === "provider" || key.startsWith("provider.")) {
-          delete zodSide[key];
-        }
+  it("JSON-schema defaults match the zod config", () => {
+    const zodSide = flatLeafPaths(configSchema.parse({ provider: "x", model: "x" }));
+    // Required fields carry no default; everything else is the default set.
+    for (const key of Object.keys(zodSide)) {
+      if (key === "model" || key === "provider") {
+        delete zodSide[key];
       }
-      // Both lanes default to no backups. JSON Schema leaves the default
-      // unmaterialized so conditional item types remain valid in editors.
-      expect(zodSide.fallbacks).toEqual([]);
-      delete zodSide.fallbacks;
-      // modelType is a string-provider field: the direct variant carries
-      // no default for it (the reserved optional only surfaces user input).
-      const expected = jsonDefaults(schemaJson);
-      if (typeof provider === "object") delete expected.modelType;
-      // The deprecated `typesafe` alias exists for input compatibility
-      // only: zod folds it into `classifier` and drops the key, so its
-      // JSON-schema defaults must not appear in the parsed shape.
-      for (const key of Object.keys(expected)) {
-        if (key.startsWith("typesafe.")) delete expected[key];
-      }
-      expect(zodSide).toEqual(expected);
     }
+    // Both lanes default to no backups. JSON Schema leaves the default
+    // unmaterialized so conditional item types remain valid in editors.
+    expect(zodSide.fallbacks).toEqual([]);
+    delete zodSide.fallbacks;
+    const expected = jsonDefaults(schemaJson);
+    // The deprecated `typesafe` alias exists for input compatibility
+    // only: zod folds it into `classifier` and drops the key, so its
+    // JSON-schema defaults must not appear in the parsed shape.
+    for (const key of Object.keys(expected)) {
+      if (key.startsWith("typesafe.")) delete expected[key];
+    }
+    expect(zodSide).toEqual(expected);
   });
 
   it("nested anyOf defaults agree with zod (the main walk stops short)", () => {
@@ -258,16 +253,11 @@ describe("config surface drift", () => {
     );
   });
 
-  it("the JSON schema's fallback arms carry the same keys as the zod arms", () => {
-    const arms = schemaJson.properties.fallbacks?.items?.oneOf ?? [];
-    expect(arms).toHaveLength(2);
-    expect(Object.keys(arms[0]?.properties ?? {}).toSorted()).toEqual(
+  it("the JSON schema's fallback object carries the same keys as the zod schema", () => {
+    const item = schemaJson.properties.fallbacks?.items;
+    expect(item?.oneOf).toBeUndefined();
+    expect(Object.keys(item?.properties ?? {}).toSorted()).toEqual(
       Object.keys(registryFallbackSchema.shape).toSorted(),
-    );
-    // The direct arm deliberately has no sampling field: System One is the
-    // classifier lane, whose request body carries none.
-    expect(Object.keys(arms[1]?.properties ?? {}).toSorted()).toEqual(
-      Object.keys(directFallbackSchema.shape).toSorted(),
     );
   });
 

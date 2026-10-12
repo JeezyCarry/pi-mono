@@ -250,7 +250,7 @@ describe("lane-fact inventory parity", () => {
       const fact = INVENTORY[key];
       const chatOutput = buildReviewPrompt(transcript(), context);
       const stateJson = JSON.stringify(
-        buildClassifierRequest(transcript(), context, NO_INSTRUCTIONS, "model").state,
+        buildClassifierRequest(transcript(), context, NO_INSTRUCTIONS).state,
       );
 
       expect(fact.chat.rendered).toBe(chat !== null);
@@ -279,7 +279,7 @@ describe("classifier wrapper-fact keys", () => {
         commandContext: S.commandContext,
       },
     });
-    const state = buildClassifierRequest(transcript(), requestContext, NO_INSTRUCTIONS, "model")
+    const state = buildClassifierRequest(transcript(), requestContext, NO_INSTRUCTIONS)
       .state as Record<string, unknown>;
 
     expect(state.executed_unit).toBe(S.executedUnit);
@@ -288,8 +288,10 @@ describe("classifier wrapper-fact keys", () => {
   });
 
   it("omits the wrapper keys when the ask has no wrapper facts", () => {
-    const state = buildClassifierRequest(transcript(), ctx({}), NO_INSTRUCTIONS, "model")
-      .state as Record<string, unknown>;
+    const state = buildClassifierRequest(transcript(), ctx({}), NO_INSTRUCTIONS).state as Record<
+      string,
+      unknown
+    >;
 
     expect(state).not.toHaveProperty("executed_unit");
     expect(state).not.toHaveProperty("matched_pattern");
@@ -303,15 +305,16 @@ describe("classifier spelling-fact key", () => {
       transcript(),
       ctx({ request: { matchedSpelling: S.matchedSpelling } }),
       NO_INSTRUCTIONS,
-      "model",
     ).state as Record<string, unknown>;
 
     expect(state.matched_spelling).toBe(S.matchedSpelling);
   });
 
   it("omits the key when the typed text decided", () => {
-    const state = buildClassifierRequest(transcript(), ctx({}), NO_INSTRUCTIONS, "model")
-      .state as Record<string, unknown>;
+    const state = buildClassifierRequest(transcript(), ctx({}), NO_INSTRUCTIONS).state as Record<
+      string,
+      unknown
+    >;
 
     expect(state).not.toHaveProperty("matched_spelling");
   });

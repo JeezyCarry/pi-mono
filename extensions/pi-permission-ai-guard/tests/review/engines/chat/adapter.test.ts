@@ -267,8 +267,9 @@ describe("chat availability and config", () => {
 
   it("accepts either-lane backups per item and still bounds the list", () => {
     const classifierBackup = {
-      provider: { type: "typesafe", baseUrl: "https://x.example", apiKey: "k" },
+      provider: "typesafe",
       model: "classifier",
+      modelType: "classifier",
     };
     const parsed = configSchema.parse({
       provider: "anthropic",

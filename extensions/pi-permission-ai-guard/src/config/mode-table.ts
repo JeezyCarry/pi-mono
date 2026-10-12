@@ -1,6 +1,6 @@
 /**
  * The mode ladder — the single source of truth for every OPERATIONAL fact
- * about a mode value: the verdict lanes (imported by verdict-rule), the
+ * about a mode value: the suspicion cut lines (imported by verdict-rule), the
  * casual-cycle membership, the warning-red emphasis, and the
  * config-surprise warnings (imported by config-layer).
  *
@@ -11,32 +11,50 @@
  * config-surface drift test pins the mechanical pairs.
  */
 
-import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
-
 import type { VerdictOrigin } from "#src/model/model-verdict.ts";
 
 import { MODE_VALUES, type AiGuardConfig, type Mode } from "./config-schema.ts";
 
-/** The verdict lanes a mode disposes (the leniency ladder, strictest first). */
-export interface ModeLanes {
-  /** Soft-tier deny (low|medium) target. */
-  softDeny: AuthorizerVerdict["kind"];
-  /**
-   * Model defer with a benign lean (the action is visible-and-benign, only the authorization link
-   * is unclear).
-   */
-  deferLeanAllow: AuthorizerVerdict["kind"];
-  /** Model defer with no directional lean (genuinely neutral). */
-  deferNeutral: AuthorizerVerdict["kind"];
-  /** Model defer with a danger lean (what is visible resembles a danger pattern). */
-  deferLeanDeny: AuthorizerVerdict["kind"];
-  /**
-   * Machinery-failure target — narrower by type: a broken reviewer never maps to allow. The
-   * `permissive` value tightens back to `deny` — the ladder's one non-monotone cell, contract over
-   * monotonicity: a defer would need a dialog the zero-interruption contract forbids, and a broken
-   * reviewer must not rubber-stamp.
-   */
-  machinery: VerdictOrigin;
+/**
+ * The reviewer-suspicion order — the total order the ladder is drawn on,
+ * strictest last (ADR 0003). A `defer`'s rank is set by its lean (benign /
+ * none / danger); a `deny`'s by its tier. Machinery failures are NOT on
+ * this line: they are a separate axis (a failure to obtain a verdict, not a
+ * suspicion), carried by each mode's `machinery` lane.
+ */
+export const SUSPICION_ORDER = [
+  "allow",
+  "defer-benign",
+  "defer-neutral",
+  "defer-danger",
+  "soft-deny",
+  "hard-deny",
+] as const;
+
+/** One rung of the suspicion order. */
+export type Suspicion = (typeof SUSPICION_ORDER)[number];
+
+/**
+ * A suspicion rung's rank (higher = more suspicious).
+ *
+ * @param suspicion - A rung of the suspicion order.
+ * @returns Its index in {@link SUSPICION_ORDER}.
+ */
+export function suspicionRank(suspicion: Suspicion): number {
+  return SUSPICION_ORDER.indexOf(suspicion);
+}
+
+/**
+ * A mode's two cut lines on the suspicion order: at or below the accept
+ * line the mode auto-allows; at or above the reject line it auto-denies;
+ * between them it asks (defers). The cut-line shape makes each mode's
+ * allow / ask / deny bands contiguous (pinned by the contiguity test).
+ */
+export interface ModeCuts {
+  /** Suspicion ranks at or below this are auto-allowed. */
+  acceptAtOrBelow: Suspicion;
+  /** Suspicion ranks at or above this are auto-denied. */
+  rejectAtOrAbove: Suspicion;
 }
 
 /** Per-mode operational facts for the settings/UX surfaces. */
@@ -51,8 +69,16 @@ export interface ModeFacts {
 
 /** One mode's row in the ladder table. */
 export interface ModeEntry {
-  /** The verdict lanes (soft deny / model defer / machinery). */
-  lanes: ModeLanes;
+  /** The two cut lines on the suspicion order (the allow / ask / deny bands). */
+  cuts: ModeCuts;
+  /**
+   * The machinery-failure lane — narrower by type than the cuts: a broken
+   * reviewer never maps to allow. The `permissive` value tightens back to
+   * `deny` — the ladder's one non-monotone cell, contract over
+   * monotonicity: a defer would need a dialog the zero-interruption
+   * contract forbids, and a broken reviewer must not rubber-stamp.
+   */
+  machinery: VerdictOrigin;
   /** The operational facts for the settings/UX surfaces. */
   facts: ModeFacts;
 }
@@ -73,17 +99,14 @@ export interface ModeEntry {
  * reach the authorizer. The deny band is reachable only by decisive
  * (hard-tier) denies; strict and permissive are lean-inert (their
  * contracts are absolute). Read down any column and the three bands
- * (allow / ask / deny) are contiguous in suspicion order.
+ * (allow / ask / deny) are contiguous in suspicion order — here that
+ * follows from the cut-line shape: each row is two cut lines on
+ * {@link SUSPICION_ORDER}, and the contiguity test pins it.
  */
 export const MODE_TABLE: Record<Mode, ModeEntry> = {
   strict: {
-    lanes: {
-      softDeny: "deny",
-      deferLeanAllow: "deny",
-      deferNeutral: "deny",
-      deferLeanDeny: "deny",
-      machinery: "deny",
-    },
+    cuts: { acceptAtOrBelow: "allow", rejectAtOrAbove: "defer-benign" },
+    machinery: "deny",
     facts: {
       blurb: "the reviewer's allow is the only pass",
       inCycle: false,
@@ -91,13 +114,8 @@ export const MODE_TABLE: Record<Mode, ModeEntry> = {
     },
   },
   default: {
-    lanes: {
-      softDeny: "defer",
-      deferLeanAllow: "defer",
-      deferNeutral: "defer",
-      deferLeanDeny: "defer",
-      machinery: "defer",
-    },
+    cuts: { acceptAtOrBelow: "allow", rejectAtOrAbove: "hard-deny" },
+    machinery: "defer",
     facts: {
       blurb: "you judge every flag but hard danger",
       inCycle: true,
@@ -105,13 +123,8 @@ export const MODE_TABLE: Record<Mode, ModeEntry> = {
     },
   },
   lenient: {
-    lanes: {
-      softDeny: "defer",
-      deferLeanAllow: "allow",
-      deferNeutral: "allow",
-      deferLeanDeny: "defer",
-      machinery: "defer",
-    },
+    cuts: { acceptAtOrBelow: "defer-neutral", rejectAtOrAbove: "hard-deny" },
+    machinery: "defer",
     facts: {
       blurb: "only the reviewer's active alarms ask you",
       inCycle: true,
@@ -119,13 +132,8 @@ export const MODE_TABLE: Record<Mode, ModeEntry> = {
     },
   },
   permissive: {
-    lanes: {
-      softDeny: "allow",
-      deferLeanAllow: "allow",
-      deferNeutral: "allow",
-      deferLeanDeny: "allow",
-      machinery: "deny",
-    },
+    cuts: { acceptAtOrBelow: "soft-deny", rejectAtOrAbove: "hard-deny" },
+    machinery: "deny",
     facts: {
       blurb: "only clear high-danger requests are blocked",
       // In the casual cycle by operator choice (4-mode ladder): the red

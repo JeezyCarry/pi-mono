@@ -823,6 +823,43 @@ function retiredOverlayShape(value: unknown): boolean {
 }
 
 /**
+ * Whether a `provider` value is the retired direct TypeSafe connection: an
+ * object naming `type: "typesafe"`, from before the registry-only classifier.
+ * Detected by the shape's own key, never by "not a string" — a config that
+ * means something else must not receive a migration hint that does not apply
+ * to it.
+ *
+ * @param value - The raw `provider` value from the merged input.
+ * @returns True when the value carries the retired direct-connection block.
+ */
+function retiredDirectProviderShape(value: unknown): boolean {
+  return isObjectRecord(value) && value.type === "typesafe";
+}
+
+/**
+ * The merged input's paths that still carry the retired direct provider
+ * block: the primary `provider`, then each `fallbacks[*].provider`. The
+ * schema type error alone would name neither the migration nor the
+ * fallback's own path.
+ *
+ * @param merged - The merged raw config.
+ * @returns The offending paths, primary first.
+ */
+function retiredDirectProviderPaths(merged: Record<string, unknown>): string[] {
+  const paths: string[] = [];
+  if (retiredDirectProviderShape(merged.provider)) paths.push("provider");
+  const fallbacks = merged.fallbacks;
+  if (Array.isArray(fallbacks)) {
+    fallbacks.forEach((entry, index) => {
+      if (isObjectRecord(entry) && retiredDirectProviderShape(entry.provider)) {
+        paths.push(`fallbacks.${index}.provider`);
+      }
+    });
+  }
+  return paths;
+}
+
+/**
  * Load the layered config: global then project (`config.jsonc` wins),
  * deep-merged (project overrides), `${VAR}` refs expanded per layer,
  * validated against the zod schema. The project layer is skipped when
@@ -891,6 +928,23 @@ export function loadAiGuardConfig(
         message:
           '`instructions` no longer takes top-level `background`/`questions`; wrap them in the `classifier` slot: { "classifier": { … } }',
         sourcePath: layerThatWrote("instructions", global, project),
+      });
+    }
+    // The retired direct provider form now fails as an object where a string
+    // is required. The rejection is correct; name the migration so the
+    // operator learns what to write instead of guessing. The primary and
+    // every fallback entry get their own named issue (the fallback path would
+    // otherwise surface only as a generic type error).
+    for (const path of retiredDirectProviderPaths(merged)) {
+      issues.push({
+        path,
+        message:
+          'the direct System One provider form was removed; register the endpoint in pi, then set `modelType: "classifier"`',
+        sourcePath: layerThatWrote(
+          path.startsWith("fallbacks") ? "fallbacks" : "provider",
+          global,
+          project,
+        ),
       });
     }
     // Schema errors lead: the failure notice prints only the first issue, and a

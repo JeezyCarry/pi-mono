@@ -6,9 +6,10 @@
 
 import type { PromptRequestFacts } from "@gotgenes/pi-permission-system";
 
-import { normalizeEmpty } from "#src/utils.ts";
+import { cacheKey, normalizeEmpty, shortHash } from "#src/utils.ts";
 
 import type { AskContext } from "./ask.ts";
+import type { StrippedTranscript } from "./transcript-stripper.ts";
 
 export interface ReviewRequestContext {
   readonly ask: AskContext;
@@ -107,4 +108,37 @@ export function reviewRequestCacheMaterial(request: ReviewRequestContext): strin
     resolvedAlias: normalizeEmpty(ask.resolvedAlias),
     toolInputPreview: normalizeEmpty(ask.toolInputPreview),
   });
+}
+
+/** The cache identity: the two hashes the verdict cache keys on. */
+export interface CacheIdentity {
+  /** Hash of the decision-relevant request material. */
+  commandHash: string;
+  /** Hash of the transcript's trusted intent (the authorization source). */
+  contextHash: string;
+}
+
+/**
+ * Build the cache identity for one ask: both hashes the verdict cache
+ * reads, from the ONE material definition and the transcript's trusted
+ * intent. The context hash covers the trusted intent only — user messages
+ * are the authorization source the model honors, so a new user message
+ * must miss; tool calls are deliberately excluded (an agent retrying the
+ * same command between user turns would otherwise never hit). The residual
+ * risk — a verdict replayed into a prompt with different background tool
+ * calls — is accepted: tool calls are untrusted context, not
+ * authorization.
+ *
+ * @param request - The review request context (ask + target).
+ * @param transcript - The stripped transcript (its trusted intent is the context hash).
+ * @returns The command hash and the context hash.
+ */
+export function cacheIdentity(
+  request: ReviewRequestContext,
+  transcript: StrippedTranscript,
+): CacheIdentity {
+  return {
+    commandHash: shortHash(reviewRequestCacheMaterial(request)),
+    contextHash: shortHash(cacheKey(...transcript.trustedIntent)),
+  };
 }

@@ -15,7 +15,11 @@ import { describe, expect, it } from "vitest";
 
 import { MODE_VALUES, type Mode } from "#src/config/config-schema.ts";
 import { GENERIC_DENY_REASON, type RiskLevel } from "#src/model/model-verdict.ts";
-import { escalationMessage, failOpenNotice } from "#src/review/verdict-copy.ts";
+import {
+  escalationMessage,
+  failOpenNotice,
+  withAgentInstruction,
+} from "#src/review/verdict-copy.ts";
 import {
   type ModelDeferInfo,
   applyVerdictMode,
@@ -253,7 +257,10 @@ describe("resolveMapping — the mapping consequence rule", () => {
     expect(held.annotate).toBe(false);
     expect(held.emittedReason).toBeUndefined();
     expect(held.markNoticeShown).toBe(false);
-    expect(held.instructionSource).toBe("content");
+    expect(held.verdict).toEqual({
+      kind: "deny",
+      reason: withAgentInstruction(SOFT.reason, "content"),
+    });
     const notice = held.notice!;
     expect(notice.level).toBe("warning");
     expect(notice.message).toContain("unsafe");
@@ -295,7 +302,7 @@ describe("resolveMapping — the mapping consequence rule", () => {
     ).toEqual({
       annotate: false,
       notice: null,
-      instructionSource: null,
+      verdict: ALLOW_V,
       markNoticeShown: false,
     });
   });

@@ -29,18 +29,15 @@ import { effectiveOverride, type SessionOverrides } from "#src/config/session-ov
 import { PRE_CALL_MACHINERY_KINDS } from "#src/model/machinery-kinds.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import { openAsk } from "#src/review/request/ask.ts";
-import {
-  reviewRequestCacheMaterial,
-  type ReviewRequestContext,
-} from "#src/review/request/review-request.ts";
+import { cacheIdentity, type ReviewRequestContext } from "#src/review/request/review-request.ts";
 import {
   type SessionManagerLike,
   stripTranscript,
 } from "#src/review/request/transcript-stripper.ts";
-import { bestEffort, errorMessage, normalizeAndRedactText, shortHash } from "#src/utils.ts";
+import { bestEffort, errorMessage, normalizeAndRedactText } from "#src/utils.ts";
 
 import { accountModelOutcome, type CircuitBreaker, consumeTrip } from "./circuit-breaker.ts";
-import { releaseMachineryGate, releaseVerdictGate } from "./disposition.ts";
+import { createDisposition } from "./disposition.ts";
 import { isMachineryFailure, type ReviewerEngine } from "./reviewer-engine.ts";
 import type { VerdictCache } from "./verdict-cache.ts";
 import { withAgentInstruction } from "./verdict-copy.ts";
@@ -113,11 +110,12 @@ export interface ReviewPipelineDeps {
  * @returns The `authorize` function implementing the review pipeline.
  */
 export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["authorize"] {
-  // Once per pipeline instance: the fail-open notice (mode auto-approves
-  // what the reviewer didn't) fires on the first mapped allow, then stays
-  // silent — the operator asked for this mode, the notice guards against
-  // forgetting it's on.
-  const noticeState = { shown: false };
+  // The release seam, one per pipeline instance: it holds the
+  // once-per-pipeline fail-open notice state privately.
+  const disposition = createDisposition({
+    notify: deps.notify,
+    notifyApprovals: deps.config.notifyApprovals,
+  });
 
   const authorize: Authorizer["authorize"] = async (details, query, log) => {
     const { config } = deps;
@@ -139,14 +137,13 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         );
         // The review failed to open — a machinery-lane gate (a permanent
         // property of the ask's shape, not a transient reviewer failure).
-        return releaseMachineryGate(
+        return disposition.releaseMachineryGate({
           mode,
-          PRE_CALL_MACHINERY_KINDS.noTarget,
-          DecisionRecord.noTarget(details.requestId, opened.surface),
-          deps.circuitBreaker,
+          kind: PRE_CALL_MACHINERY_KINDS.noTarget,
+          record: DecisionRecord.noTarget(details.requestId, opened.surface),
+          breaker: deps.circuitBreaker,
           log,
-          deps.notify,
-        );
+        });
       }
       // surface-unmatched is outside this link's jurisdiction, but staying
       // fully silent hides coverage gaps (misspelled surface, host-renamed
@@ -187,9 +184,9 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
           state: policyResult.state,
           origin: policyResult.origin,
           matchedPattern: policyResult.matchedPattern ?? null,
-          // `?? null` is the wide-peer-range guard: pi-permission-system < 40
-          // has no such field, and an absent fact must key the same as "typed
-          // text decided".
+          // `?? null` guards PPS 40's optional result field: `matchedSpelling`
+          // is absent whenever the typed text decided, and an absent fact must
+          // key the same as "typed text decided".
           matchedSpelling: policyResult.matchedSpelling ?? null,
         }),
       );
@@ -269,28 +266,20 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         }),
       );
       const record = DecisionRecord.transcriptError(base);
-      return releaseMachineryGate(
+      return disposition.releaseMachineryGate({
         mode,
-        PRE_CALL_MACHINERY_KINDS.transcriptError,
+        kind: PRE_CALL_MACHINERY_KINDS.transcriptError,
         record,
-        deps.circuitBreaker,
+        breaker: deps.circuitBreaker,
         log,
-        deps.notify,
-      );
+      });
     }
 
     // Cache lookup. The request snapshot contains the action context,
     // working directory, and policy-derived path boundary, so a verdict
-    // cannot cross those contexts.
-    const commandHash = shortHash(reviewRequestCacheMaterial(request));
-    // The context hash covers the trusted intent only — user messages are
-    // the authorization source the model honors, so a new user message
-    // must miss. Tool calls are deliberately excluded: agent retries of the
-    // same command between user turns would otherwise never hit (each
-    // intervening tool call changes the transcript). The residual risk — a
-    // verdict replayed into a prompt with different background tool calls —
-    // is accepted: tool calls are untrusted context, not authorization.
-    const contextHash = shortHash(transcript.trustedIntent.join("\0"));
+    // cannot cross those contexts; the identity doctrine lives with the
+    // builder (see cacheIdentity).
+    const { commandHash, contextHash } = cacheIdentity(request, transcript);
     const cc = config.cache;
     const lookup = deps.verdictCache.lookup(commandHash, contextHash, cc);
     if (lookup.hit) {
@@ -301,23 +290,17 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       // rides along so a cached deny maps identically to its fresh first
       // pass.
       const emitted = applyVerdictMode(mode, lookup.verdict, undefined, lookup.riskLevel);
-      const released = releaseVerdictGate(
-        {
-          mode,
-          noticeShown: noticeState.shown,
-          notify: deps.notify,
-          notifyApprovals: config.notifyApprovals,
-        },
-        DecisionRecord.cacheHit(base, lookup.verdict),
-        lookup.verdict,
+      const released = disposition.releaseVerdictGate({
+        mode,
+        record: DecisionRecord.cacheHit(base, lookup.verdict),
+        original: lookup.verdict,
         emitted,
-        lookup.riskLevel,
+        riskLevel: lookup.riskLevel,
         // Cached verdicts are allow/deny only — no defer context at all.
-        undefined,
+        defer: undefined,
         // A hit replays a verdict, it measures nothing — the tail says so.
-        { kind: "cached" },
-      );
-      if (released.markNoticeShown) noticeState.shown = true;
+        cost: { kind: "cached" },
+      });
       const { record, verdict } = released;
       // Replay gate: the verdict was already recorded at its model gate —
       // debug stream only (see the log-stream doctrine in
@@ -353,16 +336,15 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
             engineResult.modelId,
             normalizeAndRedactText(engineResult.detail ?? ""),
           );
-      return releaseMachineryGate(
+      return disposition.releaseMachineryGate({
         mode,
-        isModelUnresolved
+        kind: isModelUnresolved
           ? PRE_CALL_MACHINERY_KINDS.modelUnresolved
           : PRE_CALL_MACHINERY_KINDS.authFailed,
         record,
-        deps.circuitBreaker,
+        breaker: deps.circuitBreaker,
         log,
-        deps.notify,
-      );
+      });
     }
     const { outcome: reviewOutcome, modelId } = engineResult;
     // The anchor the intent check judged against, for both engines and every
@@ -407,14 +389,9 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       deferInfo,
       reviewOutcome.riskLevel,
     );
-    const released = releaseVerdictGate(
-      {
-        mode,
-        noticeShown: noticeState.shown,
-        notify: deps.notify,
-        notifyApprovals: config.notifyApprovals,
-      },
-      DecisionRecord.model(
+    const released = disposition.releaseVerdictGate({
+      mode,
+      record: DecisionRecord.model(
         base,
         modelId,
         transcript.strippedCount,
@@ -422,16 +399,15 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         contextHash,
         deferReplySanitized,
       ),
-      reviewOutcome.verdict,
+      original: reviewOutcome.verdict,
       emitted,
-      reviewOutcome.riskLevel,
-      deferInfo,
+      riskLevel: reviewOutcome.riskLevel,
+      defer: deferInfo,
       // latencyMs already covers the review's total cost: the empty-reply
       // retry accumulates into it and the pool stamps the whole walk (failover
       // included), so the tail is the ask's wall-clock review cost.
-      { kind: "fresh", latencyMs: reviewOutcome.latencyMs },
-    );
-    if (released.markNoticeShown) noticeState.shown = true;
+      cost: { kind: "fresh", latencyMs: reviewOutcome.latencyMs },
+    });
     const { record, verdict } = released;
     log.review(DECISION_EVENT, record);
 

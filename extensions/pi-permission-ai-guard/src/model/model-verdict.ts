@@ -37,7 +37,7 @@ export type ModelCallDeferKind =
  * lines carry the clarification question, not the lean), so it cannot
  * anchor the operator's judgment.
  */
-export type VerdictLean = "allow" | "deny";
+export type VerdictLean = Extract<AuthorizerVerdict["kind"], "allow" | "deny">;
 
 /** Result of a model review call. */
 export interface ReviewOutcome {

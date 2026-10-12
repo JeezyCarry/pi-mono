@@ -3,13 +3,50 @@ import { describe, expect, it } from "vitest";
 import {
   attempt,
   bestEffort,
+  cacheKey,
   encodeActionTextForPrompt,
   isObjectRecord,
   normalizeAndRedactText,
   normalizeText,
   redactSecrets,
+  textFromContent,
   truncateMiddle,
 } from "#src/utils.ts";
+
+describe("cacheKey", () => {
+  it("separates adjacent fields so concatenation cannot collide", () => {
+    expect(cacheKey("a", "b")).toBe("a\0b");
+    expect(cacheKey("a", "bc")).not.toBe(cacheKey("ab", "c"));
+    expect(cacheKey("a", "b", "c")).toBe("a\0b\0c");
+  });
+
+  it("normalizes an absent part to empty", () => {
+    expect(cacheKey("a", undefined)).toBe(cacheKey("a", ""));
+  });
+});
+
+describe("textFromContent", () => {
+  it("skips empty text blocks so separators only join real text", () => {
+    expect(
+      textFromContent([
+        { type: "text", text: "a" },
+        { type: "text", text: "" },
+        { type: "text", text: "b" },
+      ]),
+    ).toBe("a\nb");
+  });
+
+  it("ignores non-text and malformed blocks", () => {
+    expect(
+      textFromContent([
+        null,
+        { type: "image" },
+        { type: "text", text: 42 },
+        { type: "text", text: "ok" },
+      ]),
+    ).toBe("ok");
+  });
+});
 
 describe("bestEffort / attempt", () => {
   it("bestEffort swallows a throw and keeps going", () => {

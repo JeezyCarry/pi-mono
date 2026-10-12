@@ -3,9 +3,8 @@
  * verdicts. Deciding only — the human-facing copy lives in verdict-copy.
  *
  * This module owns the verdict-bearing side of the leniency ladder — the
- * hard/soft deny tiers, the soft-deny/model-defer/machinery lanes'
- * application.
- * The ladder's operational facts (lanes, cycle membership, emphasis,
+ * hard/soft deny tiers, the soft-deny/model-defer/machinery application.
+ * The ladder's operational facts (cut lines, cycle membership, emphasis,
  * config warnings) are single-sourced in {@link ../config/mode-table.ts} and
  * consumed here as data.
  *
@@ -22,14 +21,14 @@
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 import type { Mode } from "#src/config/config-schema.ts";
-import { MODE_TABLE, type ModeLanes } from "#src/config/mode-table.ts";
+import {
+  MODE_TABLE,
+  type ModeEntry,
+  type Suspicion,
+  suspicionRank,
+} from "#src/config/mode-table.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
-import type {
-  ModelCallDeferKind,
-  RiskLevel,
-  VerdictLean,
-  VerdictOrigin,
-} from "#src/model/model-verdict.ts";
+import type { ModelCallDeferKind, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
 
 import {
   escalationMessage,
@@ -37,6 +36,7 @@ import {
   machineryDenyReason,
   machineryDeferNotice,
   uncertainDenyReason,
+  withAgentInstruction,
   type DenyInstructionSource,
 } from "./verdict-copy.ts";
 
@@ -62,7 +62,7 @@ export interface ModelDeferInfo {
 
 /**
  * The two deny tiers the ladder splits a deny into — hard (terminal in
- * every mode) and soft (mapped by the mode's lanes).
+ * every mode) and soft (mapped by the mode's cut lines).
  */
 type DenyTier = "hard" | "soft";
 
@@ -87,10 +87,10 @@ export function denyTier(riskLevel: RiskLevel | undefined): DenyTier {
  * transcript-error), which never hold a parsed verdict.
  *
  * @param mode - The effective mode.
- * @returns The lane's verdict kind (never allow).
+ * @returns The machinery lane's target (never allow).
  */
-export function machineryTarget(mode: Mode): ModeLanes["machinery"] {
-  return lanes(mode).machinery;
+export function machineryTarget(mode: Mode): ModeEntry["machinery"] {
+  return MODE_TABLE[mode].machinery;
 }
 
 /**
@@ -119,94 +119,63 @@ export function applyVerdictMode(
   if (verdict.kind === "allow") {
     return verdict;
   }
-  if (verdict.kind === "deny") {
-    // Hard-tier denies are terminal in every mode — the reviewer's hard
-    // stops are the one judgment the ladder never loosens.
-    if (denyTier(riskLevel) === "hard") {
-      return verdict;
-    }
-    return mapLane(lanes(policy).softDeny, verdict, "deny", undefined, policy);
+  // Machinery failures are their own axis (a failure to obtain a verdict),
+  // never on the suspicion line — map through the mode's machinery lane,
+  // which never allows: a broken reviewer must not rubber-stamp.
+  if (verdict.kind === "defer" && modelDefer?.kind !== "model-defer") {
+    return MODE_TABLE[policy].machinery === "deny"
+      ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy) }
+      : verdict;
   }
-  // Defer: the lane depends on WHO deferred and, for the model's own
-  // uncertainty, which way it leans — machinery failures never map to
-  // allow, and the model's defer lane splits by lean (benign-leaned
-  // doubts pass in the middle modes, danger-leaned ones ask everywhere
-  // below strict).
-  if (modelDefer?.kind !== "model-defer") {
-    return mapLane(lanes(policy).machinery, verdict, "defer", modelDefer, policy);
-  }
-  const lane =
-    modelDefer.lean === "allow"
-      ? lanes(policy).deferLeanAllow
-      : modelDefer.lean === "deny"
-        ? lanes(policy).deferLeanDeny
-        : lanes(policy).deferNeutral;
-  return mapLane(lane, verdict, "defer", modelDefer, policy);
-}
-
-/**
- * The mode's ladder lanes — the single-sourced table, projected.
- *
- * @param mode - The effective mode.
- * @returns The mode's lanes.
- */
-function lanes(mode: Mode): ModeLanes {
-  return MODE_TABLE[mode].lanes;
-}
-
-/**
- * Emit the mapped verdict for one lane of the ladder table, keyed on the
- * verdict's ORIGIN — deny origins map by tier (caller-side), defer origins
- * map by defer lane (the model's uncertainty vs machinery failure).
- *
- * @param target - The lane's verdict kind.
- * @param verdict - The original verdict.
- * @param origin - The original verdict's kind (deny or defer).
- * @param modelDefer - Defer context for reason extraction on deny targets.
- * @param policy - The effective mode (names the policy in deny reasons).
- * @returns The emitted verdict.
- */
-function mapLane(
-  target: AuthorizerVerdict["kind"],
-  verdict: AuthorizerVerdict,
-  origin: VerdictOrigin,
-  modelDefer: ModelDeferInfo | undefined,
-  policy: Mode,
-): AuthorizerVerdict {
-  if (target === "allow") {
+  // Everything else sits on the suspicion line: a deny by its tier (a
+  // hard-tier deny is terminal in every mode — the one judgment the ladder
+  // never loosens), a model defer by its lean.
+  const suspicion: Suspicion =
+    verdict.kind === "deny"
+      ? denyTier(riskLevel) === "hard"
+        ? "hard-deny"
+        : "soft-deny"
+      : modelDefer?.lean === "allow"
+        ? "defer-benign"
+        : modelDefer?.lean === "deny"
+          ? "defer-danger"
+          : "defer-neutral";
+  const { acceptAtOrBelow, rejectAtOrAbove } = MODE_TABLE[policy].cuts;
+  const rank = suspicionRank(suspicion);
+  if (rank <= suspicionRank(acceptAtOrBelow)) {
     return { kind: "allow" };
   }
-  if (origin === "defer") {
-    // Defer origin: defer passes through as-is; deny synthesizes a
-    // teaching reason (the clarification request for the reviewer's own
-    // uncertainty, the classified failure for machinery).
-    if (target === "defer") {
-      return verdict;
-    }
-    return {
-      kind: "deny",
-      reason:
-        modelDefer?.kind === "model-defer"
-          ? (modelDefer.reason ?? uncertainDenyReason(policy))
-          : machineryDenyReason(modelDefer?.kind, policy),
-    };
+  if (rank >= suspicionRank(rejectAtOrAbove)) {
+    // A deny keeps its teaching reason; a rejected defer synthesizes one
+    // (the model's clarification request, or the generic uncertainty copy).
+    return verdict.kind === "deny"
+      ? verdict
+      : { kind: "deny", reason: modelDefer?.reason ?? uncertainDenyReason(policy) };
   }
-  // Deny origin: deny passes through with its reason; defer drops the
-  // reason — the escalation message re-surfaces it at the human.
-  if (target === "deny") {
-    return verdict;
-  }
-  return { kind: "defer" };
+  // The ask band: a defer passes through; a softened deny becomes a defer.
+  return verdict.kind === "defer" ? verdict : { kind: "defer" };
+}
+
+/** The operator notice a mapping decision owes, rendered and leveled. */
+export interface MappingNotice {
+  message: string;
+  level: "info" | "warning";
 }
 
 /**
- * What the pipeline owes after the mode maps a verdict: the decision
- * record's annotation input and the operator notice. Pure — the
- * once-per-pipeline fail-open notice state is READ as an input and
- * returned as a {@link MappingDecision.markNoticeShown} signal; the
+ * What the disposition owes after the mode maps a verdict: the verdict the
+ * agent receives, the decision record's annotation input, and the operator
+ * notice. Pure — the once-per-pipeline fail-open notice state is READ as an
+ * input and returned as a {@link MappingDecision.markNoticeShown} signal; the
  * caller performs the mutation.
  */
-interface MappingDecision {
+export interface MappingDecision {
+  /**
+   * The verdict the agent receives. A deny carries its agent instruction
+   * (machinery vs content) — the same rule that picked the deny's reason
+   * attaches the instruction, so no caller can drop it.
+   */
+  verdict: AuthorizerVerdict;
   /**
    * The `emittedReason` for the decision record's mapping annotation: deny→allow
    * keeps the swallowed deny reason; defer→allow marks the swallowed
@@ -230,13 +199,7 @@ interface MappingDecision {
    * which no dialog would show), and a machinery defer that emitted as defer (the
    * cause notice).
    */
-  notice: { message: string; level: "info" | "warning" } | null;
-  /**
-   * The agent instruction's source for an emitted deny — the
-   * discrimination rule (machinery iff the original was a machinery
-   * defer) lives here, once; null when nothing deny-shaped was emitted.
-   */
-  instructionSource: DenyInstructionSource | null;
+  notice: MappingNotice | null;
   /**
    * Whether this decision consumes the once-per-pipeline fail-open
    * notice state (the caller flips its `shown` flag).
@@ -297,24 +260,21 @@ export function resolveMapping(input: MappingInput): MappingDecision {
     input;
   // The agent instruction's source: machinery iff what was denied is a
   // machinery defer (the review failed — retry-later copy); content
-  // otherwise (the request itself was judged — stop-pursuing copy). Null
-  // when nothing deny-shaped was emitted. One rule, stated once: an
-  // unclassified defer counts as machinery here exactly as it does in the
-  // lane table above, and the cache-hit path derives "content" from the
-  // same rule structurally (a cached original is allow/deny only, so the
-  // machinery branch is unreachable by type, not by comment).
-  const instructionSource: DenyInstructionSource | null =
-    emitted.kind === "deny"
-      ? original.kind === "defer" && deferKind !== "model-defer"
-        ? "machinery"
-        : "content"
-      : null;
+  // otherwise (the request itself was judged — stop-pursuing copy). One
+  // rule, stated once: an unclassified defer counts as machinery here
+  // exactly as it does in the lane table above, and the cache-hit path
+  // derives "content" from the same rule structurally (a cached original
+  // is allow/deny only, so the machinery branch is unreachable by type,
+  // not by comment). Applied only where a deny is emitted — the verdict
+  // carries the instruction, so no caller can drop it.
+  const instructionSource: DenyInstructionSource =
+    original.kind === "defer" && deferKind !== "model-defer" ? "machinery" : "content";
   // A defer that emitted as defer owes a notice: the model's reason (the dialog
   // alone would never show what it could not establish), or the machinery cause (a
   // forced defer must name its failure kind, same doctrine as the pre-call gates).
   // The model's reason is the whole line: a prefix would add a second separator to
   // the host's own. A terse defer without a reason stays silent by design.
-  const deferNotice: { message: string; level: "info" | "warning" } | null =
+  const deferNotice: MappingNotice | null =
     emitted.kind === "defer" && original.kind === "defer"
       ? deferKind === "model-defer" && deferReason
         ? {
@@ -332,19 +292,25 @@ export function resolveMapping(input: MappingInput): MappingDecision {
     // reason rather than falling through to the defer notice, which renders
     // nothing. A defer that holds still owes its own notice (the machinery cause,
     // or the model's reason).
-    if (original.kind === "deny") {
+    if (emitted.kind === "deny" && original.kind === "deny") {
+      // Held deny: the released verdict carries `emitted.reason` (what the mode
+      // actually emitted); `original` supplies the escalation copy. The outer
+      // kind-equality guard makes `emitted.kind === "deny"` the only case here.
       const denied = original.reason ? original : { ...original, reason: GENERIC_DENY_REASON };
       return {
         annotate: false,
         notice: { message: escalationMessage(denied, riskLevel, "denied"), level: "warning" },
-        instructionSource,
+        verdict: {
+          kind: "deny",
+          reason: withAgentInstruction(emitted.reason, instructionSource),
+        },
         markNoticeShown: false,
       };
     }
     return {
       annotate: false,
       notice: deferNotice,
-      instructionSource,
+      verdict: emitted,
       markNoticeShown: false,
     };
   }
@@ -379,5 +345,9 @@ export function resolveMapping(input: MappingInput): MappingDecision {
     markNoticeShown = true;
     notice = { message: failOpenNotice(mode), level: "warning" };
   }
-  return { annotate: true, emittedReason, notice, instructionSource, markNoticeShown };
+  const verdict: AuthorizerVerdict =
+    emitted.kind === "deny"
+      ? { kind: "deny", reason: withAgentInstruction(emitted.reason, instructionSource) }
+      : emitted;
+  return { annotate: true, emittedReason, notice, verdict, markNoticeShown };
 }

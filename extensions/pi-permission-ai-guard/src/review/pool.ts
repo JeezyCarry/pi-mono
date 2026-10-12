@@ -1,6 +1,6 @@
 /**
  * ReviewerPool: one ordered failover loop over heterogeneous reviewer
- * endpoints (chat registry models and classifier System One endpoints, in any
+ * endpoints (chat registry models and classifier registry models, in any
  * order). Per-lane adapters translate backend failures into the
  * three-state {@link AttemptResult}; the pool only pattern-matches the
  * three states — it never interprets a backend error itself.
@@ -62,38 +62,16 @@ export interface ChatPoolEndpoint {
   id: string;
 }
 
-/** A classifier endpoint's provider: explicit connection, env-backed when unset. */
-export interface ClassifierProvider {
-  type: "typesafe";
-  baseUrl?: string;
-  apiKey?: string;
+/** One classifier endpoint in the ordered failover list (pi's registry classifier). */
+export interface ClassifierPoolEndpoint {
+  lane: "classifier";
+  /** Pi's provider id; the model resolves through the model registry. */
+  provider: string;
+  model: string;
+  timeoutMs: number;
+  /** The endpoint's bare audit identity (Pi's provider id: `<provider>/<model>`). */
+  id: string;
 }
-
-/** One classifier endpoint in the ordered failover list. */
-export type ClassifierPoolEndpoint =
-  | {
-      lane: "classifier";
-      /** Explicit connection, env-backed when unset. */
-      backend: "direct";
-      provider: ClassifierProvider;
-      model: string;
-      timeoutMs: number;
-      /** The endpoint's bare audit identity (the SDK protocol prefix: `typesafe/<model>`). */
-      id: string;
-    }
-  | {
-      lane: "classifier";
-      /** Pi's built-in classifier, resolved through the model registry. */
-      backend: "registry";
-      provider: string;
-      model: string;
-      timeoutMs: number;
-      /** The endpoint's bare audit identity (Pi's provider id: `<provider>/<model>`). */
-      id: string;
-    };
-
-/** The registry classifier endpoint: pi resolves the model, so `provider` is a name. */
-export type ClassifierRegistryEndpoint = Extract<ClassifierPoolEndpoint, { backend: "registry" }>;
 
 /** One endpoint in the ordered failover list (pure data — lane dispatch is the adapter's). */
 export type PoolEndpoint = ChatPoolEndpoint | ClassifierPoolEndpoint;

@@ -39,8 +39,7 @@ const chatEndpoint = (model: string, timeoutMs = 1000): PoolEndpoint => ({
 
 const classifierEndpoint = (model: string, timeoutMs = 1000): PoolEndpoint => ({
   lane: "classifier",
-  backend: "direct",
-  provider: { type: "typesafe", baseUrl: "https://x.example", apiKey: "k" },
+  provider: "typesafe",
   model,
   timeoutMs,
   id: `typesafe/${model}`,

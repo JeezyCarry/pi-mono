@@ -1,3 +1,5 @@
+import type { ClassifierAnswer } from "@earendil-works/pi-ai";
+
 import type { ReviewOutcome, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import { underscoresToWords } from "#src/utils.ts";
@@ -5,7 +7,7 @@ import { underscoresToWords } from "#src/utils.ts";
 import { DANGER_NONE, RISK_RUBRIC } from "./questions.ts";
 
 /**
- * The built-in answers as 0–1 probabilities/confidences: `noul` arrives
+ * The built-in answers as 0–1 probabilities/confidences: `bool` arrives
  * as a probability already, the 0–4 `score` is normalized by
  * {@link projectClassifierAnswers}, so every answer speaks one scale.
  */
@@ -23,17 +25,8 @@ export interface ClassifierThresholds {
   confidenceThreshold: number;
 }
 
-/** One raw SDK answer (the per-question shape the SDK returns). */
-interface TypesafeRawAnswer {
-  type: string;
-  noul?: number;
-  choice?: string;
-  confidence?: number;
-  score?: number;
-}
-
 /**
- * Thrown when a System One response is missing a required reading.
+ * Thrown when a classifier response is missing a required reading.
  * The adapter's catch routes it to a machinery defer (never allow) —
  * a reviewer that did not answer is broken, not uncertain.
  */
@@ -45,37 +38,35 @@ export class IncompleteClassifierResponseError extends Error {
 }
 
 /**
- * Project the SDK's typed answers into {@link ClassifierAnswers} — the single
+ * Project pi-ai's typed answers into {@link ClassifierAnswers} — the single
  * 0–4 → 0–1 scale-conversion point.
  *
  * Readings are required: `danger_category` / `intent_match` / `risk` must
- * be present with their reading fields (choice / noul / score). A missing
+ * be present with their reading fields (choice / bool / score). A missing
  * reading throws {@link IncompleteClassifierResponseError} — "never answered"
  * is a malformed response, not a zero reading. Confidence is optional:
  * missing confidence reads as 0 (uncertain), the model's own defer path.
  *
- * @param raw - The SDK's typed answers by question id.
+ * @param raw - Pi-ai's typed answers by question id.
  * @returns The calibrated 0–1 answers.
  */
-export function projectClassifierAnswers(
-  raw: Record<string, TypesafeRawAnswer>,
-): ClassifierAnswers {
+export function projectClassifierAnswers(raw: Record<string, ClassifierAnswer>): ClassifierAnswers {
   const danger = raw.danger_category;
-  if (danger?.choice === undefined) {
+  if (danger?.type !== "choice" || danger.choice === undefined) {
     throw new IncompleteClassifierResponseError("danger_category.choice");
   }
   const intent = raw.intent_match;
-  if (intent?.noul === undefined) {
-    throw new IncompleteClassifierResponseError("intent_match.noul");
+  if (intent?.type !== "bool" || intent.probability === undefined) {
+    throw new IncompleteClassifierResponseError("intent_match.probability");
   }
   const risk = raw.risk;
-  if (risk?.score === undefined) {
+  if (risk?.type !== "score" || risk.score === undefined) {
     throw new IncompleteClassifierResponseError("risk.score");
   }
   return {
     dangerCategory: danger.choice,
     dangerConfidence: danger.confidence ?? 0,
-    intentMatch: intent.noul,
+    intentMatch: intent.probability,
     // The score is the probability-weighted level index, so its range is the
     // rubric's own level count minus one (TypeSafe requires at least two
     // levels). Derive the divisor rather than hard-coding it: a hard-coded 4

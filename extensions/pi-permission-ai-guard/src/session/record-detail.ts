@@ -15,7 +15,7 @@
 
 import { type KeybindingsManager, type Theme } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import { type Component, type OverlayOptions } from "@earendil-works/pi-tui";
+import { type Component, type OverlayOptions, type TUI } from "@earendil-works/pi-tui";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 
 /**
@@ -88,7 +88,7 @@ export type DialogKeybindings = Pick<KeybindingsManager, "matches">;
  * The TUI slice the custom-dialog factory signature requires — the dialogs
  * here don't read it.
  */
-export type DialogTui = { requestRender(): void };
+export type DialogTui = Pick<TUI, "requestRender">;
 
 /**
  * The options shape a custom-dialog call carries: the host's

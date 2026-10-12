@@ -3,32 +3,24 @@ import { describe, expect, it } from "vitest";
 import { configSchema, isClassifierMode } from "#src/config/config-schema.ts";
 
 const chatBase = { provider: "anthropic", model: "claude-haiku-4-5" };
-const classifierBase = { provider: { type: "typesafe" }, model: "jev-1.13" };
+const classifierBase = { provider: "typesafe", model: "jev-1.13", modelType: "classifier" };
 
 describe("provider union", () => {
   it("accepts a string provider (registry reference)", () => {
     expect(configSchema.safeParse(chatBase).success).toBe(true);
   });
 
-  it("accepts a bare typesafe object (env fallback)", () => {
-    const parsed = configSchema.safeParse(classifierBase);
-    expect(parsed.success).toBe(true);
-  });
-
-  it("accepts a full typesafe object", () => {
-    const parsed = configSchema.safeParse({
-      ...classifierBase,
-      provider: { type: "typesafe", baseUrl: "https://openrouter.ai/api", apiKey: "k" },
-    });
-    expect(parsed.success).toBe(true);
-  });
-
-  it("rejects an unknown object type", () => {
-    const parsed = configSchema.safeParse({
-      ...classifierBase,
-      provider: { type: "other" },
-    });
-    expect(parsed.success).toBe(false);
+  it("rejects the removed direct object (migration is named at load)", () => {
+    // The `{ type: "typesafe" }` provider form is gone: the schema stays a
+    // dumb type error; the load layer names the migration and the exact
+    // path (primary `provider`, or `fallbacks.N.provider`).
+    for (const provider of [
+      { type: "typesafe" },
+      { type: "typesafe", baseUrl: "https://openrouter.ai/api", apiKey: "k" },
+      { type: "other" },
+    ]) {
+      expect(configSchema.safeParse({ ...classifierBase, provider }).success).toBe(false);
+    }
   });
 
   it("applies classifier defaults", () => {
@@ -259,38 +251,37 @@ describe("modelType", () => {
     expect(parsed.success).toBe(true);
   });
 
-  it("rejects modelType on a direct connection", () => {
-    const parsed = configSchema.safeParse({ ...classifierBase, modelType: "classifier" });
-    expect(parsed.success).toBe(false);
-    if (parsed.success) return;
-    const issue = parsed.error.issues.find((i) => i.path.join(".") === "modelType");
-    expect(issue?.message).toContain("registry (string) providers only");
+  it("rejects the removed direct connection even with modelType", () => {
+    expect(
+      configSchema.safeParse({
+        provider: { type: "typesafe" },
+        model: "jev-1.13",
+        modelType: "classifier",
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects an unknown modelType", () => {
     const parsed = configSchema.safeParse({ ...classifierBase, modelType: "bogus" });
     expect(parsed.success).toBe(false);
     if (parsed.success) return;
-    // The union fails opaquely at the top; the branch error underneath is
-    // the one that names the offending field and the two legal values.
     const [issue] = parsed.error.issues;
-    expect(issue?.code).toBe("invalid_union");
-    expect(JSON.stringify(issue)).toContain('"path":["modelType"]');
+    expect(issue?.code).toBe("invalid_value");
     expect(JSON.stringify(issue)).toContain('"values":["chat","classifier"]');
   });
 
-  it("rejects modelType inside a typesafe fallback (strict)", () => {
-    const parsed = configSchema.safeParse({
-      ...chatBase,
-      fallbacks: [
-        {
-          provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "k" },
-          model: "fb",
-          modelType: "classifier",
-        },
-      ],
-    });
-    expect(parsed.success).toBe(false);
+  it("rejects a direct object inside a fallback", () => {
+    expect(
+      configSchema.safeParse({
+        ...chatBase,
+        fallbacks: [
+          {
+            provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "k" },
+            model: "fb",
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts a classifier fallback on a string provider", () => {

@@ -67,22 +67,10 @@ export type ClassifierQuestionId = (typeof CLASSIFIER_QUESTION_IDS)[number];
 /**
  * How the registry provider resolves the model — pi's model-type
  * vocabulary (`ModelType`). Absent means chat; `classifier` selects pi's
- * built-in classifier models via `modelRegistry.classify` instead
- * of the direct TypeSafe connection. Closed set: the enum is this
- * extension's honest capability surface.
+ * built-in classifier models via `modelRegistry.classify`. Closed set: the
+ * enum is this extension's honest capability surface.
  */
 export const MODEL_TYPE_VALUES = ["chat", "classifier"] as const;
-
-/** A direct TypeSafe connection (object provider) — both fields optional. */
-export const directProviderSchema = z
-  .object({
-    type: z.literal("typesafe"),
-    baseUrl: z.string().min(1).optional(),
-    apiKey: z.string().min(1).optional(),
-  })
-  .strict();
-
-export type DirectProvider = z.infer<typeof directProviderSchema>;
 
 /**
  * One registry-resolved fallback: a chat model by default, or a pi
@@ -103,28 +91,10 @@ export const registryFallbackSchema = z
   })
   .strict();
 
-/** One explicitly configured System One fallback (no implicit reuse of primary credentials). */
-export const directFallbackSchema = z
-  .object({
-    provider: directProviderSchema.extend({
-      baseUrl: z.url(),
-      apiKey: z.string().min(1),
-    }),
-    model: z.string().min(1),
-    timeoutMs: z.number().int().min(1).max(300_000).optional(),
-  })
-  .strict();
+/** One backup reviewer: a registry model (chat by default, or a classifier). */
+export type FallbackItem = z.infer<typeof registryFallbackSchema>;
 
-/**
- * One backup reviewer in either lane: a registry model (string provider)
- * or an explicitly authenticated System One endpoint (object provider).
- * The provider shape discriminates — no same-lane constraint.
- */
-export const fallbackItemSchema = z.union([registryFallbackSchema, directFallbackSchema]);
-
-export type FallbackItem = z.infer<typeof fallbackItemSchema>;
-
-/** One instruction value: text, a JSON object, or an array (SDK EntryType minus null). */
+/** One instruction value: text, a JSON object, or an array. */
 const instructionValueSchema = z.union([
   z.string().min(1),
   z.record(z.string(), z.json()),
@@ -283,17 +253,15 @@ const configBaseSchema = z.object({
   // Empty array = review nothing. Excludes-only (no includes) = review nothing.
   surfaces: z.array(z.string().min(1)).default(["bash", "mcp", "skill"]),
 
-  // Ordered backup reviewers in any lane: registry models (resolved
-  // through Pi's registry) or System One endpoints (explicitly
-  // authenticated). The provider shape discriminates per item — no
-  // same-lane constraint. An empty list preserves single-model behavior.
-  fallbacks: fallbackItemSchema.array().max(5).default([]),
+  // Ordered backup reviewers in any lane: registry models, chat or
+  // classifier, resolved through Pi's registry. An empty list preserves
+  // single-model behavior.
+  fallbacks: registryFallbackSchema.array().max(5).default([]),
 
-  // Classifier verdict thresholds, read on both classifier backends (a
-  // registry primary reads them exactly as a direct one does). Both keys
-  // stay optional here so "the operator wrote it" is still observable at
-  // refine time (a default would always materialize one of them); the
-  // legacy-key fold below then fills the winner, and defaults apply to that.
+  // Classifier verdict thresholds. Both keys stay optional here so "the
+  // operator wrote it" is still observable at refine time (a default would
+  // always materialize one of them); the legacy-key fold below then fills the
+  // winner, and defaults apply to that.
   classifier: classifierBlockSchema.optional(),
   [CLASSIFIER_ALIAS_KEY]: classifierBlockSchema.optional(),
 
@@ -350,15 +318,6 @@ const registryShapeSchema = configBaseSchema.extend({
   instructions: instructionsSchema,
 });
 
-const directShapeSchema = configBaseSchema.extend({
-  provider: directProviderSchema,
-  // Reserved so the contradiction check below can see it: a direct
-  // connection never goes through the registry, so any modelType
-  // here is rejected, never silently dropped.
-  modelType: z.enum(MODEL_TYPE_VALUES).optional(),
-  instructions: instructionsSchema,
-});
-
 /**
  * Every top-level key a layer may set. The loader reports anything else: zod
  * drops unknown keys silently, and a typo in a safety-relevant name
@@ -368,24 +327,11 @@ const directShapeSchema = configBaseSchema.extend({
  */
 export const CONFIG_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   ...Object.keys(registryShapeSchema.shape),
-  ...Object.keys(directShapeSchema.shape),
   CLASSIFIER_ALIAS_KEY,
 ]);
 
-const configShapeSchema = z
-  .union([registryShapeSchema, directShapeSchema])
-  .superRefine((config: z.output<typeof configShapeSchema>, ctx) => {
-    // modelType is registry addressing — a direct connection ignores it,
-    // so its presence means the config doesn't say what the operator
-    // thinks it says. Reject loudly (fail-safe), never silently drop.
-    if (typeof config.provider === "object" && config.modelType !== undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["modelType"],
-        message:
-          "modelType applies to registry (string) providers only; remove it from this direct System One config",
-      });
-    }
+const configShapeSchema = registryShapeSchema.superRefine(
+  (config: z.output<typeof registryShapeSchema>, ctx) => {
     // The alias key is the deprecated spelling of `classifier`. Both written
     // is a contradiction the operator must resolve — never silently pick one.
     if (config.classifier !== undefined && config[CLASSIFIER_ALIAS_KEY] !== undefined) {
@@ -443,7 +389,8 @@ const configShapeSchema = z
         });
       }
     }
-  });
+  },
+);
 
 /**
  * The lanes a config's reviewer pool contains, judged by
@@ -483,9 +430,6 @@ export function uncoveredInstructionLanes(config: AiGuardConfig): Array<"chat" |
   return configuredLanes(config).filter((lane) => overlay[lane] === undefined);
 }
 
-/** Distributive omit — plain `Omit` on a union collapses it to one member. */
-type OmitLegacy<T> = T extends unknown ? Omit<T, typeof CLASSIFIER_ALIAS_KEY> : never;
-
 export const configSchema = configShapeSchema.transform((config): AiGuardConfig => {
   // Fold the deprecated alias into `classifier` and strip the retired
   // `timeoutMs`, so every consumer reads one field with no dead knobs. The
@@ -507,35 +451,22 @@ export const configSchema = configShapeSchema.transform((config): AiGuardConfig 
  * Validated extension configuration (zod schema inference): the legacy
  * `typesafe` key is folded away and `classifier` is required on every member.
  */
-export type AiGuardConfig = OmitLegacy<z.output<typeof configShapeSchema>> & {
+export type AiGuardConfig = Omit<
+  z.output<typeof configShapeSchema>,
+  typeof CLASSIFIER_ALIAS_KEY
+> & {
   classifier: z.output<typeof classifierThresholdsSchema>;
 };
 
-/** The config union's direct member (object provider — the classifier engine's config). */
-export type DirectProviderConfig = Extract<AiGuardConfig, { provider: DirectProvider }>;
-
 /**
- * Whether the config runs the classifier lane: a direct TypeSafe connection,
- * or a registry string provider with classifier modelType. The pool's
- * lane selection, the instruction-overlay gate, and the lane instruction
- * slicing all consume this — one predicate, not three shape checks.
+ * Whether the config runs the classifier lane: a registry string provider
+ * with classifier modelType. The pool's lane selection, the
+ * instruction-overlay gate, and the lane instruction slicing all consume
+ * this — one predicate, not three shape checks.
  *
  * @param config - The validated config (or the pre-fold shape it comes from).
  * @returns True when the primary reviewer is a classifier endpoint.
  */
-export function isClassifierMode(config: { provider: unknown; modelType?: unknown }): boolean {
-  return isDirectProviderShape(config.provider) || config.modelType === "classifier";
-}
-
-/**
- * Whether a provider field carries the direct-connection block rather than a
- * registry id. One shape rule for the two sites that discriminate on it —
- * `isClassifierMode` and the endpoint builder. Presumes a schema-validated
- * config: an object here is the block, never null or an array.
- *
- * @param provider - A config's `provider` field.
- * @returns True for the direct-connection block.
- */
-export function isDirectProviderShape(provider: unknown): provider is DirectProvider {
-  return typeof provider === "object";
+export function isClassifierMode(config: { modelType?: unknown }): boolean {
+  return config.modelType === "classifier";
 }

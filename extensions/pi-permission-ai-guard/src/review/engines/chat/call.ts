@@ -1,7 +1,7 @@
 /**
  * Chat lane model call: ask the reviewer model to assess a permission
  * request. Chat-only by construction — the classifier lane reaches its
- * model through the System One SDK (`classifier/client.ts`), never
+ * model through Pi's classifier (`classifier/client.ts`), never
  * `ModelRegistry.complete`, so this call machinery lives with its lane
  * instead of the lane-neutral `model/` directory.
  *
@@ -31,7 +31,7 @@ import { MAX_PROVIDER_ERROR_CHARS, emitCallFailure } from "#src/audit/call-failu
 import type { AuditCorrelation } from "#src/audit/decision-record.ts";
 import { MODEL_REPLY_EVENT } from "#src/audit/events.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
-import type { ModelRegistryLike } from "#src/model/model-registry.ts";
+import type { ChatRegistryLike } from "#src/model/model-registry.ts";
 import type {
   AvailabilityReason,
   ModelCallDeferKind,
@@ -120,13 +120,13 @@ export interface ModelCallContext extends AuditCorrelation {
  * (`getProvider().streamSimple()`): pi-ai brands the provider input, so
  * that call breaks whenever upstream tightens it.
  *
- * `registry.streamSimple` requires pi >= 0.86 (the registry facade gained it
- * there); the peer dependency floor matches.
+ * `registry.streamSimple` is the chat lane's only correct call path; the
+ * peer floor (`pi >= 1.0`) matches.
  *
  * @param getRegistry - Function returning the model registry (or undefined if unavailable).
  * @returns A `ModelCallFn` that completes a model call via `registry.streamSimple`.
  */
-export function createModelCall(getRegistry: () => ModelRegistryLike | undefined): ModelCallFn {
+export function createModelCall(getRegistry: () => ChatRegistryLike | undefined): ModelCallFn {
   return async (model, context, options) => {
     const registry = getRegistry();
     if (!registry) {

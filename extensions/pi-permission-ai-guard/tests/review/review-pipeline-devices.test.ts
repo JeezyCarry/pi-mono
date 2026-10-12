@@ -607,6 +607,32 @@ describe("createReviewPipeline — review follow-ups (cache-hit fail-open + tota
     expect(notifications[0]![1]).toBe("warning");
   });
 
+  it("scopes the once-per-pipeline fail-open notice to its own pipeline", async () => {
+    const { notifications, notify } = makeNotifySpy();
+    const makeAuthorize = () =>
+      createReviewPipeline(
+        makePipeline({
+          config: { ...baseConfig, mode: "permissive", cache: { maxEntries: 8 } },
+          notify,
+          engine: makeEngine({
+            modelCall: makeFakeCompleteSimple([
+              { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
+            ]),
+          }),
+        }),
+      );
+    const first = makeAuthorize();
+    const second = makeAuthorize();
+    // `first` fires the notice on its fresh mapping, then stays silent on the
+    // cache-hit replay; `second` is a separate pipeline instance and must fire
+    // its own once — the "already shown" state is per-instance, not shared.
+    await first(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
+    await first(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
+    await second(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
+    expect(notifications).toHaveLength(2);
+    expect(notifications.every(([, level]) => level === "warning")).toBe(true);
+  });
+
   it("a cache-hit replay never moves the breaker counters", async () => {
     let modelCalls = 0;
     const breaker = new CircuitBreaker();

@@ -1,3 +1,4 @@
+import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 
 import { DANGER_NONE } from "#src/review/engines/classifier/questions.ts";
@@ -241,8 +242,8 @@ describe("synthesizeClassifierVerdict", () => {
 describe("projectClassifierAnswers", () => {
   it("normalizes the 0–4 risk score to the 0–1 verdict scale", () => {
     const answers = projectClassifierAnswers({
-      danger_category: { type: "choice", choice: "none", confidence: 0.9 },
-      intent_match: { type: "noul", noul: 0.2 },
+      danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+      intent_match: { type: "bool", probability: 0.2 },
       risk: { type: "score", score: 3, confidence: 0.9 },
     });
     expect(answers.riskScore).toBe(0.75);
@@ -267,24 +268,24 @@ describe("projectClassifierAnswers", () => {
     expect(() => projectClassifierAnswers({})).toThrow(IncompleteClassifierResponseError);
     expect(() =>
       projectClassifierAnswers({
-        danger_category: { type: "choice", choice: "none", confidence: 0.9 },
-        intent_match: { type: "noul", noul: 0.2 },
+        danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+        intent_match: { type: "bool", probability: 0.2 },
       }),
     ).toThrow(IncompleteClassifierResponseError);
     expect(() =>
       projectClassifierAnswers({
-        danger_category: { type: "choice", choice: "none", confidence: 0.9 },
-        intent_match: { type: "noul", noul: 0.2 },
-        risk: { type: "score", confidence: 0.9 },
+        danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+        intent_match: { type: "bool", probability: 0.2 },
+        risk: { type: "score", confidence: 0.9 } as unknown as ClassifierAnswer,
       }),
     ).toThrow(IncompleteClassifierResponseError);
   });
 
   it("treats missing confidence as zero (uncertain), not malformed", () => {
     const answers = projectClassifierAnswers({
-      danger_category: { type: "choice", choice: "none" },
-      intent_match: { type: "noul", noul: 0.9 },
-      risk: { type: "score", score: 1 },
+      danger_category: { type: "choice", choice: "none" } as unknown as ClassifierAnswer,
+      intent_match: { type: "bool", probability: 0.9 },
+      risk: { type: "score", score: 1 } as unknown as ClassifierAnswer,
     });
     expect(answers.dangerConfidence).toBe(0);
     expect(answers.riskConfidence).toBe(0);

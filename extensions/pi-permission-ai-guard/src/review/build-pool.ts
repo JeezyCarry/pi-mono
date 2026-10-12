@@ -21,15 +21,11 @@ import type { ChatInstructions } from "#src/review/engines/chat/prompt.ts";
 import { createClassifierAdapter } from "#src/review/engines/classifier/adapter.ts";
 import {
   type ClassifierAdmission,
-  classifierProbe,
-  directClientFor,
-  prebuildDirectClients,
-  prebuildRegistryClients,
-  registryClientFor,
+  prebuildClassifierClients,
   resolveClassifierEntry,
 } from "#src/review/engines/classifier/endpoints.ts";
 import type { ClassifierOverlay } from "#src/review/engines/classifier/instructions.ts";
-import type { ClassifierPoolEndpoint, ClassifierProvider, PoolEndpoint } from "#src/review/pool.ts";
+import type { ClassifierPoolEndpoint, PoolEndpoint } from "#src/review/pool.ts";
 import { FALLBACK_TIMEOUT_DEFAULT_MS, createReviewerPool } from "#src/review/pool.ts";
 import type { ReviewerEngine } from "#src/review/reviewer-engine.ts";
 
@@ -47,20 +43,18 @@ export interface PoolAssemblyDeps {
  * thresholds) never leaks onto an unrelated endpoint.
  *
  * Lane membership is decided once per entry by the lane modules — the
- * object provider shape names the classifier lane, and on registry
- * entries the closed `modelType` enum *is* the lane. A registry
- * classifier entry must additionally clear the lane's structural gate
- * (pi's classifier support + catalog presence); an unresolvable primary
- * throws (fail-safe: a broken primary means no reviewer), an
- * unresolvable fallback is reported and dropped.
+ * closed `modelType` enum *is* the lane. A registry classifier entry must
+ * additionally clear the lane's structural gate (catalog presence); an
+ * unresolvable primary throws (fail-safe: a broken primary means no
+ * reviewer), an unresolvable fallback is reported and dropped.
  *
  * Omitting `admission` turns the registry gate off — every configured
  * endpoint is admitted as written, which is the shape the lane unit tests
- * assert against. Passing it turns the gate on; an absent `probe` inside
- * it means the registry cannot answer at all (pi older than 0.99).
+ * assert against. Passing it turns the gate on: the catalog answers for
+ * the model, and an unresolvable entry throws or is dropped by position.
  *
  * @param config - The validated extension config.
- * @param admission - Classifier-lane gate: probe + skip sink.
+ * @param admission - Classifier-lane gate: catalog + skip sink.
  * @returns The ordered endpoints (primary first, backups after).
  */
 export function resolvePoolEndpoints(
@@ -69,10 +63,10 @@ export function resolvePoolEndpoints(
 ): PoolEndpoint[] {
   // One config entry → its endpoints, the lane decision written once: a
   // chat entry passes straight through to the chat factory, a classifier
-  // entry clears its lane's own admission gate (probe → admit-or-throw/drop)
+  // entry clears its lane's own admission gate (catalog → admit-or-throw/drop)
   // with the position deciding throw vs skip.
   const resolveEntry = (
-    entry: { provider: string | ClassifierProvider; model: string },
+    entry: AiGuardConfig | FallbackItem,
     position: number,
     timeoutMs: number,
     temperature: number | undefined,
@@ -85,7 +79,7 @@ export function resolvePoolEndpoints(
         )
       : [
           buildChatEndpoint({
-            provider: entry.provider as string,
+            provider: entry.provider,
             model: entry.model,
             timeoutMs,
             temperature,
@@ -150,9 +144,8 @@ export function resolveLaneInstructions(config: AiGuardConfig): LaneInstructions
 /**
  * Build the pooled reviewer engine for a session. Structural problems
  * throw here — at registration time, not per ask (fail-safe session
- * start): unresolvable direct keys, a registry without classifier
- * support (old pi), or a primary classifier model missing from pi's
- * catalog. An unresolvable registry *fallback* is skipped, not fatal.
+ * start): a primary classifier model missing from pi's catalog. An
+ * unresolvable registry *fallback* is skipped, not fatal.
  * Registry facades resolve eagerly and are cached by provider/model,
  * so a catalog hot-change can only fail the transport, never throw
  * stale wiring inside `attempt()`.
@@ -163,7 +156,7 @@ export function resolveLaneInstructions(config: AiGuardConfig): LaneInstructions
  */
 export function buildReviewerPool(config: AiGuardConfig, deps: PoolAssemblyDeps): ReviewerEngine {
   const endpoints = resolvePoolEndpoints(config, {
-    probe: classifierProbe(deps.registry),
+    catalog: deps.registry,
     onSkipped: (issue) => deps.onSkippedFallback?.(issue),
   });
   const classifierEndpoints = endpoints.filter(
@@ -171,11 +164,10 @@ export function buildReviewerPool(config: AiGuardConfig, deps: PoolAssemblyDeps)
   );
   const { chat: chatInstructions, classifier: classifierInstructions } =
     resolveLaneInstructions(config);
-  // Eager clients: direct keyed by provider identity (fail fast on an
-  // unresolvable key/baseUrl), registry resolved against the same
-  // catalog the gate probed (per-ask misses cannot be wiring anymore).
-  const directClients = prebuildDirectClients(classifierEndpoints);
-  const registryClients = prebuildRegistryClients(classifierEndpoints, deps.registry);
+  // Eager clients: every classifier endpoint's client resolves at
+  // registration (fail fast on a registry model outside pi's catalog), so
+  // per-ask failures stay on the transport.
+  const classifierClientFor = prebuildClassifierClients(classifierEndpoints, deps.registry);
   return createReviewerPool({
     endpoints,
     adapters: {
@@ -190,9 +182,7 @@ export function buildReviewerPool(config: AiGuardConfig, deps: PoolAssemblyDeps)
       }),
       classifier: createClassifierAdapter({
         config: { classifier: config.classifier, instructions: classifierInstructions },
-        createClient: (provider) => directClientFor(directClients, provider),
-        registryClient: (endpoint) =>
-          registryClientFor(registryClients, endpoint.provider, endpoint.model),
+        registryClient: classifierClientFor,
       }),
     },
   });

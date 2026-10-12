@@ -18,7 +18,7 @@ export const REGISTRY_MODEL_ID = "jev-latest";
 export const REGISTRY_API: ClassifierApi = "typesafe-system-one";
 
 /** Pi's `classify`, as the facade receives it — the type a stub must satisfy. */
-export type RegistryClassify = NonNullable<RegistryClassifierLike["classify"]>;
+export type RegistryClassify = RegistryClassifierLike["classify"];
 
 /**
  * A real (if minimal) catalog entry, for pi's `findOfType`. Spelling the
@@ -70,7 +70,7 @@ export function classifierReply(overrides: Partial<ClassifierResult> = {}): Clas
 
 /**
  * A pi-ai classifier reply that failed: `stopReason: "error"` plus the message
- * the facade rebuilds an SDK error from.
+ * the facade rebuilds a lane error from.
  *
  * @param errorMessage - The classifier's failure text.
  * @returns The failed reply.
@@ -97,7 +97,7 @@ export function findClassifierOfType(present = true): ModelRegistryLike["findOfT
  * real `classify` signature and returns a real `ClassifierResult`.
  *
  * @param classify - The fake `classify` implementation.
- * @returns The facade a `backend: "registry"` endpoint attempts through.
+ * @returns The facade a classifier endpoint attempts through.
  */
 export function registryFacade(classify: RegistryClassify): ClassifierClientLike {
   return createRegistryClassifierClient({ model: fakeClassifierModel, classify });

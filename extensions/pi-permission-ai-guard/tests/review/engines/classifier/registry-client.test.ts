@@ -1,22 +1,29 @@
+/**
+ * Registry-facade tests: the `ClassifierClientLike` over pi's
+ * `modelRegistry.classify`. The facade holds no translation — it runs the
+ * call, keeps the walk's budget true, and rebuilds one of the lane's own
+ * errors from a served-but-failed result so the adapter's `instanceof`
+ * classification works unchanged. The behaviors the old direct-backend
+ * equivalence suite pinned on the registry side (a `timed out` wording
+ * failing over as a retryable timeout; an unclassifiable failure failing
+ * over as a retryable connection) are re-pinned here, through the facade.
+ */
+
 import { getEventListeners } from "node:events";
 
-import type { ClassifierAnswer } from "@earendil-works/pi-ai";
-import { APIConnectionError, APIError, APITimeoutError } from "@typesafe-ai/sdk";
 import { describe, expect, it, vi } from "vitest";
 
 import { buildClassifierRequest } from "#src/review/engines/classifier/client.ts";
 import {
-  classifierError,
-  flattenEntry,
-  toClassifierContext,
-  toSystemOneAnswers,
-} from "#src/review/engines/classifier/registry-client.ts";
-import { failoverReason } from "#src/review/failure-taxonomy.ts";
+  ClassifierApiError,
+  ClassifierConnectionError,
+  ClassifierTimeoutError,
+  classifyBackendError,
+} from "#src/review/failure-taxonomy.ts";
 import { buildAskContext } from "#src/review/request/ask.ts";
 import { makeDetails } from "#test/fixtures.ts";
 
 import {
-  REGISTRY_MODEL_ID,
   type RegistryClassify,
   classifierReply,
   errorClassifierReply,
@@ -26,137 +33,50 @@ import {
 const transcript = { trustedIntent: ["check"], toolCalls: [], strippedCount: 0 };
 const request = { ask: buildAskContext(makeDetails({ value: "ls" }), "/project"), target: "ls" };
 
-describe("flattenEntry", () => {
-  it("passes strings through", () => {
-    expect(flattenEntry("q")).toBe("q");
-  });
+describe("registry classifier facade", () => {
+  // The facade consumes the request the adapter built — one truth source,
+  // no rebuild.
+  const built = buildClassifierRequest(transcript, request, {});
 
-  it("serializes structured context instead of dropping it", () => {
-    const out = flattenEntry({ question: "q", context: { k: "v" } });
-    expect(out).toContain("q");
-    expect(out).toContain(JSON.stringify({ k: "v" }));
-  });
-});
-
-describe("toClassifierContext", () => {
-  it("maps noul to bool and keeps choice/score shapes", () => {
-    const built = buildClassifierRequest(transcript, request, {}, REGISTRY_MODEL_ID);
-    const ctx = toClassifierContext(built);
-    expect(ctx.questions.danger_category?.type).toBe("choice");
-    expect(ctx.questions.intent_match?.type).toBe("bool");
-    expect(ctx.questions.risk?.type).toBe("score");
-    // The flattened instructions carry the question text (plus the built-in
-    // background), and the criteria survive the noul→bool projection as text.
-    expect(ctx.questions.intent_match?.instructions).toContain(
-      "Does `authorization_anchor` authorize this action?",
-    );
-    expect(ctx.questions.intent_match?.criteria).toEqual({
-      true: expect.stringMatching(/\S/),
-      false: expect.stringMatching(/\S/),
-    });
-  });
-});
-
-describe("toSystemOneAnswers", () => {
-  it("projects bool probability back to noul", () => {
-    const answers = toSystemOneAnswers({
-      danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
-      intent_match: { type: "bool", probability: 0.8 },
-      risk: { type: "score", score: 1, confidence: 0.7 },
-    });
-    expect(answers.intent_match).toMatchObject({ type: "noul", noul: 0.8 });
-    expect(answers.danger_category).toMatchObject({ choice: "none" });
-  });
-
-  it("throws a connection error on mistyped answers", () => {
-    expect(() =>
-      toSystemOneAnswers({
-        danger_category: { type: "choice", choice: "none", confidence: 1, probabilities: {} },
-        intent_match: { type: "choice", choice: "x", confidence: 1, probabilities: {} },
-        risk: { type: "score", score: 1, confidence: 1 },
-      } as unknown as Record<string, ClassifierAnswer>),
-    ).toThrow(APIConnectionError);
-  });
-});
-
-describe("classifierError", () => {
-  it("parses the status into an APIError", () => {
-    const err = classifierError("System One API error (429): busy");
-    expect(err).toBeInstanceOf(APIError);
-    expect((err as APIError).status).toBe(429);
-  });
-
-  it("maps timeout wording to APITimeoutError", () => {
-    expect(classifierError("request timed out")).toBeInstanceOf(APITimeoutError);
-  });
-
-  it("falls back to a connection error", () => {
-    expect(classifierError("No API key for provider")).toBeInstanceOf(APIConnectionError);
-  });
-
-  it("keeps a status-less refusal out of the timeout class", () => {
-    // The adapter classifies the rebuilt error by TYPE first, so a policy
-    // answer that happens to say "aborted" must not be rebuilt as a timeout —
-    // it stays terminal.
-    const err = classifierError("request aborted by content policy");
-    expect(err).not.toBeInstanceOf(APITimeoutError);
-    expect(failoverReason(err)).toBeUndefined();
-  });
-
-  it("reads a status before timeout wording, so a refusal stays terminal", () => {
-    // The message carries both signals. Status-first is the shared rule, so
-    // this is the provider's refusal — never a switchable timeout that routes
-    // the ask around it to another backend.
-    const err = classifierError("System One API error (403): request aborted by upstream policy");
-    expect(err).toBeInstanceOf(APIError);
-    expect((err as APIError).status).toBe(403);
-    expect(failoverReason(err)).toBeUndefined();
-  });
-});
-
-describe("createRegistryClassifierClient", () => {
-  // The facade consumes the request the adapter built (same state and
-  // questions the direct backend sends) — one truth source, no rebuild.
-  const built = buildClassifierRequest(transcript, request, {}, REGISTRY_MODEL_ID);
-
-  it("translates timeout/retry options and projects the response", async () => {
+  it("passes a served result straight through", async () => {
     const reply = classifierReply();
     const classify = vi.fn<RegistryClassify>(async () => reply);
-    const response = await registryFacade(classify).systemOne(built, {
-      timeout: 5_000,
-      retry: { maxRetries: 0 },
-    });
+    await expect(registryFacade(classify).classify(built)).resolves.toBe(reply);
     expect(classify).toHaveBeenCalledOnce();
-    expect(classify.mock.calls[0]?.[2]).toMatchObject({ timeoutMs: 5_000, maxRetries: 0 });
-    expect(response.answers.intent_match).toMatchObject({ type: "noul", noul: 0.8 });
-    expect(response.usage).toMatchObject({ input_tokens: 3, output_tokens: 1 });
+    expect(classify.mock.calls[0]?.[1]).toBe(built);
+  });
+
+  it("maps timeout/retry/signal options onto pi's classify", async () => {
+    const classify = vi.fn<RegistryClassify>(async () => classifierReply());
+    const controller = new AbortController();
+    await registryFacade(classify).classify(built, {
+      timeoutMs: 5_000,
+      maxRetries: 0,
+      signal: controller.signal,
+    });
+    expect(classify.mock.calls[0]?.[2]).toMatchObject({
+      timeoutMs: 5_000,
+      maxRetries: 0,
+      signal: controller.signal,
+    });
   });
 
   it("abandons the classify call when the walk budget signal fires", async () => {
-    // pi's classify takes no signal: the remaining budget is enforced by
-    // abandoning the call, whose answer can no longer affect the walk.
+    // pi's classify may ignore the signal: the remaining budget is enforced
+    // by abandoning the call, whose answer can no longer affect the walk.
     const classify = vi.fn<RegistryClassify>(() => new Promise(() => {}));
     const controller = new AbortController();
-    const pending = registryFacade(classify).systemOne(built, { signal: controller.signal });
+    const pending = registryFacade(classify).classify(built, { signal: controller.signal });
     controller.abort();
-    await expect(pending).rejects.toBeInstanceOf(APITimeoutError);
+    await expect(pending).rejects.toBeInstanceOf(ClassifierTimeoutError);
   });
 
   it("rejects without calling the backend when the budget is already spent", async () => {
     const classify = vi.fn<RegistryClassify>(async () => classifierReply());
     await expect(
-      registryFacade(classify).systemOne(built, { signal: AbortSignal.abort() }),
-    ).rejects.toBeInstanceOf(APITimeoutError);
+      registryFacade(classify).classify(built, { signal: AbortSignal.abort() }),
+    ).rejects.toBeInstanceOf(ClassifierTimeoutError);
     expect(classify).not.toHaveBeenCalled();
-  });
-
-  it("forwards the walk budget signal into the request too", async () => {
-    // pi-ai forwards the signal to the provider; the race is what covers a
-    // version that ignores it, not a substitute for passing it.
-    const classify = vi.fn<RegistryClassify>(async () => classifierReply());
-    const controller = new AbortController();
-    await registryFacade(classify).systemOne(built, { signal: controller.signal });
-    expect(classify.mock.calls[0]?.[2]).toMatchObject({ signal: controller.signal });
   });
 
   it("drops the abort listener when the classify call throws synchronously", async () => {
@@ -167,25 +87,32 @@ describe("createRegistryClassifierClient", () => {
     });
     const controller = new AbortController();
     await expect(
-      registryFacade(classify).systemOne(built, { signal: controller.signal }),
+      registryFacade(classify).classify(built, { signal: controller.signal }),
     ).rejects.toThrow("sync boom");
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
   });
 
-  it("throws a classified error when stopReason is error", async () => {
-    const reply = errorClassifierReply("System One API error (429): busy");
-    const classify = vi.fn<RegistryClassify>(async () => reply);
-    await expect(registryFacade(classify).systemOne(built)).rejects.toBeInstanceOf(APIError);
+  it("rebuilds an API error with its status when stopReason is error", async () => {
+    const classify = vi.fn<RegistryClassify>(async () =>
+      errorClassifierReply("System One API error (429): busy"),
+    );
+    const thrown = await registryFacade(classify)
+      .classify(built)
+      .catch((error: unknown) => error);
+    expect(thrown).toBeInstanceOf(ClassifierApiError);
+    expect((thrown as ClassifierApiError).status).toBe(429);
   });
 
-  it("treats an aborted stop as a failure, not an answer", async () => {
+  it("treats an aborted stop as a timeout, not an answer", async () => {
     // pi returns `stopReason: "aborted"` with whatever answers it collected
     // before the cut. A cut-short call is not a verdict — synthesizing one
     // here would let a half-run review authorize the ask.
     const classify = vi.fn<RegistryClassify>(async () =>
       classifierReply({ stopReason: "aborted" }),
     );
-    await expect(registryFacade(classify).systemOne(built)).rejects.toBeInstanceOf(APITimeoutError);
+    await expect(registryFacade(classify).classify(built)).rejects.toBeInstanceOf(
+      ClassifierTimeoutError,
+    );
   });
 
   it("classifies a status-bearing aborted stop by its status", async () => {
@@ -196,11 +123,11 @@ describe("createRegistryClassifierClient", () => {
       errorMessage: "System One API error (403): request aborted by upstream policy",
     });
     const thrown = await registryFacade(vi.fn<RegistryClassify>(async () => reply))
-      .systemOne(built)
+      .classify(built)
       .catch((error: unknown) => error);
-    expect(thrown).toBeInstanceOf(APIError);
-    expect((thrown as APIError).status).toBe(403);
-    expect(failoverReason(thrown)).toBeUndefined();
+    expect(thrown).toBeInstanceOf(ClassifierApiError);
+    expect((thrown as ClassifierApiError).status).toBe(403);
+    expect(classifyBackendError(thrown).reason).toBeUndefined();
   });
 
   it("falls back to a retryable connection error when the reply carries no message", async () => {
@@ -209,15 +136,35 @@ describe("createRegistryClassifierClient", () => {
     // (a killed request, not a refusal with a status).
     const reply = classifierReply({ stopReason: "error", answers: {}, errorMessage: undefined });
     const thrown = await registryFacade(vi.fn<RegistryClassify>(async () => reply))
-      .systemOne(built)
+      .classify(built)
       .catch((error: unknown) => error);
-    expect(thrown).toBeInstanceOf(APIConnectionError);
-    expect(failoverReason(thrown)).toBe("connection");
+    expect(thrown).toBeInstanceOf(ClassifierConnectionError);
+    expect(classifyBackendError(thrown).reason).toBe("connection");
   });
 
-  it("reports zero usage when the backend omits it", async () => {
-    const classify = vi.fn<RegistryClassify>(async () => classifierReply({ usage: undefined }));
-    const response = await registryFacade(classify).systemOne(built);
-    expect(response.usage).toEqual({ input_tokens: 0, output_tokens: 0 });
+  it("keeps `timed out` wording a retryable timeout (registry-side pin)", async () => {
+    // Re-pinned from the retired backend-equivalence suite: the facade's
+    // error rebuild recognizes "timed out" wording the shared abort rule
+    // alone does not, so the walk fails over instead of deferring.
+    const thrown = await registryFacade(
+      vi.fn<RegistryClassify>(async () => errorClassifierReply("request timed out")),
+    )
+      .classify(built)
+      .catch((error: unknown) => error);
+    expect(classifyBackendError(thrown)).toEqual({ reason: "timeout", deferKind: "timeout" });
+  });
+
+  it("keeps an unclassifiable failure a retryable connection failure (registry-side pin)", async () => {
+    // Re-pinned from the retired backend-equivalence suite: a status-less,
+    // timeout-less message still fails over — the backup decides.
+    const thrown = await registryFacade(
+      vi.fn<RegistryClassify>(async () => errorClassifierReply("provider exploded")),
+    )
+      .classify(built)
+      .catch((error: unknown) => error);
+    expect(classifyBackendError(thrown)).toEqual({
+      reason: "connection",
+      deferKind: "call-failed",
+    });
   });
 });

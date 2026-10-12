@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConfigEnv } from "#src/config/config-layer.ts";
 import { expandEnvRefs, loadAiGuardConfig, persistConfigLayer } from "#src/config/config-layer.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
-import { configSchema, fallbackItemSchema } from "#src/config/config-schema.ts";
+import { configSchema } from "#src/config/config-schema.ts";
 import { vol } from "#test/memfs.ts";
 
 vi.mock("node:fs");
@@ -76,8 +76,9 @@ describe("loadAiGuardConfig", () => {
   it("reports the deprecated `typesafe` key as an issue while still loading", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
         typesafe: { intentThreshold: 0.9 },
       }),
     });
@@ -96,8 +97,9 @@ describe("loadAiGuardConfig", () => {
     // meant to change.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
         surfces: ["bash"],
       }),
     });
@@ -113,8 +115,9 @@ describe("loadAiGuardConfig", () => {
     // to reach one level in.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
         transcript: { maxUserMesages: 3 },
       }),
     });
@@ -142,8 +145,9 @@ describe("loadAiGuardConfig", () => {
   it("warns that the legacy `typesafe.timeoutMs` is ignored", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
         typesafe: { timeoutMs: 7_000 },
       }),
     });
@@ -160,11 +164,14 @@ describe("loadAiGuardConfig", () => {
     // console and the UI — so it names the variable, never the leaf.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: {
-          type: "typesafe",
-          apiKey: "sk-ant-${MISSING}-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
+        instructions: {
+          classifier: {
+            background: "sk-ant-${MISSING}-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+          },
+        },
       }),
     });
 
@@ -198,8 +205,9 @@ describe("loadAiGuardConfig", () => {
   it("warns in the mirrored direction (classifier primary, chat fallback)", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
         fallbacks: [{ provider: "anthropic", model: "claude-haiku-4-5" }],
         instructions: { classifier: { background: "project rules" } },
       }),
@@ -214,8 +222,9 @@ describe("loadAiGuardConfig", () => {
   it("names the migration for the retired top-level overlay shape", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
         instructions: { background: "project rules" },
       }),
     });
@@ -227,6 +236,46 @@ describe("loadAiGuardConfig", () => {
     expect(
       result.issues.some((i) => i.message.includes("wrap them in the `classifier` slot")),
     ).toBe(true);
+  });
+
+  it("names the migration for the retired direct provider shape", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
+        provider: { type: "typesafe", baseUrl: "https://x.example", apiKey: "k" },
+        model: "jev-1.13",
+      }),
+    });
+
+    const result = loadAiGuardConfig(env());
+    // Still a failure — the shape is gone, not deprecated — but the
+    // primary path gets its own issue naming what to write instead
+    // (alongside the schema's type error on the same path).
+    expect(result.outcome).toBe("failed");
+    const named = result.issues.filter((i) => i.path === "provider");
+    expect(named.some((i) => i.message.includes("register the endpoint in pi"))).toBe(true);
+    expect(named.some((i) => i.message.includes('`modelType: "classifier"`'))).toBe(true);
+  });
+
+  it("names the migration for a retired direct provider inside fallbacks", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
+        provider: "anthropic",
+        model: "primary",
+        fallbacks: [
+          {
+            provider: { type: "typesafe", baseUrl: "https://x.example", apiKey: "k" },
+            model: "jev-1.13",
+          },
+        ],
+      }),
+    });
+
+    const result = loadAiGuardConfig(env());
+    expect(result.outcome).toBe("failed");
+    // The fallback's own path — a generic type error would not say where.
+    const named = result.issues.filter((i) => i.path === "fallbacks.0.provider");
+    expect(named.some((i) => i.message.includes("register the endpoint in pi"))).toBe(true);
+    expect(named.some((i) => i.message.includes('`modelType: "classifier"`'))).toBe(true);
   });
 
   it("reports each layer's deprecated key against the file that wrote it", () => {
@@ -347,8 +396,9 @@ describe("loadAiGuardConfig", () => {
   it("stays quiet on the deprecation issue once the key is renamed", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
+        provider: "typesafe",
         model: "jev-1.13",
+        modelType: "classifier",
         classifier: { intentThreshold: 0.9 },
       }),
     });
@@ -448,8 +498,9 @@ describe("loadAiGuardConfig", () => {
   it("expands env refs in string leaves", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "${TEST_AI_GUARD_KEY}" },
-        model: "m",
+        provider: "typesafe",
+        model: "${TEST_AI_GUARD_KEY}",
+        modelType: "classifier",
       }),
     });
 
@@ -458,8 +509,7 @@ describe("loadAiGuardConfig", () => {
     expect(result.issues).toEqual([]);
     // The leaf value is what proves the expansion ran: an unexpanded `${…}`
     // still satisfies the schema and leaves the issue list empty.
-    const provider = result.config?.provider;
-    expect(typeof provider === "object" ? provider.apiKey : undefined).toBe("live-key");
+    expect(result.config?.model).toBe("live-key");
   });
 
   it("expands env refs inside arrays (fallbacks lane)", () => {
@@ -469,12 +519,9 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -485,9 +532,7 @@ describe("loadAiGuardConfig", () => {
     expect(result.issues).toEqual([]);
     // The nested array leaf is the point: a top-level-only walk would leave
     // this placeholder and still pass the two assertions above.
-    const fallback = result.config?.fallbacks?.[0];
-    const provider = fallback?.provider;
-    expect(typeof provider === "object" ? provider.apiKey : undefined).toBe("live-key");
+    expect(result.config?.fallbacks?.[0]?.model).toBe("live-key");
   });
 
   it("uses the :- fallback when the variable is missing, and skips the layer otherwise", () => {
@@ -514,8 +559,9 @@ describe("loadAiGuardConfig", () => {
   it("keeps the disk placeholder when the snapshot carries the expanded value", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "${TEST_AI_GUARD_KEY}" },
-        model: "m",
+        provider: "typesafe",
+        model: "${TEST_AI_GUARD_KEY}",
+        modelType: "classifier",
       }),
     });
     const loaded = loadAiGuardConfig(env(), { TEST_AI_GUARD_KEY: "live-key" });
@@ -545,12 +591,9 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_FB_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_FB_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -587,16 +630,13 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "plain-literal" },
-            model: "fb2",
+            provider: "openai",
+            model: "plain-literal",
           },
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_FB_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_FB_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -629,16 +669,13 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "plain-literal" },
-            model: "fb2",
+            provider: "openai",
+            model: "plain-literal",
           },
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_FB_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_FB_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -675,12 +712,9 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_FB_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_FB_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -718,12 +752,9 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_FB_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_FB_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -736,8 +767,9 @@ describe("loadAiGuardConfig", () => {
         ...loaded.config!,
         fallbacks: [
           {
-            provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "edited-key" },
-            model: "fb",
+            provider: "openai",
+            model: "edited-key",
+            modelType: "chat",
           },
         ],
       },
@@ -760,12 +792,9 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_FB_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_FB_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -779,10 +808,7 @@ describe("loadAiGuardConfig", () => {
     const prepended: typeof loadedConfig = {
       ...loadedConfig,
       fallbacks: [
-        fallbackItemSchema.parse({
-          provider: { type: "typesafe", baseUrl: "https://y.ai/api", apiKey: "plain-key" },
-          model: "fb2",
-        }),
+        { provider: "openai", model: "fb2", modelType: "chat" },
         ...loadedConfig.fallbacks,
       ],
     };
@@ -809,12 +835,9 @@ describe("loadAiGuardConfig", () => {
         model: "m",
         fallbacks: [
           {
-            provider: {
-              type: "typesafe",
-              baseUrl: "https://x.ai/api",
-              apiKey: "${TEST_AI_GUARD_FB_KEY}",
-            },
-            model: "fb",
+            provider: "typesafe",
+            model: "${TEST_AI_GUARD_FB_KEY}",
+            modelType: "classifier",
           },
         ],
       }),
@@ -829,10 +852,7 @@ describe("loadAiGuardConfig", () => {
       ...loadedConfig,
       fallbacks: [
         ...loadedConfig.fallbacks,
-        fallbackItemSchema.parse({
-          provider: { type: "typesafe", baseUrl: "https://y.ai/api", apiKey: "plain-key" },
-          model: "fb2",
-        }),
+        { provider: "openai", model: "fb2", modelType: "chat" },
       ],
     };
     const saved = persistConfigLayer({
@@ -1445,16 +1465,18 @@ describe("persistConfigLayer", () => {
     // often a committed project config.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe", apiKey: "${MY_KEY}" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "${MY_KEY}",
+        modelType: "classifier",
       }),
     });
     const result = persistConfigLayer({
       target: "project",
       env: env({ trustedProject: true }),
       config: configSchema.parse({
-        provider: { type: "typesafe", apiKey: "sk-real" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "sk-real",
+        modelType: "classifier",
       }),
       vars: { MY_KEY: "sk-real" },
     });
@@ -1473,16 +1495,18 @@ describe("persistConfigLayer", () => {
     // no longer produce — and the message says which ref is stuck.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe", apiKey: "${MY_KEY}" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "${MY_KEY}",
+        modelType: "classifier",
       }),
     });
     const result = persistConfigLayer({
       target: "global",
       env: env(),
       config: configSchema.parse({
-        provider: { type: "typesafe", apiKey: "sk-real" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "sk-real",
+        modelType: "classifier",
       }),
       vars: {},
     });
@@ -1497,16 +1521,18 @@ describe("persistConfigLayer", () => {
     // placeholder, so the save stops and says which conflict it hit.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe", apiKey: "${MY_KEY}" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "${MY_KEY}",
+        modelType: "classifier",
       }),
     });
     const result = persistConfigLayer({
       target: "global",
       env: env(),
       config: configSchema.parse({
-        provider: { type: "typesafe", apiKey: "sk-new" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "sk-new",
+        modelType: "classifier",
       }),
       vars: { MY_KEY: "sk-real" },
     });
@@ -1519,23 +1545,29 @@ describe("persistConfigLayer", () => {
 
   it("restores the placeholder for a leaf the target file does not have yet", () => {
     // The edit branch only rewrites changed leaves, but a leaf the target file
-    // lacks still has to land as the ref its owning layer spelled.
+    // lacks still has to land as the ref its owning layer spelled. The ref
+    // lives on the `model` leaf: a model id is the only secret-adjacent
+    // string left on a registry provider, and the restore path is the same
+    // regardless of which leaf carries the ref.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe", apiKey: "${MY_KEY}" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "${MY_KEY}",
+        modelType: "classifier",
       }),
       "/project/.pi/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        provider: { type: "typesafe" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "${MY_KEY}",
+        modelType: "classifier",
       }),
     });
     const result = persistConfigLayer({
       target: "project",
       env: env({ trustedProject: true }),
       config: configSchema.parse({
-        provider: { type: "typesafe", apiKey: "sk-real" },
-        model: "jev-1.13",
+        provider: "typesafe",
+        model: "sk-real",
+        modelType: "classifier",
       }),
       vars: { MY_KEY: "sk-real" },
     });

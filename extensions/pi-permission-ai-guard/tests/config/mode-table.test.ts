@@ -24,7 +24,7 @@ describe("MODE_TABLE", () => {
 
   it("never maps machinery failures to allow in any mode", () => {
     for (const mode of MODE_VALUES) {
-      expect(MODE_TABLE[mode].lanes.machinery).not.toBe("allow");
+      expect(MODE_TABLE[mode].machinery).not.toBe("allow");
     }
   });
 });

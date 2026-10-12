@@ -1,66 +1,74 @@
 /**
  * Classifier lane endpoint construction. Owns the lane-shape facts: which
  * provider shapes and `modelType` values address this lane, which registry
- * backends must resolve before registration, and how the two backends
- * (direct SDK vs pi's built-in classifier) prebuild their clients.
+ * models must resolve before registration, and how each endpoint prebuilds
+ * its client.
  *
  * Nothing downstream of this module branches on lane or backend shape —
  * the pool walks endpoints, the adapter attempts them.
  */
 
-import type { ClassifierModel } from "@earendil-works/pi-ai";
+import type { ModelTypeMap } from "@earendil-works/pi-ai";
 
 import type { ConfigIssue } from "#src/config/config-layer.ts";
-import { isDirectProviderShape } from "#src/config/config-schema.ts";
 import type { ModelRegistryLike } from "#src/model/model-registry.ts";
-import type { ClassifierPoolEndpoint, ClassifierProvider } from "#src/review/pool.ts";
+import type { ClassifierPoolEndpoint } from "#src/review/pool.ts";
+import { cacheKey } from "#src/utils.ts";
 
-import { type ClassifierClientLike, createDirectClient } from "./client.ts";
+import type { ClassifierClientAccessor, ClassifierClientLike } from "./client.ts";
 import { createRegistryClassifierClient } from "./registry-client.ts";
 
 /** Addressing fields shared by primary and fallback config entries. */
 interface ClassifierTarget {
-  /** Explicit connection (direct backend) or registry provider id. */
-  provider: string | ClassifierProvider;
+  /** Pi's provider id. */
+  provider: string;
   model: string;
   timeoutMs: number;
 }
 
-/** Probe for a registry classifier model; false = absent from pi's catalog. */
-type ClassifierProbe = (provider: string, model: string) => boolean;
-
-/** Pi's catalog lookup, with the registry's `this` bound. */
-type ClassifierLookup = (
-  type: "classifier",
-  provider: string,
-  model: string,
-) => ClassifierModel<string> | undefined;
+/** The catalog surface an admission gate reads. */
+type ClassifierCatalog = Pick<ModelRegistryLike, "findOfType">;
 
 /** Sink for degraded (non-primary) rejections. */
 type ClassifierSkipSink = (issue: ConfigIssue) => void;
 
 /** What a lane must know to admit one configured endpoint into the pool. */
 export interface ClassifierAdmission {
-  /** Catalog probe; absent means the registry cannot answer (old pi). */
-  probe?: ClassifierProbe;
+  /** The session registry — the catalog the model must exist in. */
+  catalog: ClassifierCatalog;
   /** Sink for degraded (non-primary) rejections. */
   onSkipped?: ClassifierSkipSink;
 }
 
 /**
+ * The lane's one catalog query: pi's `findOfType` with the model type
+ * pinned to `"classifier"`, so the literal is spelled once.
+ *
+ * @param catalog - The registry (or its `findOfType` slice).
+ * @param provider - The registry provider id.
+ * @param model - The classifier model id.
+ * @returns The catalog model, or undefined when absent.
+ */
+function classifierModel(
+  catalog: ClassifierCatalog,
+  provider: string,
+  model: string,
+): ModelTypeMap["classifier"] | undefined {
+  return catalog.findOfType("classifier", provider, model);
+}
+
+/**
  * Resolve one configured classifier entry into pool endpoints.
  *
- * A direct connection is always admitted. A registry backend must first
- * clear the structural gate: pi must expose `classify` + `findOfType`
- * (0.99+) and the model must exist in pi's catalog. An unresolvable
- * *primary* throws — a broken primary means no reviewer at all
- * (fail-safe session start). An unresolvable *fallback* is reported and
- * dropped — the fallback contract is "a broken backup degrades", and a
- * dropped endpoint must never reach `attempt()`.
+ * The model must first clear the structural gate: it must exist in pi's
+ * catalog. An unresolvable *primary* throws — a broken primary means no
+ * reviewer at all (fail-safe session start). An unresolvable *fallback* is
+ * reported and dropped — the fallback contract is "a broken backup
+ * degrades", and a dropped endpoint must never reach `attempt()`.
  *
  * @param target - Addressing fields plus the entry's resolved timeout.
  * @param position - Config position (0 = primary); decides throw vs skip.
- * @param admission - Probe and skip sink.
+ * @param admission - Registry catalog + skip sink.
  * @returns The admitted endpoints (empty when a fallback degraded away).
  */
 export function resolveClassifierEntry(
@@ -68,39 +76,17 @@ export function resolveClassifierEntry(
   position: number,
   admission?: ClassifierAdmission,
 ): ClassifierPoolEndpoint[] {
-  // Two spellings, one built here: a registry endpoint is named by Pi's
-  // provider id, the direct backend by the SDK protocol (`typesafe`).
-  const endpoint: ClassifierPoolEndpoint = isDirectProviderShape(target.provider)
-    ? {
-        lane: "classifier",
-        backend: "direct",
-        provider: target.provider,
-        model: target.model,
-        timeoutMs: target.timeoutMs,
-        id: `typesafe/${target.model}`,
-      }
-    : {
-        lane: "classifier",
-        backend: "registry",
-        provider: target.provider,
-        model: target.model,
-        timeoutMs: target.timeoutMs,
-        id: `${target.provider}/${target.model}`,
-      };
-  if (endpoint.backend !== "registry") return [endpoint];
+  const endpoint: ClassifierPoolEndpoint = {
+    lane: "classifier",
+    provider: target.provider,
+    model: target.model,
+    timeoutMs: target.timeoutMs,
+    id: `${target.provider}/${target.model}`,
+  };
   // No admission means the caller wants pure routing (every endpoint
   // admitted as written) — the structural gate is opt-in.
   if (!admission) return [endpoint];
-  if (!admission.probe) {
-    return reject(
-      position,
-      admission.onSkipped,
-      `registry classifier fallback needs pi with classifier support — skipped`,
-      `registry classifier primary (${endpoint.id}) needs pi with classifier support — upgrade pi or use a direct System One provider`,
-      "",
-    );
-  }
-  if (!admission.probe(endpoint.provider, endpoint.model)) {
+  if (classifierModel(admission.catalog, endpoint.provider, endpoint.model) === undefined) {
     return reject(
       position,
       admission.onSkipped,
@@ -113,112 +99,47 @@ export function resolveClassifierEntry(
 }
 
 /**
- * Resolve every registry classifier endpoint's model eagerly and cache
- * the facade, keyed by provider/model. Per-ask resolution would let a
- * catalog hot-change turn an admitted endpoint into a throw inside
- * `attempt()`; resolving here keeps ask-time failures to the transport.
+ * Prebuild every classifier endpoint's client eagerly, returning the
+ * accessor the adapter fetches through by identity. Eager resolution means
+ * an unresolvable registry model fails at registration, not per ask, and
+ * shared credentials share one client.
+ *
+ * Facades resolve against pi's catalog in the same synchronous pass the
+ * admission gate probed; resolving per ask would let a catalog hot-change
+ * turn an admitted endpoint into a throw inside `attempt()`. The accessor
+ * is the adapter's only path, so a miss is a wiring bug, not an
+ * availability signal.
  *
  * @param endpoints - The admitted endpoint list.
  * @param registry - The model registry from the session.
- * @returns The facade per registry backend endpoint.
+ * @returns The client accessor, keyed by provider/model.
  */
-export function prebuildRegistryClients(
+export function prebuildClassifierClients(
   endpoints: readonly ClassifierPoolEndpoint[],
   registry: ModelRegistryLike,
-): Map<string, ClassifierClientLike> {
-  const clients = new Map<string, ClassifierClientLike>();
-  if (typeof registry.classify !== "function") return clients;
-  const lookup = classifierLookup(registry);
-  if (!lookup) return clients;
+): ClassifierClientAccessor {
+  const facades = new Map<string, ClassifierClientLike>();
   // Bind: `classify` reads `this.runtime` on pi's registry, so a detached
   // reference throws `TypeError` at call time.
   const classify = registry.classify.bind(registry);
-  for (const endpoint of registryEndpoints(endpoints)) {
-    const model = lookup("classifier", endpoint.provider, endpoint.model);
-    // Admission already proved this model resolves; a miss here means
-    // the catalog changed between probe and prebuild — the endpoint then
-    // has no client and the adapter's "not prebuilt" guard fires rather
-    // than a stale facade going out to the model.
+  for (const endpoint of endpoints) {
+    const model = classifierModel(registry, endpoint.provider, endpoint.model);
+    // Admission already proved this model resolves; a miss here means the
+    // catalog changed between probe and prebuild — the endpoint then has no
+    // client and the accessor's guard fires rather than a stale facade going
+    // out to the model.
     if (!model) continue;
-    clients.set(
-      registryKey(endpoint.provider, endpoint.model),
+    facades.set(
+      cacheKey(endpoint.provider, endpoint.model),
       createRegistryClassifierClient({ model, classify }),
     );
   }
-  return clients;
-}
-
-/**
- * Fetch the prebuilt facade for a registry endpoint — the adapter's only
- * access path. Admission already proved this model resolved, so a miss
- * here is a wiring bug, not an availability signal.
- *
- * @param clients - The prebuilt facade map.
- * @param provider - The registry provider id.
- * @param model - The classifier model id.
- * @returns The facade client.
- */
-export function registryClientFor(
-  clients: ReadonlyMap<string, ClassifierClientLike>,
-  provider: string,
-  model: string,
-): ClassifierClientLike {
-  const client = clients.get(registryKey(provider, model));
-  if (!client) throw new Error("unreachable: registry classifier client not prebuilt");
-  return client;
-}
-
-/**
- * Prebuild direct SDK clients keyed by provider identity (baseUrl +
- * apiKey), so an unresolvable key/baseUrl fails fast at registration and
- * shared credentials share one client.
- *
- * @param endpoints - The admitted endpoint list.
- * @param createClient - The SDK constructor (tests inject fakes).
- * @returns The client per direct connection identity.
- */
-export function prebuildDirectClients(
-  endpoints: readonly ClassifierPoolEndpoint[],
-  createClient: (provider: ClassifierProvider) => ClassifierClientLike = createDirectClient,
-): Map<string, ClassifierClientLike> {
-  const clients = new Map<string, ClassifierClientLike>();
-  for (const endpoint of endpoints) {
-    if (endpoint.backend !== "direct") continue;
-    const key = directKey(endpoint.provider);
-    if (!clients.has(key)) clients.set(key, createClient(endpoint.provider));
-  }
-  return clients;
-}
-
-/**
- * Fetch a prebuilt direct client — a wiring bug if absent.
- *
- * @param clients - The prebuilt client map.
- * @param provider - The direct provider connection.
- * @returns The SDK client.
- */
-export function directClientFor(
-  clients: ReadonlyMap<string, ClassifierClientLike>,
-  provider: ClassifierProvider,
-): ClassifierClientLike {
-  const client = clients.get(directKey(provider));
-  if (!client) throw new Error("unreachable: classifier client not prebuilt");
-  return client;
-}
-
-/**
- * Build the catalog probe, or undefined when pi cannot answer — the
- * admission then degrades fallbacks and throws on a primary.
- *
- * @param registry - The model registry from the session.
- * @returns The probe, or undefined on a registry without classifier support.
- */
-export function classifierProbe(registry: ModelRegistryLike): ClassifierProbe | undefined {
-  const lookup = classifierLookup(registry);
-  // pi exposes `classify` + `findOfType` together (0.99+); neither is
-  // callable on older pi, which is what makes the whole lane optional.
-  if (!lookup || typeof registry.classify !== "function") return undefined;
-  return (provider, model) => lookup("classifier", provider, model) !== undefined;
+  return (endpoint) => {
+    const client = facades.get(cacheKey(endpoint.provider, endpoint.model));
+    if (!client)
+      throw new Error(`unreachable: no prebuilt client for classifier endpoint ${endpoint.id}`);
+    return client;
+  };
 }
 
 /**
@@ -241,52 +162,4 @@ function reject(
   if (position === 0) throw new Error(primaryMessage);
   onSkipped?.({ path: `fallbacks.${position - 1}${field}`, message: fallbackMessage });
   return [];
-}
-
-/**
- * The registry-backend endpoints, narrowed.
- *
- * @param endpoints - Classifier endpoints of either backend.
- * @returns The registry-backed subset, with `provider`/`model` narrowed.
- */
-function registryEndpoints(
-  endpoints: readonly ClassifierPoolEndpoint[],
-): readonly { provider: string; model: string }[] {
-  return endpoints.filter((e) => e.backend === "registry");
-}
-
-/**
- * Bind pi's catalog lookup for classifier models, or undefined when the
- * registry has none. Bound because the method reads `this.runtime` on pi's
- * registry: a detached reference throws at call time.
- *
- * @param registry - The model registry from the session.
- * @returns The bound lookup, or undefined on a registry without `findOfType`.
- */
-function classifierLookup(registry: ModelRegistryLike): ClassifierLookup | undefined {
-  const findOfType = registry.findOfType;
-  return typeof findOfType === "function" ? findOfType.bind(registry) : undefined;
-}
-
-/**
- * Cache key for one registry model.
- *
- * @param provider - Registry provider id.
- * @param model - Registry model id.
- * @returns The cache key.
- */
-function registryKey(provider: string, model: string): string {
-  return `${provider}\0${model}`;
-}
-
-/**
- * Cache key for one direct connection identity. Shared by the prebuilt
- * client map and the adapter's own memo, so both agree on when two
- * endpoints may share a client.
- *
- * @param provider - The direct connection (URL + key).
- * @returns The cache key.
- */
-export function directKey(provider: ClassifierProvider): string {
-  return `${provider.baseUrl ?? ""}\0${provider.apiKey ?? ""}`;
 }

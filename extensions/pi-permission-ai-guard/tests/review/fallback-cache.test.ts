@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { configSchema, isDirectProviderShape } from "#src/config/config-schema.ts";
+import { configSchema } from "#src/config/config-schema.ts";
 import { buildReviewerPool } from "#src/review/build-pool.ts";
 import { createReviewPipeline } from "#src/review/review-pipeline.ts";
 import { makeDetails } from "#test/fixtures.ts";
@@ -26,7 +26,7 @@ describe("fallback verdict cache", () => {
             reviews++;
             return {
               outcome: { verdict: { kind: "allow" }, latencyMs: 1 },
-              modelId: reviews === 1 ? "typesafe/backup (fallback 1)" : "typesafe/primary",
+              modelId: reviews === 1 ? "anthropic/backup (fallback 1)" : "anthropic/primary",
               cacheable: reviews !== 1,
             };
           },
@@ -49,7 +49,6 @@ describe("fallback verdict cache", () => {
       fallbacks: [{ provider: "openai", model: "backup" }],
       cache: { maxEntries: 8 },
     });
-    if (isDirectProviderShape(config.provider)) throw new Error("expected chat config");
     const engine = buildReviewerPool(config, {
       registry: defaultRegistry({
         find: (provider, model) => ({ ...fakeModel, provider, id: model }),

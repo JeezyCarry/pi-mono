@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { contentText, type TextContent } from "@earendil-works/pi-ai";
+
 /**
  * Shared prompt-sanitization, hashing, stringification, and record guards
  * used across modules.
@@ -260,6 +262,20 @@ export function shortHash(str: string): string {
 }
 
 /**
+ * Join identity parts into one NUL-separated cache key, so adjacent fields
+ * cannot merge into a different key. NUL is the separator because it does
+ * not occur in the ids, paths, and keys this builds keys from (a part that
+ * itself contains NUL would split that field). `undefined` parts become
+ * empty, so an absent credential and an empty one key the same.
+ *
+ * @param parts - The identity parts, in canonical order.
+ * @returns The joined key.
+ */
+export function cacheKey(...parts: (string | undefined)[]): string {
+  return parts.map((part) => part ?? "").join("\0");
+}
+
+/**
  * Normalize an absent (undefined) or empty-string field to `null`.
  *
  * @param value - The field value to normalize.
@@ -278,14 +294,19 @@ export function normalizeEmpty(value: string | undefined | null): string | null 
 export function textFromContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((block: unknown) => {
-      if (!isObjectRecord(block)) return "";
-      if (block.type === "text" && typeof block.text === "string") return block.text;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
+  // This boundary sees `unknown` from session entries, so validate before
+  // delegating: pi-ai's `contentText` reads `.type`/`.text` on every element
+  // and would throw on a null block (and stringify a non-string `text`).
+  const textBlocks = content.filter(
+    (block): block is TextContent =>
+      isObjectRecord(block) &&
+      block.type === "text" &&
+      typeof block.text === "string" &&
+      // An empty text block drops out: it would otherwise contribute a
+      // phantom separator to the join.
+      block.text !== "",
+  );
+  return contentText(textBlocks);
 }
 
 /**

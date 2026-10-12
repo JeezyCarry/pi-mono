@@ -9,13 +9,13 @@
 import { existsSync } from "node:fs";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ConfigEnv, ConfigLayerTarget, LoadConfigResult } from "#src/config/config-layer.ts";
 import { type AiGuardConfig, configSchema } from "#src/config/config-schema.ts";
 import { createAiGuardExtension } from "#src/extension.ts";
 import type { ReviewPipelineDeps } from "#src/review/review-pipeline.ts";
-import type { CompletionItem } from "#src/session/command/table.ts";
 import { SETTING_ENTRY_TYPE } from "#src/session/session-settings-store.ts";
 import { makeUiCtx } from "#test/host-ctx.ts";
 import { OPERATOR_COPY_SHAPE } from "#test/operator-copy.ts";
@@ -69,7 +69,7 @@ function makeMockPi() {
       description?: string;
       getArgumentCompletions?: (
         argumentPrefix: string,
-      ) => CompletionItem[] | null | Promise<CompletionItem[] | null>;
+      ) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
       handler: (args: string, ctx: any) => Promise<void>;
     }
   >();
@@ -153,6 +153,10 @@ function makeSessionCtx(
       streamSimple: () => {
         throw new Error("unreachable in unit tests");
       },
+      classify: () => {
+        throw new Error("unreachable in unit tests");
+      },
+      findOfType: () => undefined,
     },
     sessionManager: {
       getSessionId: () => "s1",
