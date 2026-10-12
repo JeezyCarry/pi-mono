@@ -28,7 +28,7 @@ import { borderBar } from "./row-frame.ts";
 import type { FrameView } from "./session.ts";
 import { isShellTool, shellBadgeColorOf, shellExitBadgeOf } from "./shell-status.ts";
 import type { PreviewTextHost } from "./text-task.ts";
-import { collapseTail, expandKeyHint, tookFooter } from "./tool-output.ts";
+import { collapseTail, collapsedWindow, expandKeyHint, tookFooter } from "./tool-output.ts";
 import type { CallState, RenderContext, ToolServices } from "./tool-services.ts";
 
 /**
@@ -208,8 +208,10 @@ export function formatToolErrorResult(input: ErrorFrameInput): string {
   // Inert first (ADR 0004), then the SDK renderers' own pattern: a
   // collapsed window with the expand hint, everything on ctrl+o.
   const lines = linesOf(inertText(message));
-  const hidden = expanded ? 0 : Math.max(0, lines.length - ERROR_PREVIEW_LINES);
-  const shown = expanded ? lines : lines.slice(0, ERROR_PREVIEW_LINES);
+  // The window arithmetic is the shared authority; the tail below stays
+  // local: its hint row is indented INTO the prefixed body and its footer
+  // carries the bar kind, unlike collapsedView's footer block.
+  const { shown, hidden } = collapsedWindow(lines, { budget: ERROR_PREVIEW_LINES, expanded });
   // Pre-wrap each logical line to the render width so EVERY visual row
   // carries the prefix.
   const bodyWidth = Math.max(1, width - measurePlain(prefix));

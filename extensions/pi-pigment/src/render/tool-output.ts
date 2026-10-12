@@ -614,8 +614,18 @@ export function stopTiming(
   return state.endedAt - state.startedAt;
 }
 
-/** The view's inputs: the budgets and the footer sources. */
-export interface ViewOptions {
+/** The view's inputs: the window budgets plus the footer sources. */
+export interface ViewOptions extends WindowOptions {
+  /** The measured execution time (undefined while pending, and on a resumed row); unset = no footer. */
+  durationMs?: number;
+  /** The SDK's limit notice (DerivedOutput.notice) — painted as the warning footer line. */
+  notice?: string;
+  /** The pi theme (muted fg). */
+  theme: RenderTheme;
+}
+
+/** The window arithmetic's inputs: the collapsed budget and the optional expanded cap. */
+export interface WindowOptions {
   /**
    * The collapsed-state line budget (COLLAPSED_LINES.x). Unset = never
    * collapse (the window is always the full content).
@@ -629,12 +639,33 @@ export interface ViewOptions {
    * tail grammar. Unset = the expanded view shows everything.
    */
   expandedCap?: number;
-  /** The measured execution time (undefined while pending, and on a resumed row); unset = no footer. */
-  durationMs?: number;
-  /** The SDK's limit notice (DerivedOutput.notice) — painted as the warning footer line. */
-  notice?: string;
-  /** The pi theme (muted fg). */
-  theme: RenderTheme;
+}
+
+/** The window arithmetic's result: the shown slice and the hidden count. */
+export interface WindowSlice {
+  /** The lines inside the window. */
+  shown: string[];
+  /** The lines the window is hiding. */
+  hidden: number;
+}
+
+/**
+ * The window arithmetic: which lines to show and how many are hidden —
+ * the one authority for the collapse predicate and the hidden-count,
+ * shared by every collapsed body AND the error frame (whose tail is
+ * indented, not the footer block `collapsedView` composes). Two regimes:
+ * the collapsed budget, and the optional expanded cap.
+ *
+ * @param lines - The full output lines (already derived per tool).
+ * @param opts - The budgets (see WindowOptions).
+ * @returns The shown slice and the hidden count.
+ */
+export function collapsedWindow(lines: string[], opts: WindowOptions): WindowSlice {
+  const { budget, expanded, expandedCap } = opts;
+  const collapsed = !expanded && budget !== undefined && lines.length > budget;
+  const window = collapsed ? (budget ?? lines.length) : (expandedCap ?? lines.length);
+  const hidden = lines.length - Math.min(lines.length, window);
+  return { shown: lines.slice(0, window), hidden };
 }
 
 /** The collapsed window: the shown slice, the tail block, and the hidden count. */
@@ -656,7 +687,8 @@ export interface CollapsedWindow {
  * variance (the budgets, how lines are derived — filtering empties or
  * not) stays at call sites; this owns the shape: one window concept with
  * two regimes (collapsed budget + optional expanded cap) and one tail
- * grammar.
+ * grammar. The arithmetic is `collapsedWindow`; the error frame reuses
+ * that half only (its tail is indented).
  *
  * @param lines - The full output lines (already derived per tool).
  * @param opts - The view options (budgets and the measured duration).
@@ -664,13 +696,10 @@ export interface CollapsedWindow {
  * and no time was measured).
  */
 export function collapsedView(lines: string[], opts: ViewOptions): CollapsedWindow {
-  const { budget, expanded, expandedCap, durationMs, notice, theme } = opts;
+  const { expanded, durationMs, notice, theme } = opts;
   // An absent result source means no footer (write's create preview —
   // the SDK's own write renderer never showed timing either).
-  const collapsed = !expanded && budget !== undefined && lines.length > budget;
-  const window = collapsed ? (budget ?? lines.length) : (expandedCap ?? lines.length);
-  const hidden = lines.length - Math.min(lines.length, window);
-  const shown = lines.slice(0, window);
+  const { shown, hidden } = collapsedWindow(lines, opts);
   // Footers read top-down: the expand hint, the limit notice (the SDK's
   // warning about the whole output — the native renderers show the same
   // information as a `[Truncated: …]` line), and Took closes the tail
