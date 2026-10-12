@@ -5,12 +5,18 @@
  * - Assistant text is untrusted and token-heavy → delete
  * - Tool results are untrusted (injection entry point) and token-heaviest → delete
  * - User messages are trusted authorization signals → keep
+ * - A skill message keeps only the text the human typed; its file body is untrusted (it would
+ *   otherwise hold the anchor slot) → drop the body
  * - Tool call names + args show what the agent did → keep (truncated)
  * - Ask_user_question results are trusted (user's structured answers) → keep
  * - Compaction summaries are derived context, not user authorization → delete
  */
 
-import type { SessionEntry, SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+  parseSkillBlock,
+  type SessionEntry,
+  type SessionManager,
+} from "@earendil-works/pi-coding-agent";
 
 import {
   isObjectRecord,
@@ -264,10 +270,25 @@ export function stripTranscript(
     const role = message.role;
 
     if (role === "user") {
-      // UserMessage carries no toolName (ask_user_question answers arrive as
-      // toolResult entries, handled below), so every user message is plain
-      // trusted intent.
-      pushTrustedIntent(textFromContent(message.content));
+      // A skill invocation arrives as a user message whose body is the skill
+      // file. File content never authorizes, and the body is long enough to
+      // hold the anchor slot and evict the human's own request from the
+      // window, so only the text the human typed alongside it is trusted.
+      // Parse the RAW text: the pipeline below collapses the newlines this
+      // block's shape is anchored on.
+      const raw = textFromContent(message.content);
+      const skill = parseSkillBlock(raw);
+      if (skill) {
+        // Keep the invocation attributable — the reviewer should know which
+        // workflow the human spoke inside — but only by name: the name is a
+        // validated lowercase-hyphen identifier, while the body, the path and
+        // the rest are file content, and the body is long enough to hold the
+        // anchor slot on its own.
+        if (skill.userMessage) pushTrustedIntent(`[skill: ${skill.name}] ${skill.userMessage}`);
+        else strippedCount++;
+        continue;
+      }
+      pushTrustedIntent(raw);
       continue;
     }
 
