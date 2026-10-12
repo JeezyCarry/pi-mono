@@ -192,4 +192,16 @@ describe("cross-lane agreement", () => {
     expect(availabilityReason(`Error: ${status} denied`)).toBeUndefined();
     expect(classifyBackendError(httpError(status)).reason).toBeUndefined();
   });
+
+  it.each([
+    // A refusal wrapped in timeout/quota/connection wording stays terminal
+    // on both entries: the refusal guard runs before any wording read, so a
+    // policy answer never routes around itself by mentioning a timeout.
+    "request aborted by content policy after timeout",
+    "403: quota exceeded on the project",
+    "access denied: socket hang up",
+  ])("both inputs stay terminal on mixed wording: %s", (message) => {
+    expect(availabilityReason(message)).toBeUndefined();
+    expect(classifyBackendError(classifierError(message)).reason).toBeUndefined();
+  });
 });
