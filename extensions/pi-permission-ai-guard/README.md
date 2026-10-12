@@ -206,7 +206,7 @@ Only the `chat` slot takes `replace: true`, which swaps the built-in safety-rule
 }
 ```
 
-The reviewer never reads repository files (`package.json`, `README`, `AGENTS.md`) into its prompt — repository content is untrusted, and a poisoned description must not widen its own authorization. Environment facts belong in this trusted slot. It is not a permission grant: the background reaches every question, so it can shape how the model reads the anchor, but a matched danger category still denies before the other answers are read.
+The reviewer never reads repository files (`package.json`, `README`, `AGENTS.md`) into its prompt — repository content is untrusted, and a poisoned description must not widen its own authorization. Environment facts belong in this trusted slot. It is not a permission grant: the background reaches every question, so it can shape how the model reads the anchor, but an unauthorized confident danger hit still denies — an authorized or unsure one confirms with you instead.
 
 The example above assumes the pool has both a chat and a classifier reviewer, so a chat-only pool writes just `chat`.
 
@@ -224,7 +224,7 @@ Set `"modelType": "classifier"` on a `provider` that Pi knows about to run the r
 
 The primary reviewer's timeout is the top-level `timeoutMs`, for the classifier lane exactly as for chat; a backup overrides it with its own entry-level `timeoutMs`.
 
-`riskLevel` reads the fixed quartile bands of the 0–4 rubric (low `[0, 0.25)`, medium `[0.25, 0.5)`, high `[0.5, 0.75)`, critical `[0.75, 1]`) and does not move with `riskThreshold`; `riskThreshold` alone decides the deny. `lean` is the danger direction, derived not declared: a risk score at or above the line leans deny, a pure intent gap with trusted readings leans allow, anything else is neutral. A response missing a reading is malformed and routes to a machinery defer (never allow); missing confidence just reads as uncertain. How the three answers reach each verdict row is mapped out in [Mode](#mode).
+`riskLevel` reads the fixed quartile bands of the 0–4 rubric (low `[0, 0.25)`, medium `[0.25, 0.5)`, high `[0.5, 0.75)`, critical `[0.75, 1]`) and does not move with `riskThreshold`; `riskThreshold` alone decides the deny. `lean` is explicit on danger and costly confirmations (always deny), derived elsewhere: a risk score at or above the line leans deny, a pure intent gap with trusted readings leans allow, anything else is neutral. A response missing a reading is malformed and routes to a machinery defer (never allow); missing confidence just reads as uncertain. How the three answers reach each verdict row is mapped out in [Mode](#mode).
 
 `instructions` appends in this lane — see [Custom rules](#custom-rules).
 
@@ -267,7 +267,7 @@ Each mode is two cut lines on that order — an auto-pass band, an ask band, a t
 | `deny` (soft: `low\|medium`)                | deny     | ask       | ask       | allow        |
 | `deny` (hard: `high\|critical`, or missing) | deny     | deny      | deny      | deny         |
 
-The reading per mode: `strict` — the reviewer's allow is the only pass (full fail-closed automation); `default` — you judge every flag but hard danger (the resting mode and the onboarding posture — watch the reviewer work, then loosen); `lenient` — only the reviewer's active alarms ask you (soft denies and deny-leaning doubts); `permissive` — only clear high-danger requests are blocked. `lean` moves a defer across only the ask↔allow boundary, in the lean's own direction; it never appears in dialogs or notify lines (the ask is the human's judgment moment) — it lives in the `ai_guard.decision` audit record.
+The reading per mode: `strict` — the reviewer's allow is the only pass (full fail-closed automation); `default` — you judge every flag but hard danger (the resting mode and the onboarding posture — watch the reviewer work, then loosen); `lenient` — only the reviewer's active alarms ask you (soft denies and deny-leaning doubts); `permissive` — only clear high-danger requests are blocked. An authorized danger confirmation is not one of them: it rides the defer-danger band, so permissive allows it — that is the mode's contract, not the reviewer's judgment. `lean` moves a defer across only the ask↔allow boundary, in the lean's own direction; it never appears in dialogs or notify lines (the ask is the human's judgment moment) — it lives in the `ai_guard.decision` audit record.
 
 The classifier lane reaches the same vocabulary through its three answers (`riskThreshold` defaults to 0.5):
 
@@ -278,10 +278,11 @@ The classifier lane reaches the same vocabulary through its three answers (`risk
 | low risk, unsure                                             | defer (neutral)                             | deny   | ask     | allow   | allow      |
 | high risk, unsure                                            | defer + `lean: deny`                        | deny   | ask     | ask     | allow      |
 | medium risk, confident (only when the line is set below 0.5) | deny soft                                   | deny   | ask     | ask     | allow      |
-| danger hit (any confidence)                                  | deny hard                                   | deny   | deny    | deny    | deny       |
+| danger hit, unauthorized and confident                     | deny hard                                   | deny   | deny    | deny    | deny       |
+| danger hit, authorized or unsure                         | defer + `lean: deny` (confirm)             | deny   | ask     | ask     | allow      |
 | high risk, confident                                         | deny (high or critical at the default line) | deny   | deny    | deny    | deny       |
 
-With the default line at 0.5, every decisive risk deny reads high or critical and blocks in every mode; lower the line below 0.5 to reopen a soften-able band.
+With the default line at 0.5, every decisive risk deny reads high or critical and blocks in every mode; lower the line below 0.5 to reopen a soften-able band. That band is yours: a medium-tier deny from a lowered line maps as soft, so permissive allows it — the "unauthorized risk denies" row above holds at the default line.
 
 Rules that hold in every mode:
 
@@ -365,6 +366,7 @@ Supplementary debug records (written via `log.debug`, gated by the upstream log 
 - `ai_guard.model_reply` — raw model text on defer-with-text replies; also fires with `diagnostic: true` on empty responses (`stopReason`, `rawStopReason`, `contentTypes`, `errorMessage`, `latencyMs`; `stopReason: "aborted"` = the timeout elapsed, classified `timeout` not `empty-reply`).
 - `ai_guard.cache_lookup` — cache misses with a `missReason` (`disabled` / `no-entry` / `context-changed`).
 - `ai_guard.model_call_error` — thrown model calls, recording the `deferKind` (`timeout` / `call-failed`) and error message.
+- `ai_guard.model_answers` — the classifier lane's per-question answers on every verdict. Clean verdicts keep only a sentinel in the decision record, so this is the one source a policy replay can re-score without another paid pass.
 
 ## License
 

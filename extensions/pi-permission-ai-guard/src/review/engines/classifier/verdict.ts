@@ -174,7 +174,8 @@ function dangerNote(answers: ClassifierAnswers, thresholds: ClassifierThresholds
 /**
  * Synthesize a {@link ReviewOutcome} from calibrated answers: a danger hit
  * nobody asked for → hard deny; an authorized or unsure hit → confirm-defer
- * (deny lean, so `defer-danger` asks in every mode but strict); low
+ * (deny lean, so `defer-danger` asks in default/lenient, denies in strict,
+ * and allows in permissive); low
  * confidence → defer; intent plus risk below the deny line → allow; risk at
  * or above the line → deny when unauthorized, confirm-defer when authorized.
  * Classify never allows a danger hit: a confirmation is settled by a human.

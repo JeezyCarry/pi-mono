@@ -14,6 +14,7 @@ import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 import { describe, expect, it } from "vitest";
 
 import { MODE_VALUES, type Mode } from "#src/config/config-schema.ts";
+import { MODE_TABLE, suspicionRank } from "#src/config/mode-table.ts";
 import { GENERIC_DENY_REASON, type RiskLevel } from "#src/model/model-verdict.ts";
 import {
   escalationMessage,
@@ -241,6 +242,19 @@ describe("the ladder's structural invariant — contiguous bands in suspicion or
       distinct.every((b, i) => i === 0 || b > distinct[i - 1]!),
       `${mode}: band sequence ${seq.join(" → ")}`,
     ).toBe(true);
+  });
+
+  it("every mode's accept line sits below its reject line", () => {
+    // A tie or inversion silently merges a band to the allow side (allow
+    // wins ties in applyVerdictMode), failing open. The contiguity test
+    // cannot see it — a merged band is still contiguous.
+    for (const mode of MODE_VALUES) {
+      const { acceptAtOrBelow, rejectAtOrAbove } = MODE_TABLE[mode].cuts;
+      expect(
+        suspicionRank(acceptAtOrBelow),
+        `${mode}: accept ${acceptAtOrBelow} must sit below reject ${rejectAtOrAbove}`,
+      ).toBeLessThan(suspicionRank(rejectAtOrAbove));
+    }
   });
 
   it("every unresolved verdict keeps an ask path in at least one mode", () => {

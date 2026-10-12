@@ -8,7 +8,7 @@ Rules describe abstract concepts ("credential stores, private keys"), not enviro
 
 ## 2. Three-tier precedence: DENY-Always > DENY-Unless > ALLOW
 
-- **DENY-Always**: deny regardless of intent (secrets, irreversible destruction, external code execution, etc.).
+- **DENY-Always**: deny regardless of intent (secrets, irreversible destruction, external code execution, etc.) — except a directly authorized hit, which confirms with the operator instead of denying.
 - **DENY-Unless**: allow only with matching intent; otherwise the fallback the entry itself specifies (deny or defer).
 - **ALLOW**: allow only when matching the current task context.
 
@@ -67,4 +67,4 @@ The rendered transcript's labels carry the same words as the rule that defines t
 
 ## 12. The defer line names the gap, then the ask
 
-A defer reason is the operator's only channel; `lean` stays hidden, because surfacing it would anchor the human's decision. So one line carries both halves: what the reviewer could not establish, then the one thing that would settle it in parentheses (`could not tie this action to your request (did you ask for it?)`). The line reaches `notify` with no prefix of ours, because the host renders its own level separator before our text; a leading label would need a second separator to attach, and a colon there doubles the host's. Both lanes obey that shape; they deliberately do **not** share words. A lane-spanning constant, or an example generic enough to be parroted, is how one content-free line (`is this action safe to run?`) reached the operator from both engines, and a bare question hands the work back without any finding. The shape is the contract the operator reads, whichever engine deferred.
+A defer reason is the operator's only channel; `lean` stays hidden, because surfacing it would anchor the human's decision. So one line carries both halves: what the reviewer could not establish, then the one thing that would settle it in parentheses (`no request covers this action (did you ask for it?)`). The line reaches `notify` with no prefix of ours, because the host renders its own level separator before our text; a leading label would need a second separator to attach, and a colon there doubles the host's. Both lanes obey that shape; they deliberately do **not** share words. A lane-spanning constant, or an example generic enough to be parroted, is how one content-free line (`is this action safe to run?`) reached the operator from both engines, and a bare question hands the work back without any finding. The shape is the contract the operator reads, whichever engine deferred.
