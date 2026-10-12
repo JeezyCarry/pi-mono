@@ -44,7 +44,7 @@ The yield can only recognize neighbors that **register a tool name** — a neigh
 
 ### The write exception
 
-The SDK's write tool stashes `details: undefined`, so its old/new diff has to come from somewhere. pi-pigment captures it through the two execution hooks pi exposes — `tool_call` (read the pre-write file, keyed by `toolCallId`) and `tool_result` (emit `{ details }`), since `tool_execution_end` is read-only. The details are produced **only when the file that landed byte-equals the content the call supplied**; a sibling write, a changed argument, an aborted call, or a blocked one yields no diff rather than a wrong one. Execution still belongs entirely to pi's write tool.
+The SDK's write tool stashes `details: undefined`, so its old/new diff has to come from somewhere. pi-pigment captures it through the two execution hooks pi exposes — `tool_call` (read the pre-write file, keyed by `toolCallId`) and `tool_result` (emit `{ details }`), since `tool_execution_end` is read-only. The details are produced **only when the file that landed byte-equals the content arg the result carries** (the validated args execution actually received, in-place argument mutations included); a sibling write, an aborted call, or a blocked one yields no diff rather than a wrong one. Execution still belongs entirely to pi's write tool.
 
 `result.details` keeps the SDK's own shape: the channel _appends_ the write payload to the empty slot the SDK leaves. Edit does not touch details at all — it parses the SDK's own `patch` lazily at render time, so pi-pigment-created sessions render identically under the native renderer when resumed without pi-pigment.
 

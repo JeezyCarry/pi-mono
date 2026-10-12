@@ -126,6 +126,22 @@ describe("write details channel", () => {
     expect(result).toBeUndefined();
   });
 
+  it("reads the content from the result event's args, so an in-place mutation is observed", async () => {
+    // The tool_call sees A; another tool_call handler mutates the args in
+    // place to B before execution, so the result event carries B and the
+    // file lands B. The diff must be old -> B (not dropped against the
+    // stale A snapshot).
+    writeFile(join(CWD, "mutated.ts"), "old\n");
+    const host = setUp();
+    await host.fire("tool_call", callPayload("cm", { path: "mutated.ts", content: "A\n" }));
+    writeFile(join(CWD, "mutated.ts"), "B\n");
+    const [result] = (await host.fire(
+      "tool_result",
+      resultPayload("cm", { path: "mutated.ts", content: "B\n" }),
+    )) as Array<{ details?: { kind?: string } }>;
+    expect(result?.details?.kind).toBe("diff");
+  });
+
   it("drops details on an error result", async () => {
     writeFile(join(CWD, "err.ts"), "old\n");
     const host = setUp();
