@@ -183,31 +183,33 @@ export interface ReviewerPoolDeps {
   now?: () => number;
 }
 
+/** The walk clock: start stamp plus the time source latency is read from. */
+interface WalkClock {
+  startedAt: number;
+  now: () => number;
+}
+
 /**
- * Settle one walk outcome: the endpoint's audit identity gains its walk
- * position (the pool owns the numbering), a backup verdict never caches (the
- * primary gets another chance next ask), and a verdict's latency covers the
- * whole walk (failover cost stays visible).
+ * Settle a terminal walk record: stamp the endpoint identity and cover the
+ * walk latency.
  *
  * @param terminal - The terminal record (identity NOT yet stamped).
  * @param endpoint - The endpoint that produced it.
  * @param index - The endpoint's position.
- * @param startedAt - The walk start (wall-clock latency covers the walk).
- * @param now - The clock.
+ * @param clock - The walk clock.
  * @returns The settled record.
  */
 function settleWalk(
   terminal: EngineAttemptResult,
   endpoint: PoolEndpoint,
   index: number,
-  startedAt: number,
-  now: () => number,
+  clock: WalkClock,
 ): EngineAttemptResult {
   const identified = { ...terminal, modelId: withFallbackIndex(endpoint.id, index) };
   if (isMachinery(identified)) return identified;
   const settled = {
     ...identified,
-    outcome: { ...identified.outcome, latencyMs: now() - startedAt },
+    outcome: { ...identified.outcome, latencyMs: clock.now() - clock.startedAt },
   };
   return index > 0 ? { ...settled, cacheable: false } : settled;
 }
@@ -237,7 +239,7 @@ export function createReviewerPool(deps: ReviewerPoolDeps): ReviewerEngine {
         terminal: EngineAttemptResult,
         endpoint: PoolEndpoint,
         index: number,
-      ): EngineAttemptResult => settleWalk(terminal, endpoint, index, startedAt, now);
+      ): EngineAttemptResult => settleWalk(terminal, endpoint, index, { startedAt, now });
       let pendingHop: HopRecord | undefined;
       for (const [index, endpoint] of endpoints.entries()) {
         const remaining = deadline - now();
