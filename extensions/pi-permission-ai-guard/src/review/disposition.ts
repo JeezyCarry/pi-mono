@@ -13,22 +13,24 @@
  * - `releaseMachineryGate` — the four reviewer-failure gates that never hold a parsed verdict
  *   (no-target, model-unresolved, transcript-error, auth-failed). Owns the machinery lane lookup,
  *   the deny reason (computed ONCE — the audit annotation and the returned verdict share it), the
- *   breaker's recoverable-tier credit, the review-stream record (mapped when the gate denies, plain
- *   when it defers), the forced-defer notice, and the returned verdict.
+ *   breaker's recoverable-tier credit, the forced-defer notice, and the record + verdict to emit.
  * - `releaseVerdictGate` — the two gates that emit a real verdict (cache-hit and fresh model). Owns
  *   the mapping decision's side effects: the fail-open notice state, the operator notice, the
  *   `mapped()` record annotation, and the returned verdict (a deny already carries its agent
  *   instruction — {@link resolveMapping} attaches it).
+ *
+ * Both methods RETURN their record; the caller emits it, choosing the stream from `record.gate`
+ * (see the log-stream doctrine in decision-record.ts). One writer, one place where the "never
+ * demote reviewer judgment" rule is enforced.
  *
  * The pure deciding rules stay where they are (`resolveMapping` /
  * `applyVerdictMode` in verdict-rule): this module performs, it does not
  * decide. Gates declare verdict + facts; the ritual lives here.
  */
 
-import type { AuthorizerLog, AuthorizerVerdict } from "@gotgenes/pi-permission-system";
+import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 import { type DecisionRecordEntry, mapped } from "#src/audit/decision-record.ts";
-import { DECISION_EVENT } from "#src/audit/events.ts";
 import type { Mode } from "#src/config/config-schema.ts";
 import type { PreCallMachineryKind } from "#src/model/machinery-kinds.ts";
 import type { RiskLevel } from "#src/model/model-verdict.ts";
@@ -46,9 +48,8 @@ import {
 import { applyVerdictMode, type ModelDeferInfo, resolveMapping } from "./verdict-rule.ts";
 
 /**
- * What a verdict release hands back to its gate: the record to write, and
- * the verdict to return. The gate writes the record to its own stream
- * (review vs debug) — the stream choice is the gate's one remaining fact.
+ * What a verdict release hands back: the record for the caller to emit
+ * (it chooses the stream from `record.gate`), and the verdict to return.
  */
 export interface VerdictRelease {
   /** The annotated (or plain) decision record. */
@@ -70,8 +71,6 @@ export interface MachineryGate {
   record: DecisionRecordEntry;
   /** The session circuit breaker (recoverable-tier credit). */
   breaker: CircuitBreaker;
-  /** The authorizer log pair (review stream). */
-  log: AuthorizerLog;
 }
 
 /**
@@ -110,18 +109,18 @@ export interface DispositionDeps {
 export interface Disposition {
   /**
    * Release a pre-call machinery gate. The shared invariants — a broken
-   * reviewer never rubber-stamps, every reviewer-relevant gate writes the
-   * review stream — live behind this method.
+   * reviewer never rubber-stamps, every reviewer-relevant gate emits its
+   * record — live behind this method.
    *
    * @param gate - The machinery gate's facts.
-   * @returns The verdict the gate emits.
+   * @returns The record to emit and the verdict the gate returns.
    */
-  releaseMachineryGate(gate: MachineryGate): AuthorizerVerdict;
+  releaseMachineryGate(gate: MachineryGate): VerdictRelease;
   /**
    * Release a verdict-bearing gate.
    *
    * @param gate - The verdict gate's facts.
-   * @returns The record to write and the verdict to return.
+   * @returns The record to emit and the verdict to return.
    */
   releaseVerdictGate(gate: VerdictGate): VerdictRelease;
 }
@@ -137,25 +136,26 @@ export function createDisposition(deps: DispositionDeps): Disposition {
   let noticeShown = false;
 
   return {
-    releaseMachineryGate({ mode, kind, record, breaker, log }) {
+    releaseMachineryGate({ mode, kind, record, breaker }) {
       // The pre-call gate never holds a parsed verdict, so it maps a bare
       // defer with no model-defer context: `applyVerdictMode` takes the
       // machinery lane, the ladder's single execution site for this axis.
       const mappedVerdict = applyVerdictMode(mode, { kind: "defer" });
       if (mappedVerdict.kind !== "deny") {
-        log.review(DECISION_EVENT, record);
         // Forced defer interrupts the human with no dialog context of its
         // own — same doctrine as the breaker trip: name the cause.
         deps.notify(machineryDeferNotice(kind), "warning");
-        return { kind: "defer" };
+        return { record, verdict: { kind: "defer" } };
       }
       breaker.recordDenyEquivalent();
       const reason = machineryDenyReason(kind, mode);
-      log.review(DECISION_EVENT, mapped(record, mode, "deny", reason));
       // The audit annotation keeps the un-instructed reason; the returned
       // verdict carries the agent instruction (a machinery denial was never
       // judged — retrying later is legitimate).
-      return { kind: "deny", reason: withAgentInstruction(reason, "machinery") };
+      return {
+        record: mapped(record, mode, "deny", reason),
+        verdict: { kind: "deny", reason: withAgentInstruction(reason, "machinery") },
+      };
     },
 
     releaseVerdictGate({ mode, record, original, emitted, riskLevel, defer, cost }) {

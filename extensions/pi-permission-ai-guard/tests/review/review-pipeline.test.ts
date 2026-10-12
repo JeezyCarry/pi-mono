@@ -56,6 +56,24 @@ describe("createReviewPipeline — guard clauses", () => {
     expect(calls).toEqual([{ surface: "bash", value: "npm test", agentName: "my-agent" }]);
   });
 
+  it("routes each decision record to the stream its gate names", async () => {
+    // The log-stream doctrine is enforced by `record.gate` alone (see
+    // decision-record.ts): a machinery failure never rides the debug
+    // stream, and a replay never rides the review stream. Split sinks make
+    // a swap visible, which a merged recorder cannot.
+    const { log, reviewCalls, debugCalls } = makeRecordingLog();
+    const authorize = createReviewPipeline(
+      makePipeline({
+        engine: makeEngine({
+          registry: defaultRegistry({ find: () => undefined }),
+        }),
+      }),
+    );
+    await authorize(makeDetails({ value: "npm test" }), makeQuery("ask"), log);
+    expect(reviewCalls.map((c) => c.data.gate)).toEqual([PRE_CALL_MACHINERY_KINDS.modelUnresolved]);
+    expect(debugCalls.filter((c) => c.event === DECISION_EVENT)).toEqual([]);
+  });
+
   it("defers when model is not found in registry", async () => {
     const authorize = createReviewPipeline(
       makePipeline({

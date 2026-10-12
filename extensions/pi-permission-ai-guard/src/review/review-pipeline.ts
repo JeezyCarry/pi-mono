@@ -16,6 +16,7 @@ import {
   modelReply,
   sanitizeRawReply,
   shortCircuit,
+  type DecisionRecordEntry,
 } from "#src/audit/decision-record.ts";
 import {
   CACHE_LOOKUP_EVENT,
@@ -119,6 +120,19 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
 
   const authorize: Authorizer["authorize"] = async (details, query, log) => {
     const { config } = deps;
+    // The single writer for decision records: the release seam returns the
+    // record, this closure emits it. Machinery + model gates name a
+    // reviewer-relevant judgment and ride the review stream; replays and
+    // pass-throughs ride debug (see the log-stream doctrine in
+    // decision-record.ts) — `record.gate` carries the choice, so no caller
+    // re-derives it.
+    const emitRecord = (record: DecisionRecordEntry): void => {
+      if (record.gate === "cache-hit" || record.gate === "policy-decided") {
+        log.debug(DECISION_EVENT, record);
+      } else {
+        log.review(DECISION_EVENT, record);
+      }
+    };
     // Session-scoped override (/ai-guard, ctrl+alt+g) wins over the config
     // default — the typed per-field accessor spells the rule once (see
     // effectiveOverride in session-overrides). Read per-call: the override
@@ -137,13 +151,14 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         );
         // The review failed to open — a machinery-lane gate (a permanent
         // property of the ask's shape, not a transient reviewer failure).
-        return disposition.releaseMachineryGate({
+        const released = disposition.releaseMachineryGate({
           mode,
           kind: PRE_CALL_MACHINERY_KINDS.noTarget,
           record: DecisionRecord.noTarget(details.requestId, opened.surface),
           breaker: deps.circuitBreaker,
-          log,
         });
+        emitRecord(released.record);
+        return released.verdict;
       }
       // surface-unmatched is outside this link's jurisdiction, but staying
       // fully silent hides coverage gaps (misspelled surface, host-renamed
@@ -265,14 +280,14 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
           error: normalizeAndRedactText(errorMessage(e)),
         }),
       );
-      const record = DecisionRecord.transcriptError(base);
-      return disposition.releaseMachineryGate({
+      const released = disposition.releaseMachineryGate({
         mode,
         kind: PRE_CALL_MACHINERY_KINDS.transcriptError,
-        record,
+        record: DecisionRecord.transcriptError(base),
         breaker: deps.circuitBreaker,
-        log,
       });
+      emitRecord(released.record);
+      return released.verdict;
     }
 
     // Cache lookup. The request snapshot contains the action context,
@@ -303,9 +318,8 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       });
       const { record, verdict } = released;
       // Replay gate: the verdict was already recorded at its model gate —
-      // debug stream only (see the log-stream doctrine in
-      // decision-record.ts).
-      log.debug(DECISION_EVENT, record);
+      // emitRecord routes it to the debug stream by record.gate.
+      emitRecord(record);
       // The release carries the returned verdict (a deny already has the
       // instruction appended exactly once per hit — the cache holds the
       // un-instructed original; each hit re-appends).
@@ -336,15 +350,16 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
             engineResult.modelId,
             normalizeAndRedactText(engineResult.detail ?? ""),
           );
-      return disposition.releaseMachineryGate({
+      const released = disposition.releaseMachineryGate({
         mode,
         kind: isModelUnresolved
           ? PRE_CALL_MACHINERY_KINDS.modelUnresolved
           : PRE_CALL_MACHINERY_KINDS.authFailed,
         record,
         breaker: deps.circuitBreaker,
-        log,
       });
+      emitRecord(released.record);
+      return released.verdict;
     }
     const { outcome: reviewOutcome, modelId } = engineResult;
     // The anchor the intent check judged against, for both engines and every
@@ -409,7 +424,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       cost: { kind: "fresh", latencyMs: reviewOutcome.latencyMs },
     });
     const { record, verdict } = released;
-    log.review(DECISION_EVENT, record);
+    emitRecord(record);
 
     // The denied panel's data: record what the MODEL denied (the review's
     // own judgment — mapping artifacts and machinery denials are absent by
