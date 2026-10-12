@@ -130,7 +130,11 @@ export function availabilityReason(error: unknown): AvailabilityReason | undefin
   const trimmed = message.trim();
   const http =
     /^(?:(?:Error:\s*)?HTTP(?:\/\d(?:\.\d)?)?\s*|Error:\s*)?(\d{3})\b/i.exec(trimmed) ??
-    /\b(?:status(?: code)?|upstream returned)\s*[:=]?\s*(\d{3})\b/i.exec(message);
+    // The separator is required inside the optional group, not optional beside
+    // it: `\s*[:=]?\s*` lets the two `\s*` split one whitespace run in O(n)
+    // ways per start position, which is quadratic on `status` + a long space
+    // run and only linear once `[:=]` has to be there.
+    /\b(?:status(?: code)?|upstream returned)\s*(?:[:=]\s*)?(\d{3})\b/i.exec(message);
   if (http) return switchableStatusReason(Number(http[1]));
   if (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name)) {
     return "timeout";

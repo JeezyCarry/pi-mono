@@ -74,6 +74,27 @@ describe("availabilityReason (untyped chat-lane input)", () => {
     // exhausted quota is still the provider's refusal, not a failover.
     expect(availabilityReason("403 forbidden: quota exceeded")).toBeUndefined();
   });
+
+  it("reads a status after a separator or plain whitespace", () => {
+    // The separator is optional but not free-floating. These are the forms the
+    // rule exists for; tightening the ambiguity must not narrow them.
+    expect(availabilityReason("HTTP status: 429 busy")).toBe("http-429");
+    expect(availabilityReason("status code=503")).toBe("http-503");
+    expect(availabilityReason("status 429")).toBe("http-429");
+    expect(availabilityReason("upstream returned:  429 x")).toBe("http-429");
+  });
+
+  it("stays linear on a long whitespace run after 'status'", () => {
+    // The separator used to sit optional *beside* the whitespace, so the two
+    // `\s*` could split one run O(n) ways per start position: 200k spaces cost
+    // ~13s here. Every correctness case above passes either way, so only a
+    // timing assertion catches the ambiguity coming back. The budget is
+    // thousands of times the linear cost and still below the quadratic one.
+    const message = `status${" ".repeat(200_000)}!`;
+    const startedAt = performance.now();
+    expect(availabilityReason(message)).toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+  });
 });
 
 describe("classifyBackendError — typed classifier-lane input", () => {
