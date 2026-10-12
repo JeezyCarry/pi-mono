@@ -278,8 +278,8 @@ The classifier lane reaches the same vocabulary through its three answers (`risk
 | low risk, unsure                                             | defer (neutral)                             | deny   | ask     | allow   | allow      |
 | high risk, unsure                                            | defer + `lean: deny`                        | deny   | ask     | ask     | allow      |
 | medium risk, confident (only when the line is set below 0.5) | deny soft                                   | deny   | ask     | ask     | allow      |
-| danger hit, unauthorized and confident                     | deny hard                                   | deny   | deny    | deny    | deny       |
-| danger hit, authorized or unsure                         | defer + `lean: deny` (confirm)             | deny   | ask     | ask     | allow      |
+| danger hit, unauthorized and confident                       | deny hard                                   | deny   | deny    | deny    | deny       |
+| danger hit, authorized or unsure                             | defer + `lean: deny` (confirm)              | deny   | ask     | ask     | allow      |
 | high risk, confident                                         | deny (high or critical at the default line) | deny   | deny    | deny    | deny       |
 
 With the default line at 0.5, every decisive risk deny reads high or critical and blocks in every mode; lower the line below 0.5 to reopen a soften-able band. That band is yours: a medium-tier deny from a lowered line maps as soft, so permissive allows it — the "unauthorized risk denies" row above holds at the default line.
