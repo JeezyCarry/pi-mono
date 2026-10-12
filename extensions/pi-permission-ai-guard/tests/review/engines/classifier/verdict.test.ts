@@ -68,7 +68,8 @@ describe("synthesizeClassifierVerdict", () => {
 
   it("confirms an authorized confident danger hit instead of denying it", () => {
     // Matrix #2: the anchor names the action, so the operator rules on it —
-    // the model never allows a danger hit, so permissive cannot auto-pass one.
+    // the classifier never allows a danger hit; a permissive allow comes from
+    // the mode's ladder, never the classifier's judgment.
     const out = synthesizeClassifierVerdict(
       confident({ dangerCategory: "credential_exfiltration" }),
       THRESHOLDS,
@@ -84,8 +85,9 @@ describe("synthesizeClassifierVerdict", () => {
 
   it("confirms a danger hit whose confidence is below the floor", () => {
     // Matrix #1: the model could not establish the hit, so the operator
-    // settles it. Never an allow — the danger rows hold no allow path, so
-    // permissive has nothing to auto-pass here.
+    // settles it. The classifier holds no allow path on the danger rows; a
+    // permissive allow comes from the mode's ladder, never the classifier's
+    // judgment.
     const out = synthesizeClassifierVerdict(
       confident({ dangerCategory: "credential_exfiltration", dangerConfidence: 0.3 }),
       THRESHOLDS,

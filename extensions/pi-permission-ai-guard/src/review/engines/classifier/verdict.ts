@@ -1,7 +1,7 @@
 import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 
 import { MODEL_DEFER_KIND } from "#src/model/machinery-kinds.ts";
-import type { ReviewOutcome, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
+import type { ReviewOutcome, RiskLevel } from "#src/model/model-verdict.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import {
   classifierCostlyReason,
@@ -135,41 +135,13 @@ export function riskLevelFromScore(riskScore: number): RiskLevel {
 }
 
 /**
- * The reviewer's directional inclination on an unresolved verdict: which way
- * it would decide if forced. A risk score at or above the deny line leans
- * deny; a pure intent gap with trusted readings leans allow; anything else is
- * neutral. The danger path sets its own lean, so it never reaches here.
- * Never surfaced to the human (anti-anchoring invariant).
- *
- * @param answers - The calibrated answers.
- * @param thresholds - The intent/risk/confidence thresholds.
- * @param confident - Whether both confidences clear the floor (false on
- *   the low-confidence defer branch — an untrusted reading leans nothing).
- * @returns The lean, or undefined for neutral.
+ * Which danger row a hit lands on: `confirm` (confident hit the anchor
+ * covers — the operator rules on it), `hard` (confident hit nobody asked
+ * for — terminal), or `unsure` (the model could not establish the hit —
+ * the operator settles it). Classify never allows a danger hit: a
+ * confirmation is settled by a human.
  */
-function deriveLean(
-  answers: ClassifierAnswers,
-  thresholds: ClassifierThresholds,
-  confident: boolean,
-): VerdictLean | undefined {
-  if (answers.riskScore >= thresholds.riskThreshold) return "deny";
-  if (confident && answers.intentMatch < thresholds.intentThreshold) return "allow";
-  return undefined;
-}
-
-/**
- * Which confirmation note rides the defer, or null for the hard deny:
- * unauthorized hits stay terminal; authorized or unsure ones defer.
- *
- * @param answers - The calibrated answers.
- * @param thresholds - The intent/risk/confidence thresholds.
- * @returns The parenthetical note for the confirm-defer, or null.
- */
-function dangerNote(answers: ClassifierAnswers, thresholds: ClassifierThresholds): string | null {
-  if (answers.dangerConfidence < thresholds.confidenceThreshold) return classifierDangerNote(false);
-  if (answers.intentMatch >= thresholds.intentThreshold) return classifierDangerNote(true);
-  return null;
-}
+type DangerRow = "confirm" | "hard" | "unsure";
 
 /**
  * Synthesize a {@link ReviewOutcome} from calibrated answers: a danger hit
@@ -178,10 +150,17 @@ function dangerNote(answers: ClassifierAnswers, thresholds: ClassifierThresholds
  * and allows in permissive); low
  * confidence → defer; intent plus risk below the deny line → allow; risk at
  * or above the line → deny when unauthorized, confirm-defer when authorized.
- * Classify never allows a danger hit: a confirmation is settled by a human.
  * The tier is a fixed audit label ({@link riskLevelFromScore}), so it never
  * moves with `riskThreshold` — at the default 0.5 every risk-lane deny reads
- * high/critical and blocks in every mode.
+ * high/critical and blocks in every mode. The lean is the reviewer's
+ * directional inclination on an unresolved verdict (which way it would decide
+ * if forced); it is never surfaced to the human (anti-anchoring invariant).
+ *
+ * Every reading is compared against its threshold exactly once up front,
+ * named for the decision it drives (readings are assumed finite per the wire
+ * contract — {@link projectClassifierAnswers} validates presence, not
+ * finiteness, so a non-finite reading is outside the contract and its
+ * behavior is not guaranteed).
  *
  * @param answers - The calibrated answers.
  * @param thresholds - The intent/risk/confidence thresholds.
@@ -193,17 +172,21 @@ export function synthesizeClassifierVerdict(
   thresholds: ClassifierThresholds,
   latencyMs: number,
 ): ReviewOutcome {
+  const authorized = answers.intentMatch >= thresholds.intentThreshold;
+  const overRiskLine = answers.riskScore >= thresholds.riskThreshold;
+  const dangerTrusted = answers.dangerConfidence >= thresholds.confidenceThreshold;
+
   if (answers.dangerCategory !== DANGER_NONE) {
     const criteria = classifierDangerCriteria(underscoresToWords(answers.dangerCategory));
     const riskLevel = DANGER_TIER[answers.dangerCategory] ?? "high";
-    const note = dangerNote(answers, thresholds);
-    if (note === null) {
+    const row: DangerRow = !dangerTrusted ? "unsure" : authorized ? "confirm" : "hard";
+    if (row === "hard") {
       return { verdict: { kind: "deny", reason: criteria }, latencyMs, riskLevel };
     }
     return {
       verdict: { kind: "defer" },
       deferKind: MODEL_DEFER_KIND,
-      deferReason: `${criteria} (${note})`,
+      deferReason: `${criteria} (${classifierDangerNote(row === "confirm")})`,
       lean: "deny",
       latencyMs,
       riskLevel,
@@ -211,32 +194,35 @@ export function synthesizeClassifierVerdict(
   }
   // Every exit below carries the label: the log reader grades risk against
   // the model's reading, not the verdict the link reached.
-  const minConfidence = Math.min(answers.dangerConfidence, answers.riskConfidence);
   const riskLevel = riskLevelFromScore(answers.riskScore);
-  if (minConfidence < thresholds.confidenceThreshold) {
+
+  // The danger rows grade only the danger reading; the intent/risk lanes
+  // need both readings trusted.
+  const readingsTrusted = dangerTrusted && answers.riskConfidence >= thresholds.confidenceThreshold;
+
+  if (!readingsTrusted) {
     return {
       verdict: { kind: "defer" },
       deferKind: MODEL_DEFER_KIND,
       // The flag names the reading that fell short; the ask is one shape.
       deferReason: classifierUncertainReason(answers.dangerConfidence <= answers.riskConfidence),
-      lean: deriveLean(answers, thresholds, false),
+      // An untrusted reading leans nothing — except evidence of danger,
+      // which never leans allow.
+      lean: overRiskLine ? "deny" : undefined,
       latencyMs,
       riskLevel,
     };
   }
   // Allow needs both: the anchor authorizes it AND risk stays below the
   // deny line.
-  if (
-    answers.intentMatch >= thresholds.intentThreshold &&
-    answers.riskScore < thresholds.riskThreshold
-  ) {
+  if (authorized && !overRiskLine) {
     return { verdict: { kind: "allow" }, latencyMs, riskLevel };
   }
-  if (answers.riskScore >= thresholds.riskThreshold) {
+  if (overRiskLine) {
     // Authorized but costly: the anchor's own request is the reason this is
     // not the generic deny — the operator confirms the price. Unauthorized
     // stays a generic deny (no category to name).
-    if (answers.intentMatch >= thresholds.intentThreshold) {
+    if (authorized) {
       return {
         verdict: { kind: "defer" },
         deferKind: MODEL_DEFER_KIND,
@@ -252,13 +238,14 @@ export function synthesizeClassifierVerdict(
       riskLevel,
     };
   }
-  // Only intent can still fall short here (risk at or above the line already
-  // denied above), so {@link deriveLean}'s risk branch cannot fire on this exit.
+  // Only intent can still fall short here: this exit is trusted, risk is
+  // below the line, and the allow gate above already failed — so the lean
+  // is unconditionally allow.
   return {
     verdict: { kind: "defer" },
     deferKind: MODEL_DEFER_KIND,
     deferReason: classifierIntentGapReason(),
-    lean: deriveLean(answers, thresholds, true),
+    lean: "allow",
     latencyMs,
     riskLevel,
   };
