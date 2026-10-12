@@ -175,7 +175,28 @@ describe("machineryTarget", () => {
   });
 });
 
+it("routes a confirm-defer by the mode's defer-danger band", () => {
+  // The danger rows' confirm exit: lean deny puts it on defer-danger, so
+  // strict still denies (fail-closed), default and lenient ask, and
+  // permissive — whose contract blocks only hard denies — allows. No mode
+  // reaches allow from the classifier's own danger rows; permissive's allow
+  // is the mode's ladder, never the classifier's judgment.
+  const confirm: ModelDeferInfo = { kind: "model-defer", lean: "deny" };
+  const exits = MODE_VALUES.map(
+    (mode) => [mode, applyVerdictMode(mode, { kind: "defer" }, confirm, "critical").kind] as const,
+  );
+  expect(Object.fromEntries(exits)).toEqual({
+    strict: "deny",
+    default: "defer",
+    lenient: "defer",
+    permissive: "allow",
+  });
+});
+
 describe("the ladder's structural invariant — contiguous bands in suspicion order", () => {
+  // The danger rows sit on this order: a hard deny stays terminal in every
+  // mode, while a confirm-defer (lean deny) asks in default and lenient,
+  // denies in strict, and allows in permissive.
   // The suspicion order: allow < defer+lean:allow < defer neutral <
   // defer+lean:deny < soft deny < hard deny. Each mode's mapping must be
   // three CONTIGUOUS bands (allow / ask / deny) on this line — a special

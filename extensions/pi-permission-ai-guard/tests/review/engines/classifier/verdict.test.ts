@@ -43,9 +43,10 @@ describe("synthesizeClassifierVerdict", () => {
     expect(out.latencyMs).toBe(100);
   });
 
-  it("denies with the category reason on a confident danger hit", () => {
+  it("hard-denies an unauthorized confident danger hit, naming the category", () => {
+    // Matrix #3: nobody asked for it — terminal in every mode.
     const out = synthesizeClassifierVerdict(
-      confident({ dangerCategory: "credential_exfiltration" }),
+      confident({ dangerCategory: "credential_exfiltration", intentMatch: 0.2 }),
       THRESHOLDS,
       42,
     );
@@ -57,18 +58,34 @@ describe("synthesizeClassifierVerdict", () => {
     expect(out.riskLevel).toBe("high");
   });
 
-  it("denies a danger hit even when its confidence is below the floor", () => {
-    // A danger hit must never defer: a defer with deny-lean maps to allow
-    // in permissive mode (fail-open). Deny regardless of confidence.
+  it("confirms an authorized confident danger hit instead of denying it", () => {
+    // Matrix #2: the anchor names the action, so the operator rules on it —
+    // the model never allows a danger hit, so permissive cannot auto-pass one.
+    const out = synthesizeClassifierVerdict(
+      confident({ dangerCategory: "credential_exfiltration" }),
+      THRESHOLDS,
+      42,
+    );
+    expect(out.verdict).toEqual({ kind: "defer" });
+    expect(out.deferKind).toBe("model-defer");
+    expect(out.lean).toBe("deny");
+    // The category leads, so the review log attributes the defer to its lane.
+    expect(out.deferReason).toMatch(/^matched a safety rule: credential exfiltration \(/);
+    expect(out.riskLevel).toBe("high");
+  });
+
+  it("confirms a danger hit whose confidence is below the floor", () => {
+    // Matrix #1: the model could not establish the hit, so the operator
+    // settles it. Never an allow — the danger rows hold no allow path, so
+    // permissive has nothing to auto-pass here.
     const out = synthesizeClassifierVerdict(
       confident({ dangerCategory: "credential_exfiltration", dangerConfidence: 0.3 }),
       THRESHOLDS,
       7,
     );
-    expect(out.verdict).toEqual({
-      kind: "deny",
-      reason: "matched a safety rule: credential exfiltration",
-    });
+    expect(out.verdict).toEqual({ kind: "defer" });
+    expect(out.lean).toBe("deny");
+    expect(out.deferReason).toMatch(/^matched a safety rule: credential exfiltration \(/);
     expect(out.riskLevel).toBe("high");
   });
 
@@ -97,9 +114,11 @@ describe("synthesizeClassifierVerdict", () => {
     expect(riskShort.deferReason).toMatch(DEFER_REASON_SHAPE);
   });
 
-  it("denies a confident danger hit regardless of check order", () => {
+  it("keeps the hard deny when nothing authorizes the danger", () => {
+    // The danger rows run before the intent/risk gate: a confident hit with
+    // no authorization never reaches the DENY-Unless lane.
     const out = synthesizeClassifierVerdict(
-      confident({ dangerCategory: "system_tampering", dangerConfidence: 0.99 }),
+      confident({ dangerCategory: "system_tampering", dangerConfidence: 0.99, intentMatch: 0.1 }),
       THRESHOLDS,
       7,
     );
@@ -138,13 +157,21 @@ describe("synthesizeClassifierVerdict", () => {
     expect(critical.riskLevel).toBe("critical");
   });
 
-  it("denies at the risk bar even when intent is established", () => {
-    // The risk half of the allow gate: high intent must not cross the deny line.
-    const out = synthesizeClassifierVerdict(confident({ riskScore: 0.6 }), THRESHOLDS, 7);
-    expect(out.verdict.kind).toBe("deny");
+  it("confirms at the risk bar when intent is established, denies when it is not", () => {
+    // Matrix #5: the risk half is intent-aware — an authorized costly action
+    // is a confirmation, an unauthorized one stays the generic deny.
+    const authorized = synthesizeClassifierVerdict(confident({ riskScore: 0.6 }), THRESHOLDS, 7);
+    expect(authorized.verdict).toEqual({ kind: "defer" });
+    expect(authorized.lean).toBe("deny");
+    const unauthorized = synthesizeClassifierVerdict(
+      confident({ riskScore: 0.6, intentMatch: 0.2 }),
+      THRESHOLDS,
+      7,
+    );
+    expect(unauthorized.verdict.kind).toBe("deny");
   });
 
-  it("cuts the risk bar at 0.5: 0.4 allows, 0.5 denies", () => {
+  it("cuts the risk bar at 0.5: 0.4 allows, 0.5 confirms when asked and denies when not", () => {
     expect(
       synthesizeClassifierVerdict(confident({ riskScore: 0.4 }), THRESHOLDS, 7).verdict,
     ).toEqual({
@@ -152,6 +179,10 @@ describe("synthesizeClassifierVerdict", () => {
     });
     expect(
       synthesizeClassifierVerdict(confident({ riskScore: 0.5 }), THRESHOLDS, 7).verdict.kind,
+    ).toBe("defer");
+    expect(
+      synthesizeClassifierVerdict(confident({ riskScore: 0.5, intentMatch: 0.2 }), THRESHOLDS, 7)
+        .verdict.kind,
     ).toBe("deny");
   });
 

@@ -78,8 +78,10 @@ export function projectClassifierAnswers(raw: Record<string, ClassifierAnswer>):
 }
 
 /**
- * Danger category → audit risk tier. Every DENY-Always deny is critical;
+ * Danger category → audit risk tier. Every hard deny reads critical;
  * unlisted categories fall back to high (an unknown danger is never soft).
+ * Confirm-defers carry the tier too: the label grades the model's reading,
+ * not the verdict the link reached.
  */
 const DANGER_TIER: Readonly<Record<string, RiskLevel>> = {
   secrets_credentials: "critical",
@@ -111,12 +113,9 @@ const DANGER_TIER: Readonly<Record<string, RiskLevel>> = {
  * Anchor k lands in band k, so the top band holds the last two anchors — four
  * bands and five anchors cannot line up one-to-one.
  *
- * The band boundaries are load-bearing, not cosmetic: {@link denyTier} makes
- * high|critical hard and low|medium soft, so at the default `riskThreshold`
- * (0.5) a deny starts at the "Costly or hard to reverse" rung — band high, hence
- * hard — and no risk-lane deny can land in the soft tier, where permissive
- * would allow it. Lowering the threshold below 0.5 would put the "Bounded
- * damage" rung at the line, where its medium band softens the deny.
+ * The band boundaries are load-bearing: {@link denyTier} makes high|critical
+ * hard and low|medium soft, so at the default 0.5 line no risk-lane deny can
+ * land in the soft tier, where permissive would allow it.
  *
  * @param riskScore - The normalized 0–1 risk score.
  * @returns The audit tier.
@@ -129,12 +128,10 @@ export function riskLevelFromScore(riskScore: number): RiskLevel {
 }
 
 /**
- * The reviewer's directional inclination on an unresolved verdict: which
- * way it would decide if forced. Only the danger direction counts —
- * a risk score at or above the deny line leans deny (evidence of danger
- * never leans allow); a pure intent gap with trusted readings leans
- * allow (the screen is clean, only the authorization link is unclear);
- * anything else is neutral (an untrusted reading has no direction).
+ * The reviewer's directional inclination on an unresolved verdict: which way
+ * it would decide if forced. A risk score at or above the deny line leans
+ * deny; a pure intent gap with trusted readings leans allow; anything else is
+ * neutral. The danger path sets its own lean, so it never reaches here.
  * Never surfaced to the human (anti-anchoring invariant).
  *
  * @param answers - The calibrated answers.
@@ -154,16 +151,31 @@ function deriveLean(
 }
 
 /**
- * Synthesize a {@link ReviewOutcome} from calibrated answers, top-down:
- * danger hit → deny (before the confidence check — a danger hit must stay
- * decisive, otherwise it would project to a neutral defer the permissive
- * mode auto-allows); below-threshold confidence → defer;
- * intent + risk below the deny line → allow;
- * otherwise the DENY-Unless lane — a risk score at or above the deny line
- * denies, labeled by the fixed quartile bands ({@link riskLevelFromScore}).
- * The tier follows the label through denyTier: at the default threshold
- * (0.5) every risk-lane deny reads high/critical and blocks in every mode;
- * a lower threshold reopens a soften-able low/medium band.
+ * Which confirmation note rides the defer, or null for the hard deny:
+ * unauthorized hits stay terminal; authorized or unsure ones defer.
+ *
+ * @param answers - The calibrated answers.
+ * @param thresholds - The intent/risk/confidence thresholds.
+ * @returns The parenthetical note for the confirm-defer, or null.
+ */
+function dangerNote(answers: ClassifierAnswers, thresholds: ClassifierThresholds): string | null {
+  if (answers.dangerConfidence < thresholds.confidenceThreshold)
+    return "could not establish whether it applies; proceed?";
+  if (answers.intentMatch >= thresholds.intentThreshold)
+    return "the anchor appears to authorize it; proceed?";
+  return null;
+}
+
+/**
+ * Synthesize a {@link ReviewOutcome} from calibrated answers: a danger hit
+ * nobody asked for → hard deny; an authorized or unsure hit → confirm-defer
+ * (deny lean, so `defer-danger` asks in every mode but strict); low
+ * confidence → defer; intent plus risk below the deny line → allow; risk at
+ * or above the line → deny when unauthorized, confirm-defer when authorized.
+ * Classify never allows a danger hit: a confirmation is settled by a human.
+ * The tier is a fixed audit label ({@link riskLevelFromScore}), so it never
+ * moves with `riskThreshold` — at the default 0.5 every risk-lane deny reads
+ * high/critical and blocks in every mode.
  *
  * @param answers - The calibrated answers.
  * @param thresholds - The intent/risk/confidence thresholds.
@@ -176,27 +188,32 @@ export function synthesizeClassifierVerdict(
   latencyMs: number,
 ): ReviewOutcome {
   if (answers.dangerCategory !== DANGER_NONE) {
+    const criteria = `matched a safety rule: ${underscoresToWords(answers.dangerCategory)}`;
+    const riskLevel = DANGER_TIER[answers.dangerCategory] ?? "high";
+    const note = dangerNote(answers, thresholds);
+    if (note === null) {
+      return { verdict: { kind: "deny", reason: criteria }, latencyMs, riskLevel };
+    }
+    // The category leads: readers attribute a defer to its danger lane by
+    // that prefix; the confirmation note rides behind it in parentheses.
     return {
-      verdict: {
-        kind: "deny",
-        reason: `matched a safety rule: ${underscoresToWords(answers.dangerCategory)}`,
-      },
+      verdict: { kind: "defer" },
+      deferKind: MODEL_DEFER_KIND,
+      deferReason: `${criteria} (${note})`,
+      lean: "deny",
       latencyMs,
-      riskLevel: DANGER_TIER[answers.dangerCategory] ?? "high",
+      riskLevel,
     };
   }
   // Every exit below carries the label: the log reader grades risk against
-  // whatever the model answered, not against the verdict the verdict
-  // reached. A matched danger denies regardless of score, so risk exits
-  // with it too (the danger path above names its own tier).
+  // the model's reading, not the verdict the link reached.
   const minConfidence = Math.min(answers.dangerConfidence, answers.riskConfidence);
   const riskLevel = riskLevelFromScore(answers.riskScore);
   if (minConfidence < thresholds.confidenceThreshold) {
     return {
       verdict: { kind: "defer" },
       deferKind: MODEL_DEFER_KIND,
-      // The ternary names the reading that fell short; the ask is the same either
-      // way, because what the lanes share is the shape, not the words.
+      // The ternary names the reading that fell short; the ask is one shape.
       deferReason:
         answers.dangerConfidence <= answers.riskConfidence
           ? "could not tell whether this is dangerous (is it safe to run?)"
@@ -215,18 +232,33 @@ export function synthesizeClassifierVerdict(
     return { verdict: { kind: "allow" }, latencyMs, riskLevel };
   }
   if (answers.riskScore >= thresholds.riskThreshold) {
+    // Authorized but costly: the anchor's own request is the reason this is
+    // not the generic deny — the operator confirms the price. Unauthorized
+    // stays a generic deny (no category to name).
+    if (answers.intentMatch >= thresholds.intentThreshold) {
+      return {
+        verdict: { kind: "defer" },
+        deferKind: MODEL_DEFER_KIND,
+        deferReason:
+          "this looks costly or hard to reverse even though the anchor asks for it (proceed?)",
+        lean: "deny",
+        latencyMs,
+        riskLevel,
+      };
+    }
     return {
       verdict: { kind: "deny", reason: GENERIC_DENY_REASON },
       latencyMs,
       riskLevel,
     };
   }
-  // Only intent can still fall short here (risk at or above the line already denied above).
+  // Only intent can still fall short here (risk at or above the line already
+  // denied above), so {@link deriveLean}'s risk branch cannot fire on this exit.
   return {
     verdict: { kind: "defer" },
     deferKind: MODEL_DEFER_KIND,
     // Deliberately not byte-equal to the chat lane's example: a lane-spanning
-    // constant is how one content-free line reached the operator from both engines.
+    // constant would put one content-free line in front of the operator twice.
     deferReason: "could not tie this action to your request (did you ask for it?)",
     lean: deriveLean(answers, thresholds, true),
     latencyMs,
