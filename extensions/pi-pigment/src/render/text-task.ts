@@ -93,6 +93,12 @@ export interface PreviewTextHost extends Component {
   /** The scheduled preview task driving this component. */
   previewTask?: PreviewTask;
   /**
+   * The width the last preview render committed at. The next placeholder
+   * reuses it instead of termW() so a re-armed task cuts where the screen
+   * already shows. Cleared with the rest of the protocol state.
+   */
+  previewLastWidth?: number;
+  /**
    * The attached task's width-neutral identity — the attach guard's
    * stamp (same inputs → no placeholder write, no redraw, no restart).
    * Declared and consumed here (the protocol's own compare; the old
@@ -138,6 +144,7 @@ export function clearPreviewTask(text: PreviewTextHost): void {
   text.previewIdentity = undefined;
   text.previewRenderedKey = undefined;
   text.previewRender = undefined;
+  text.previewLastWidth = undefined;
 }
 
 /**

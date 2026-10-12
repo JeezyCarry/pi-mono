@@ -33,6 +33,7 @@ import { joinKey } from "#src/core/keys.ts";
 import type { BundledLanguage } from "#src/theme/shiki-core.ts";
 
 import { renderHeaderLine } from "./ellipsis.ts";
+import { statusCell } from "./header.ts";
 import { astInjectRegions, fallbackHeredocRegions } from "./heredoc-inject.ts";
 import type { FrameView } from "./session.ts";
 import { shellBadgeText, shellExitBadgeOf } from "./shell-status.ts";
@@ -130,7 +131,7 @@ export function createShellRenderer(
         : status === "success"
           ? theme.fg("success", theme.bold("✓"))
           : "";
-      const statusSuffix = mark ? ` ${theme.fg("muted", "·")} ${mark}` : "";
+      const statusSuffix = statusCell(theme, mark);
       // The highlighted command, once ready: shell-grammar colors over a
       // toolTitle base (uncolored tokens inherit it). Cached per command
       // AND theme identity — a mid-session theme switch re-highlights

@@ -12,7 +12,7 @@ Long call headers (a 200-char bash command, a deep grep path) push the result bo
 
 - Every tool call header (bash/powershell/grep/find/ls/edit/write) renders as ONE visual row: when the styled line exceeds the render width, the middle is replaced with `…` (single char — every column counts under a width budget; the TUI is Unicode-safe).
 - The middle goes because paths/commands carry information at both ends (directory head + file tail, command head + args tail).
-- The status suffix (`· ✓` / `· ✗ exit N`) is pinned — never part of the ellipsis budget. State must survive truncation.
+- The status suffix (`· ✓` / `· ✗ exit N`) is pinned — never part of the ellipsis budget; state must survive truncation. While a call is pending the same slot carries the heartbeat cell (`· ⠋`), so the `$` keeps column 0.
 - ctrl+o toggles ellipsis/full, reusing the existing expand/collapse state machine. Expanded = the full single line; soft-wrap is the TUI's business, not ours.
 - `headerEllipsis: "on" | "off"` (default `"on"`) gates the feature. Off means always-full headers regardless of expand state. It gates the HEADER only — body collapse is untouched.
 

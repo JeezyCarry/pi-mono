@@ -6,6 +6,7 @@ import {
   formatToolHeaderName,
   formatToolHeaderPath,
   resultLine,
+  statusCell,
 } from "#src/render/header.ts";
 
 describe("tool header names", () => {
@@ -54,5 +55,14 @@ describe("tool header names", () => {
     expect(meta).toBe("\nbash ✗ exit 1\n\n");
     const bare = formatToolFrameHeaderText({ meta: "x" }, (p) => p);
     expect(bare).toBe("x");
+  });
+});
+
+describe("status cell", () => {
+  const theme = { fg: (name: string, text: string) => `${name}:${text}` };
+
+  it("slots a mark behind the muted separator, or vanishes when empty", () => {
+    expect(statusCell(theme, "✓")).toBe(" muted:· ✓");
+    expect(statusCell(theme, "")).toBe("");
   });
 });

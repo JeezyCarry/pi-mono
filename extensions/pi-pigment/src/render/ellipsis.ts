@@ -8,6 +8,8 @@
 import { forEachCell, measurePlain } from "#src/core/ansi.ts";
 import { SEQ_BOLD_OFF, SEQ_ESC, SEQ_FG_DEFAULT, SEQ_RESET_BARE } from "#src/core/escapes.ts";
 
+import { statusCell } from "./header.ts";
+import { heartbeatCell } from "./heartbeat.ts";
 import type { FrameView } from "./session.ts";
 import { termW } from "./term.ts";
 import type { PreviewTextHost } from "./text-task.ts";
@@ -172,14 +174,19 @@ export function renderHeaderLine(parts: HeaderParts): void {
     ellipsis: theme.fg("muted", ELLIPSIS),
     fold: theme.fg("muted", FOLD),
   };
-  const full = `${body}${suffix}${newline}`;
+  // The pending heartbeat is the body's status cell: a muted `· <frame>`
+  // in the same slot the settled `· ✓` uses, so the `$` keeps column 0
+  // and the body's left edge never moves.
+  const beat = heartbeatCell(ctx, theme, Date.now());
+  const statusSuffix = `${suffix}${statusCell(theme, beat)}`;
+  const full = `${body}${statusSuffix}${newline}`;
   if (services.headerEllipsis === "off") {
     clearPreviewTask(text);
     text.setText(full);
     return;
   }
   const fit = (w: number | undefined): string =>
-    `${fitHeaderLine(body, suffix, w, marks)}${newline}`;
+    `${fitHeaderLine(body, statusSuffix, w, marks)}${newline}`;
   attachPreviewTask(
     text,
     definePreviewTask({
@@ -189,16 +196,22 @@ export function renderHeaderLine(parts: HeaderParts): void {
       identity: headerLineKey({
         prefix,
         body,
-        suffix,
+        suffix: statusSuffix,
         expanded: ctx.expanded,
         identity: scheme.identity,
         newline,
       }),
       widthAware: true,
-      placeholder: fit(termW()),
+      // Reuse the last committed width, not termW(): a re-armed frame
+      // must cut exactly where the screen already is, or every bucket
+      // flip shifts the middle-cut.
+      placeholder: fit(text.previewLastWidth ?? termW()),
       fallback: full,
       invalidate: ctx.invalidate,
-      render: (w) => Promise.resolve(fit(ctx.expanded ? undefined : w)),
+      render: (w) => {
+        text.previewLastWidth = w;
+        return Promise.resolve(fit(ctx.expanded ? undefined : w));
+      },
     }),
   );
 }

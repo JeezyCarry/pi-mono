@@ -48,6 +48,15 @@ The SDK's write tool stashes `details: undefined`, so its old/new diff has to co
 
 `result.details` keeps the SDK's own shape: the channel _appends_ the write payload to the empty slot the SDK leaves. Edit does not touch details at all — it parses the SDK's own `patch` lazily at render time, so pi-pigment-created sessions render identically under the native renderer when resumed without pi-pigment.
 
+### The heartbeat exception
+
+Every pending call header trails a braille spinner cell in the settled `· ✓` status slot, proving the TUI's render loop is alive — the ADR's second exception, passing the same test as the first: no new events subscribed, nothing written back to the UI, only a chrome cell over a state the render already owns. Four rules pin it to the render side:
+
+- **Trailing, in the status slot.** The cell rides the pinned suffix (`$ cmd · ⠋`), not the body head: the `$` keeps column 0, so the body's left edge never moves when the cell appears or a frame flips. The re-armed placeholder reuses the last committed width, not `termW()`, so a bucket flip never re-cuts the body.
+- **Computed, never counted.** The frame is a pure function of the wall clock (`FRAMES[floor(now/250) % 10]`) — a per-render counter would change the header key every frame, and the preview-task commit's own `invalidate()` re-runs renderCall: a self-driving repaint loop disguised as the feature. One 250ms bucket, one glyph, a converging key.
+- **Gated on the execution.** The cell shows only while pending AND `executionStarted`: the args-streaming window belongs to the assistant's own stream, and settled/error frames and session replays show none. It proves the render loop runs, never that the model streams — a provider stall with an idling TUI keeps spinning.
+- **The driver is rendering's own.** A ~4Hz interval re-invalidates the row while pending (quiet periods raise no tool events, so the buckets would never advance otherwise); the factory sweeps it on every final frame, and a resumed row never arms one. Precedent: the native bash Elapsed ticker and `ShellState.interval` — a render-layer clock, not a second data path.
+
 ## Consequences
 
 - A request for "fff search semantics with pi-pigment rendering" is no longer blocked by the API: a neighbor owns its own name, pi-pigment yields it, and both extensions run. Composing _pigment's_ renderers onto a foreign tool is not supported (pi-pigment exposes no rendering API); features below the boundary (rendering polish, collapse affordances, timing footers) are in scope, features above it (tool implementations, activation changes, bundled engines) are out.

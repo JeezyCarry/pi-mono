@@ -586,3 +586,25 @@ function makeTextWithBgSpy(onBg: (fn: ((line: string) => string) | undefined) =>
     invalidate: () => {},
   };
 }
+
+describe("heartbeat driver lifecycle", () => {
+  it("a settled renderResult sweeps an armed driver (no 4Hz repaint on a settled row)", () => {
+    const { orig } = makeOrig();
+    const { ctx } = makeRenderCtx<{ heartbeatInterval?: ReturnType<typeof setInterval> }>();
+    // Live pending execution: the factory arms the driver on renderCall.
+    ctx.isPartial = true;
+    ctx.executionStarted = true;
+    const wrapped = wrappedFor(orig, {});
+    wrapped.renderCall({}, buildRenderTheme(), ctx);
+    expect(ctx.state.heartbeatInterval).toBeDefined();
+    // The settled frame sweeps it — a settled row must never keep ticking.
+    ctx.isPartial = false;
+    wrapped.renderResult(
+      { content: [{ type: "text", text: "done" }] },
+      { expanded: false, isPartial: false },
+      buildRenderTheme(),
+      ctx,
+    );
+    expect(ctx.state.heartbeatInterval).toBeUndefined();
+  });
+});
