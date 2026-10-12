@@ -2,12 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import { buildClassifierRequest, flattenEntry } from "#src/review/engines/classifier/client.ts";
 import type { ClassifierOverlay } from "#src/review/engines/classifier/instructions.ts";
-import { DANGER_CRITERIA, DANGER_NONE } from "#src/review/engines/classifier/questions.ts";
+import {
+  DANGER_CRITERIA,
+  DANGER_NONE,
+  INTENT_MATCH_CRITERIA,
+  RISK_RUBRIC,
+} from "#src/review/engines/classifier/questions.ts";
 import type { AskContext } from "#src/review/request/ask.ts";
 import { buildAskContext } from "#src/review/request/ask.ts";
 import type { ReviewRequestContext } from "#src/review/request/review-request.ts";
 import type { StrippedTranscript } from "#src/review/request/transcript-stripper.ts";
 import { ev, makeDetails, payload } from "#test/fixtures.ts";
+import { EXCLUSION } from "#test/review/engines/shared.ts";
 
 function ask(): AskContext {
   return buildAskContext(makeDetails({ value: "rm -rf /tmp/x" }), "/project");
@@ -259,10 +265,20 @@ describe("DANGER_CRITERIA form", () => {
     // "not this category" to, so an exclusion only pollutes
     // the distribution. Exemptions belong in positive qualifiers. This test
     // freezes that convention — the case that established it lives only in a
-    // merged changeset.
+    // merged changeset. Both the exclusion literal and the exclusion
+    // sentence shapes are caught: a category says what it IS, and neither
+    // what it is not nor what stays elsewhere.
     const offenders = Object.entries(DANGER_CRITERIA)
-      .filter(([, criteria]) => criteria.includes("not this category"))
+      .filter(([, criteria]) => EXCLUSION.test(criteria))
       .map(([category]) => category);
     expect(offenders).toEqual([]);
+  });
+
+  it("keeps the intent and risk criteria positive too", () => {
+    // Same convention, extended to the other two questions: each grades one
+    // axis by what the action or link IS, and cross-references the sibling
+    // questions only through the verdict compositor named in their comments.
+    const texts = [INTENT_MATCH_CRITERIA.true, INTENT_MATCH_CRITERIA.false, ...RISK_RUBRIC];
+    expect(texts.filter((text) => EXCLUSION.test(text))).toEqual([]);
   });
 });

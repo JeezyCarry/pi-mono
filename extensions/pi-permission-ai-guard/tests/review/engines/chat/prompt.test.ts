@@ -7,6 +7,7 @@ import { buildReviewPrompt, buildReviewSystemPrompt } from "#src/review/engines/
 import { parseVerdictObject } from "#src/review/engines/chat/verdict-parser.ts";
 import type { AskContext } from "#src/review/request/ask.ts";
 import { stripTranscript } from "#src/review/request/transcript-stripper.ts";
+import { EXCLUSION } from "#test/review/engines/shared.ts";
 
 /**
  * Build a minimal AskContext for prompt fixtures. Only the fields the test
@@ -73,6 +74,17 @@ function makeAsk(
 }
 
 describe("buildReviewSystemPrompt", () => {
+  it("states the always-deny categories by positive inclusion, never by exclusion", () => {
+    // Same convention the classifier's DANGER_CRITERIA holds to (see
+    // client.test.ts): a category says what it is, and neither what it is
+    // not nor what stays in a sibling category. The lanes grade the same
+    // eight categories, so the wording standard is shared.
+    const prompt = buildReviewSystemPrompt({ rules: null, replace: false });
+    const alwaysDeny =
+      prompt.split("\n## ").find((block) => block.startsWith("DENY — Always")) ?? "";
+    expect(alwaysDeny).not.toMatch(EXCLUSION);
+  });
+
   // The copy is freely iterable, so pin the load-bearing structure rather
   // than the prose: the built-in rules lead by default, custom `rules`
   // append to them, `replace` swaps them out, and the verdict contract is
