@@ -1,5 +1,6 @@
 import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 
+import { MODEL_DEFER_KIND } from "#src/model/machinery-kinds.ts";
 import type { ReviewOutcome, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import { underscoresToWords } from "#src/utils.ts";
@@ -188,7 +189,7 @@ export function synthesizeClassifierVerdict(
   if (minConfidence < thresholds.confidenceThreshold) {
     return {
       verdict: { kind: "defer" },
-      deferKind: "model-defer",
+      deferKind: MODEL_DEFER_KIND,
       // The ternary names the reading that fell short; the ask is the same either
       // way, because what the lanes share is the shape, not the words.
       deferReason:
@@ -217,7 +218,7 @@ export function synthesizeClassifierVerdict(
   // Only intent can still fall short here (risk at or above the line already denied above).
   return {
     verdict: { kind: "defer" },
-    deferKind: "model-defer",
+    deferKind: MODEL_DEFER_KIND,
     // Deliberately not byte-equal to the chat lane's example: a lane-spanning
     // constant is how one content-free line reached the operator from both engines.
     deferReason: "could not tie this action to your request (did you ask for it?)",

@@ -24,6 +24,27 @@
 import type { ModelCallDeferKind } from "#src/model/model-verdict.ts";
 
 /**
+ * The model's own defer: the call opened and the reviewer judged, but
+ * stayed unsure. The one in-call kind that is not a machinery failure —
+ * every other member of {@link ModelCallDeferKind} means "no verdict was
+ * obtained" and maps through the mode's machinery lane, never the
+ * suspicion line.
+ */
+export const MODEL_DEFER_KIND = "model-defer" as const;
+
+/**
+ * Whether a defer kind is the model's own defer rather than a machinery
+ * failure. The discriminant the verdict mapping branches on, single-sourced
+ * so a new in-call kind cannot silently join the wrong axis.
+ *
+ * @param kind - The defer kind to test (undefined is never a model defer).
+ * @returns True only for the model's own defer.
+ */
+export function isModelDefer(kind: ModelCallDeferKind | undefined): boolean {
+  return kind === MODEL_DEFER_KIND;
+}
+
+/**
  * The pre-call machinery-failure kinds, as values: the review never
  * opened. Members are named in camelCase, values are the wire/record
  * strings (kebab-case, as they appear in reasons and log records).

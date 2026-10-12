@@ -27,6 +27,7 @@ import {
   type Suspicion,
   suspicionRank,
 } from "#src/config/mode-table.ts";
+import { isModelDefer } from "#src/model/machinery-kinds.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import type { ModelCallDeferKind, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
 
@@ -122,7 +123,7 @@ export function applyVerdictMode(
   // Machinery failures are their own axis (a failure to obtain a verdict),
   // never on the suspicion line — map through the mode's machinery lane,
   // which never allows: a broken reviewer must not rubber-stamp.
-  if (verdict.kind === "defer" && modelDefer?.kind !== "model-defer") {
+  if (verdict.kind === "defer" && !isModelDefer(modelDefer?.kind)) {
     return MODE_TABLE[policy].machinery === "deny"
       ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy) }
       : verdict;
@@ -268,7 +269,7 @@ export function resolveMapping(input: MappingInput): MappingDecision {
   // not by comment). Applied only where a deny is emitted — the verdict
   // carries the instruction, so no caller can drop it.
   const instructionSource: DenyInstructionSource =
-    original.kind === "defer" && deferKind !== "model-defer" ? "machinery" : "content";
+    original.kind === "defer" && !isModelDefer(deferKind) ? "machinery" : "content";
   // A defer that emitted as defer owes a notice: the model's reason (the dialog
   // alone would never show what it could not establish), or the machinery cause (a
   // forced defer must name its failure kind, same doctrine as the pre-call gates).
@@ -276,12 +277,12 @@ export function resolveMapping(input: MappingInput): MappingDecision {
   // the host's own. A terse defer without a reason stays silent by design.
   const deferNotice: MappingNotice | null =
     emitted.kind === "defer" && original.kind === "defer"
-      ? deferKind === "model-defer" && deferReason
+      ? isModelDefer(deferKind) && deferReason
         ? {
             message: deferReason,
             level: "info",
           }
-        : deferKind !== undefined && deferKind !== "model-defer"
+        : deferKind !== undefined && !isModelDefer(deferKind)
           ? { message: machineryDeferNotice(deferKind), level: "warning" }
           : null
       : null;
