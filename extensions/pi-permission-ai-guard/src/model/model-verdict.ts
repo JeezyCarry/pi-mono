@@ -75,8 +75,6 @@ export interface ReviewOutcome {
    * read out of the call — see {@link ReviewOutcomeDiagnostic}.
    */
   diagnostic?: ReviewOutcomeDiagnostic;
-  /** The latest trusted user message the intent check judged against (audit-only). */
-  anchorText?: string;
 }
 
 /**

@@ -47,6 +47,38 @@ export interface DecisionBase {
   target: string | undefined;
 }
 
+/** The model gate's facts: everything one model call contributes to its record. */
+export interface ModelGateFacts {
+  /** Shared decision-record context. */
+  base: DecisionBase;
+  /** The reviewer model id that was called. */
+  modelId: string;
+  /** Number of transcript lines stripped before the call. */
+  strippedCount: number;
+  /** The full-review call outcome (verdict, latency, raw reply, etc.). */
+  reviewOutcome: ReviewOutcome;
+  /**
+   * The trusted-intent context fingerprint (same value as the verdict-cache
+   * key's context hash) — lets audit readers tell same-context repetitions
+   * (routine) from cross-context ones (each occurrence was a separate
+   * judgment call).
+   */
+  contextHash: string;
+  /**
+   * The caller's pre-sanitized defer reply (the pipeline sanitizes one for
+   * its debug event and hands it here so the same text is not processed
+   * twice). Optional: without it the record sanitizes the outcome's raw
+   * reply itself.
+   */
+  deferReplySanitized?: string;
+  /**
+   * The latest trusted user message the intent check judged against.
+   * Carried beside the outcome, not on it: the transcript is the single
+   * source, and the engine's result stays unmutated.
+   */
+  anchorText?: string;
+}
+
 /**
  * A complete audit record. The shared fields are always present; each
  * gate adds its specifics. The index signature admits gate-specific fields
@@ -350,28 +382,19 @@ export const DecisionRecord = {
   /**
    * The model was called and returned a verdict.
    *
-   * @param base - Shared decision-record context.
-   * @param modelId - The reviewer model id that was called.
-   * @param strippedCount - Number of transcript lines stripped before the call.
-   * @param reviewOutcome - The full-review call outcome (verdict, latency, raw reply, etc.).
-   * @param contextHash - The trusted-intent context fingerprint (same value
-   *   as the verdict-cache key's context hash) — lets audit readers tell
-   *   same-context repetitions (routine) from cross-context ones (each
-   *   occurrence was a separate judgment call).
-   * @param deferReplySanitized - The caller's pre-sanitized defer reply (the
-   *   pipeline sanitizes one for its debug event and hands it here so the
-   *   same text is not processed twice). Optional: without it the record
-   *   sanitizes the outcome's raw reply itself.
+   * @param facts - The model gate's facts.
    * @returns A decision record for the model gate.
    */
-  model(
-    base: DecisionBase,
-    modelId: string,
-    strippedCount: number,
-    reviewOutcome: ReviewOutcome,
-    contextHash: string,
-    deferReplySanitized?: string,
-  ): DecisionRecordEntry {
+  model(facts: ModelGateFacts): DecisionRecordEntry {
+    const {
+      base,
+      modelId,
+      strippedCount,
+      reviewOutcome,
+      contextHash,
+      deferReplySanitized,
+      anchorText,
+    } = facts;
     return {
       ...base,
       gate: "model",
@@ -383,9 +406,8 @@ export const DecisionRecord = {
       attempts: reviewOutcome.attempts,
       strippedCount,
       contextHash,
-      // The latest trusted user message the intent check judged against.
       // Key name avoids "authorization": upstream masks such keys in logs.
-      anchorText: reviewOutcome.anchorText ?? null,
+      anchorText: anchorText ?? null,
       verdict: reviewOutcome.verdict.kind,
       // Persist the sanitized model explanation for deny or defer. For
       // defer, `deferKind` carries the classification (timeout / model-defer

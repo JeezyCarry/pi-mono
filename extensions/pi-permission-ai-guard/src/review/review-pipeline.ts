@@ -362,11 +362,6 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       return released.verdict;
     }
     const { outcome: reviewOutcome, modelId } = engineResult;
-    // The anchor the intent check judged against, for both engines and every
-    // outcome kind — the transcript is the single source, not each engine.
-    // Named anchorText (not authorizationAnchor): upstream's log redaction
-    // masks any key containing "authorization".
-    reviewOutcome.anchorText = transcript.trustedIntent.at(-1);
 
     // Raw replies are verbose AND unnecessary for clean verdicts (the
     // structured record + sentinel suffice) — only defer failures keep the
@@ -406,14 +401,15 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     );
     const released = disposition.releaseVerdictGate({
       mode,
-      record: DecisionRecord.model(
+      record: DecisionRecord.model({
         base,
         modelId,
-        transcript.strippedCount,
+        strippedCount: transcript.strippedCount,
         reviewOutcome,
         contextHash,
         deferReplySanitized,
-      ),
+        anchorText: transcript.trustedIntent.at(-1),
+      }),
       original: reviewOutcome.verdict,
       emitted,
       riskLevel: reviewOutcome.riskLevel,
