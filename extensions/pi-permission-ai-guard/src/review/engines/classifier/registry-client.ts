@@ -92,6 +92,7 @@ export function createRegistryClassifierClient(deps: RegistryModelDeps): Classif
             timeoutMs: options?.timeoutMs,
             maxRetries: options?.maxRetries,
             signal: options?.signal,
+            temperature: options?.temperature,
           }),
         options?.signal,
       );

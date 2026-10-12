@@ -356,6 +356,35 @@ describe("DecisionRecord — per-gate shape", () => {
     expect(bare.anchorText).toBe(null);
   });
 
+  it("model records token usage and cost when the outcome carries it", () => {
+    // The classifier backend prices usage from the catalog; the record is
+    // the one place that cost stays visible without parsing rawReply.
+    const usage = {
+      input: 100,
+      output: 20,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 120,
+      cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+    };
+    const withUsage = DecisionRecord.model(
+      base,
+      "typesafe/jev-1.13",
+      5,
+      { verdict: { kind: "allow" }, latencyMs: 250, usage },
+      "ctxh1",
+    );
+    expect(withUsage.usage).toEqual(usage);
+    const bare = DecisionRecord.model(
+      base,
+      "typesafe/jev-1.13",
+      5,
+      { verdict: { kind: "allow" }, latencyMs: 250 },
+      "ctxh1",
+    );
+    expect(bare.usage).toBe(null);
+  });
+
   it("model omits reason for allow and defer-without-explanation verdicts", () => {
     const allow = DecisionRecord.model(
       base,

@@ -7,6 +7,7 @@
  * that produce the availability reasons live in `review/failure-taxonomy.ts`.
  */
 
+import type { Usage } from "@earendil-works/pi-ai";
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 /**
@@ -57,6 +58,11 @@ export interface ReviewOutcome {
   lean?: VerdictLean;
   /** Model call latency in milliseconds (cumulative across attempts). */
   latencyMs: number;
+  /**
+   * Token usage and its catalog-priced cost, when the backend reports
+   * token counts. Audit-only: the lane's verdict never depends on it.
+   */
+  usage?: Usage;
   /** How many executeCall attempts produced this outcome (1, or 2 after the empty-reply retry). */
   attempts?: number;
   /** Raw model reply (for debug logging). */

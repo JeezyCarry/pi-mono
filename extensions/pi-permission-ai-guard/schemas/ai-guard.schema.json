@@ -41,50 +41,9 @@
           "maximum": 1,
           "default": 0.5,
           "description": "Minimum answer confidence; below it the verdict defers."
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "maximum": 300000,
-          "description": "Accepted for backward compatibility but ignored — set the top-level timeoutMs instead."
         }
       },
       "additionalProperties": false
-    },
-    "typesafe": {
-      "type": "object",
-      "description": "Deprecated alias of `classifier`; remove it. A file writing both keys is rejected. Thresholds still apply; `timeoutMs` is ignored.",
-      "properties": {
-        "intentThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Intent probability at or above which the anchor counts as authorizing the action."
-        },
-        "riskThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Risk score at or above which the action denies; the tier follows the fixed quartile bands. Raising it widens what auto-allows in every mode."
-        },
-        "confidenceThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Minimum answer confidence; below it the verdict defers."
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "maximum": 300000,
-          "description": "Accepted for backward compatibility but ignored — set the top-level timeoutMs instead."
-        }
-      },
-      "additionalProperties": false,
-      "deprecated": true
     },
     "fallbacks": {
       "type": "array",
@@ -144,7 +103,7 @@
       "type": "number",
       "minimum": 0,
       "maximum": 2,
-      "description": "Chat-lane sampling temperature. Unset leaves the field off the wire, so the provider default applies. 0 makes two reviews of one request agree; leave it unset for a model that rejects non-default sampling, such as an OpenAI reasoning model. Ignored in classifier mode."
+      "description": "Sampling temperature for both lanes. Unset leaves the field off the wire, so the provider default applies. 0 makes two reviews of one request agree; leave it unset for a model that rejects non-default sampling, such as an OpenAI reasoning model. Backends without a sampling knob ignore it (TypeSafe carries none)."
     },
     "mode": {
       "type": "string",

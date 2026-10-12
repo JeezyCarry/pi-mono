@@ -30,7 +30,6 @@ import { attempt, errorMessage, isObjectRecord, normalizeText } from "#src/utils
 
 import {
   type AiGuardConfig,
-  CLASSIFIER_ALIAS_KEY,
   CONFIG_TOP_LEVEL_KEYS,
   EXTENSION_ID,
   NESTED_CONFIG_KEYS,
@@ -113,9 +112,6 @@ const CREATE_FILE_NAME = CONFIG_FILE_NAMES[0];
 
 /** Sentinel distinguishing "path absent" from a legitimately undefined value. */
 const MISSING = Symbol("missing");
-
-/** Delete passes for the deprecated alias before a save refuses (a file may carry it twice). */
-const ALIAS_DELETE_MAX_PASSES = 8;
 
 /** An env-ref variable name: what `${…}` may name. */
 const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -320,7 +316,9 @@ function readLayer(
   // name (`surfaces`, `modes`) would otherwise leave the operator running the
   // default they meant to change. Report it — never fail the layer.
   for (const key of Object.keys(parsed.value)) {
-    if (CONFIG_TOP_LEVEL_KEYS.has(key)) continue;
+    // A retired spelling gets its own named migration from the merged-shape
+    // pass; calling it a typo here would be wrong and a second message.
+    if (CONFIG_TOP_LEVEL_KEYS.has(key) || RETIRED_TOP_LEVEL_KEYS.has(key)) continue;
     issues.push({
       path: key,
       message: `unknown key \`${key}\`; ignored (check for a typo)`,
@@ -339,59 +337,7 @@ function readLayer(
       });
     }
   }
-  foldLegacyAlias(parsed.value, path, issues);
   return { value: parsed.value, sourcePath: path, outcome: "loaded" };
-}
-
-/**
- * Normalize a layer's classifier threshold blocks before the merge:
- *
- * - Fold the deprecated `typesafe` block into `classifier` and report it. Folding per layer (never on
- *   the merged result) keeps layer precedence intact: a project's deprecated block still beats the
- *   global layer's current key, and two layers naming the block differently merge as one field
- *   instead of colliding on the schema's both-keys rejection.
- * - Report the retired `timeoutMs` as ignored, in either block. Dropping the field itself is the
- *   schema transform's job — one place strips dead knobs.
- *
- * Both notices describe what the file says, so they are pushed while the text
- * is in hand. A layer writing both keys is left alone: that contradiction is
- * the schema's to reject, and folding either one would silently pick a winner.
- *
- * @param layer - The parsed layer value, normalized in place.
- * @param path - The layer file (for notice attribution).
- * @param issues - Issues accumulator.
- */
-function foldLegacyAlias(
-  layer: Record<string, unknown>,
-  path: string,
-  issues: ConfigIssue[],
-): void {
-  const alias = layer[CLASSIFIER_ALIAS_KEY];
-  if (isObjectRecord(alias) && layer.classifier === undefined) {
-    issues.push({
-      path: CLASSIFIER_ALIAS_KEY,
-      message: `\`${CLASSIFIER_ALIAS_KEY}\` is deprecated; rename it to \`classifier\``,
-      sourcePath: path,
-    });
-    const { timeoutMs, ...thresholds } = alias;
-    if (timeoutMs !== undefined) {
-      issues.push({
-        path: `${CLASSIFIER_ALIAS_KEY}.timeoutMs`,
-        message: `\`${CLASSIFIER_ALIAS_KEY}.timeoutMs\` is ignored; set the top-level \`timeoutMs\` instead`,
-        sourcePath: path,
-      });
-    }
-    layer.classifier = thresholds;
-    delete layer[CLASSIFIER_ALIAS_KEY];
-  }
-  const current = layer.classifier;
-  if (isObjectRecord(current) && current.timeoutMs !== undefined) {
-    issues.push({
-      path: "classifier.timeoutMs",
-      message: "`classifier.timeoutMs` is ignored; set the top-level `timeoutMs` instead",
-      sourcePath: path,
-    });
-  }
 }
 
 /**
@@ -809,20 +755,6 @@ function layerThatWrote(
 }
 
 /**
- * Whether an `instructions` value is the retired lane-implicit classifier
- * overlay: `background`/`questions` at the top level, from before the
- * per-lane slots. Detected by the shape's own keys, never by "neither slot
- * key is present" — a config that means something else must not receive a
- * migration hint that does not apply to it.
- *
- * @param value - The raw `instructions` value from the merged input.
- * @returns True when the value carries the retired top-level overlay keys.
- */
-function retiredOverlayShape(value: unknown): boolean {
-  return isObjectRecord(value) && ("background" in value || "questions" in value);
-}
-
-/**
  * Whether a `provider` value is the retired direct TypeSafe connection: an
  * object naming `type: "typesafe"`, from before the registry-only classifier.
  * Detected by the shape's own key, never by "not a string" — a config that
@@ -857,6 +789,130 @@ function retiredDirectProviderPaths(merged: Record<string, unknown>): string[] {
     });
   }
   return paths;
+}
+
+/**
+ * A config spelling the extension no longer accepts: the paths in the merged
+ * input that still carry it, and what the operator has to write instead. The
+ * schema fails the load either way — this table is what turns a generic type
+ * or unknown-key error into a named migration.
+ */
+interface RetiredSpelling {
+  /** The offending paths, primary first. */
+  paths(merged: Record<string, unknown>): string[];
+  /** What the operator has to write instead. */
+  replacement: string;
+  /**
+   * The top-level key this spelling claims, when the schema no longer knows
+   * it. The layer read would otherwise call it a typo right beside the
+   * migration that explains it.
+   */
+  claimedTopLevelKey?: string;
+}
+
+/**
+ * The top-level key that still carries the old name, whatever its value.
+ * zod strips a key the schema no longer knows, so judging the shape first
+ * would let a malformed value (a bare `42`, or a project layer overriding
+ * with `null`) take the thresholds down without a word.
+ *
+ * @param key - The retired key name.
+ * @param merged - The merged raw config.
+ * @returns The key itself when present, otherwise nothing.
+ */
+function presentKey(key: string): (merged: Record<string, unknown>) => string[] {
+  return (merged) => (Object.hasOwn(merged, key) ? [key] : []);
+}
+
+/** The retired spellings, each detected by its own shape rather than by absence. */
+const RETIRED_SPELLINGS: readonly RetiredSpelling[] = [
+  {
+    replacement: "`typesafe` was renamed; move its thresholds to `classifier`",
+    paths: presentKey("typesafe"),
+    claimedTopLevelKey: "typesafe",
+  },
+  {
+    replacement:
+      "`classifier.timeoutMs` has no effect; the reviewer timeout is the top-level `timeoutMs`",
+    paths: (merged) => {
+      const block = merged.classifier;
+      return isObjectRecord(block) && block.timeoutMs !== undefined ? ["classifier.timeoutMs"] : [];
+    },
+  },
+  {
+    replacement:
+      '`instructions` no longer takes top-level `background`/`questions`; wrap them in the `classifier` slot: { "classifier": { … } }',
+    paths: (merged) =>
+      isObjectRecord(merged.instructions) &&
+      ("background" in merged.instructions || "questions" in merged.instructions)
+        ? ["instructions"]
+        : [],
+  },
+  {
+    replacement:
+      'the direct System One provider form was removed; register the endpoint in pi, then set `modelType: "classifier"`',
+    paths: retiredDirectProviderPaths,
+  },
+];
+
+/** Top-level keys the table explains, so the layer read does not also call them typos. */
+const RETIRED_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(
+  RETIRED_SPELLINGS.map((spelling) => spelling.claimedTopLevelKey).filter(
+    (key): key is string => key !== undefined,
+  ),
+);
+
+/**
+ * Report every retired spelling the merged input still carries, each as a
+ * named migration issue attributed to the layer that wrote it.
+ *
+ * @param merged - The merged raw config.
+ * @param global - The global layer read (for notice attribution).
+ * @param project - The project layer read (for notice attribution).
+ * @returns The migration issues, in table order.
+ */
+/**
+ * The file that owns the retired leaf: whichever layer's OWN value still
+ * carries the full dotted path. Deep merge splits ownership inside a
+ * nested block — a project layer can write `classifier` while the dead
+ * `timeoutMs` came from the global file — so the top segment alone names
+ * the wrong file. When both layers carry the leaf, the project value wins
+ * (see {@link deepMerge}), and so does the attribution.
+ *
+ * @param path - The dotted path of the retired spelling.
+ * @param global - The global layer read (for notice attribution).
+ * @param project - The project layer read (for notice attribution).
+ * @returns The source path of the layer that wrote the leaf.
+ */
+function retiredSpellingSourcePath(
+  path: string,
+  global: LayerReadResult,
+  project: LayerReadResult,
+): string | undefined {
+  const hasLeaf = (layer: LayerReadResult): boolean => {
+    let node: unknown = layer.value;
+    for (const segment of path.split(".")) {
+      if (!isObjectRecord(node) || !Object.hasOwn(node, segment)) return false;
+      node = node[segment];
+    }
+    return true;
+  };
+  const owner = hasLeaf(project) ? project : hasLeaf(global) ? global : undefined;
+  return owner?.sourcePath ?? layerThatWrote(path.split(".")[0] ?? path, global, project);
+}
+
+function retiredSpellingIssues(
+  merged: Record<string, unknown>,
+  global: LayerReadResult,
+  project: LayerReadResult,
+): ConfigIssue[] {
+  return RETIRED_SPELLINGS.flatMap((spelling) =>
+    spelling.paths(merged).map((path) => ({
+      path,
+      message: spelling.replacement,
+      sourcePath: retiredSpellingSourcePath(path, global, project),
+    })),
+  );
 }
 
 /**
@@ -917,47 +973,22 @@ export function loadAiGuardConfig(
       ? deepMerge(global.value, project.value)
       : (global.value ?? project.value ?? {});
 
+  // A retired spelling fails the load even where zod would strip it silently
+  // (an unknown top-level key is dropped, not rejected): the operator's
+  // thresholds must not quietly stop applying because the block was renamed.
+  const retired = retiredSpellingIssues(merged, global, project);
   const parsed = configSchema.safeParse(merged);
-  if (!parsed.success) {
-    // The retired lane-implicit overlay shape now fails as a bare
-    // "unknown key". The rejection is correct; name the migration so the
-    // operator learns what to write instead of guessing.
-    if (retiredOverlayShape(merged.instructions)) {
-      issues.push({
-        path: "instructions",
-        message:
-          '`instructions` no longer takes top-level `background`/`questions`; wrap them in the `classifier` slot: { "classifier": { … } }',
-        sourcePath: layerThatWrote("instructions", global, project),
-      });
-    }
-    // The retired direct provider form now fails as an object where a string
-    // is required. The rejection is correct; name the migration so the
-    // operator learns what to write instead of guessing. The primary and
-    // every fallback entry get their own named issue (the fallback path would
-    // otherwise surface only as a generic type error).
-    for (const path of retiredDirectProviderPaths(merged)) {
-      issues.push({
-        path,
-        message:
-          'the direct System One provider form was removed; register the endpoint in pi, then set `modelType: "classifier"`',
-        sourcePath: layerThatWrote(
-          path.startsWith("fallbacks") ? "fallbacks" : "provider",
-          global,
-          project,
-        ),
-      });
-    }
+  if (!parsed.success || retired.length > 0) {
     // Schema errors lead: the failure notice prints only the first issue, and a
     // cosmetic typo found while reading a layer must not headline a real schema
     // failure.
-    issues.unshift(...flattenZodIssues(parsed.error.issues));
+    if (!parsed.success) issues.unshift(...flattenZodIssues(parsed.error.issues));
+    issues.push(...retired);
     return { issues, outcome: "failed" };
   }
 
-  // The notices below describe the merged shape: the deprecated alias and the
-  // retired `timeoutMs` were reported while each layer was read (see
-  // foldLegacyAlias), and the transform has dropped every dead field by now.
-  // A canonical `instructions` object may fill only some lane slots: an
+  // The notices below describe the merged shape. A canonical `instructions`
+  // object may fill only some lane slots: an
   // unlisted lane keeps the full built-in instructions. That is the
   // fail-safe direction (less customization, never a wrong one), so it is a
   // notice, not an error — but an uncovered lane must not pass silently.
@@ -1203,38 +1234,6 @@ function editLayerFile(
     changed = true;
   }
 
-  // The deprecated alias is folded away by the schema, so the snapshot has no
-  // `typesafe` leaf and the loop above never touches it. Leaving it in place
-  // would make the written file self-contradictory on the next load (both
-  // keys is a schema error), so the save migrates it out.
-  if (readPath(parsed.value, [CLASSIFIER_ALIAS_KEY]) !== MISSING) {
-    // `modify` deletes only the FIRST matching key while the loader reads the
-    // LAST, and JSONC allows the key twice. Delete until none remain: a copy
-    // left behind would sit beside the `classifier` key this save writes, and
-    // the final gate would refuse with a "shape conflict" nobody can act on.
-    //
-    // Bounded: an alias no `modify` can delete (a prototype-inherited key)
-    // would make the loop spin forever — refuse instead.
-    let removed = false;
-    for (let pass = 0; pass < ALIAS_DELETE_MAX_PASSES; pass++) {
-      running = applyEdits(running, modify(running, [CLASSIFIER_ALIAS_KEY], undefined, {}));
-      changed = true;
-      const current = parseLayerText(running);
-      if (!current.ok || readPath(current.value, [CLASSIFIER_ALIAS_KEY]) === MISSING) {
-        removed = true;
-        break;
-      }
-    }
-    if (!removed) {
-      return {
-        path,
-        created: false,
-        changed: false,
-        error: `refusing to write; \`${CLASSIFIER_ALIAS_KEY}\` cannot be removed from this file`,
-      };
-    }
-  }
-
   if (!changed) {
     return { path, created: false, changed: false };
   }
@@ -1252,6 +1251,27 @@ function editLayerFile(
       created: false,
       changed: false,
       error: "refusing to write; the target file's shape conflicts with the current config",
+    };
+  }
+  // The loader also refuses retired spellings the schema strips silently:
+  // a save that left one behind would write a file its own next load
+  // rejects. On the merged view this file plus its sibling decide, exactly
+  // as the load does.
+  const retired = retiredSpellingIssues(
+    finalParsed.value,
+    { outcome: "absent" },
+    {
+      value: provenance,
+      sourcePath: path,
+      outcome: "loaded",
+    },
+  );
+  if (retired.length > 0) {
+    return {
+      path,
+      created: false,
+      changed: false,
+      error: `refusing to write; the target file keeps a retired spelling (${retired[0]?.path}: ${retired[0]?.message})`,
     };
   }
   for (const { path: leafPath, value } of leafPaths(data)) {

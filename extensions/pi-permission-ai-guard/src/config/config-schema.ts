@@ -73,6 +73,15 @@ export type ClassifierQuestionId = (typeof CLASSIFIER_QUESTION_IDS)[number];
 export const MODEL_TYPE_VALUES = ["chat", "classifier"] as const;
 
 /**
+ * The reviewer timeout, stated once for the primary and every backup entry.
+ * One millisecond to five minutes.
+ */
+const timeoutMsSchema = z.number().int().min(1).max(300_000);
+
+/** Chat-lane sampling temperature; a backup entry pins it the same way. */
+const temperatureSchema = z.number().min(0).max(2);
+
+/**
  * One registry-resolved fallback: a chat model by default, or a pi
  * built-in classifier when `modelType` is `classifier`. Credentials
  * remain in Pi's model registry in both cases.
@@ -82,12 +91,12 @@ export const registryFallbackSchema = z
     provider: z.string().min(1),
     model: z.string().min(1),
     modelType: z.enum(MODEL_TYPE_VALUES).default("chat"),
-    timeoutMs: z.number().int().min(1).max(300_000).optional(),
+    timeoutMs: timeoutMsSchema.optional(),
     // Overrides the top-level `temperature` for this entry. A backup is a
     // different model, and some models reject non-default sampling (OpenAI
     // reasoning models accept only their own default), so a pin that fits
     // the primary cannot be assumed to fit the backup.
-    temperature: z.number().min(0).max(2).optional(),
+    temperature: temperatureSchema.optional(),
   })
   .strict();
 
@@ -157,32 +166,8 @@ const classifierThresholdsSchema = z
   })
   .strict();
 
-/** Classifier threshold defaults: applied to whichever key the operator wrote (or neither). */
+/** The classifier threshold defaults, computed once from the schema itself. */
 const CLASSIFIER_THRESHOLD_DEFAULTS = classifierThresholdsSchema.parse({});
-
-/**
- * The retired transport knob both threshold blocks still accept: parsed so
- * old files keep loading, never read — the primary timeout is the top-level
- * `timeoutMs` on both lanes. The transform drops it, so no consumer ever sees
- * a field with no effect.
- */
-const retiredTimeoutMsSchema = z.number().int().min(1).max(300_000).optional();
-
-/**
- * A classifier threshold block as written. The current `classifier` key and
- * its deprecated alias share this shape; the transform folds the alias into
- * `classifier`.
- */
-const classifierBlockSchema = classifierThresholdsSchema.extend({
-  timeoutMs: retiredTimeoutMsSchema,
-});
-
-/**
- * The deprecated spelling of the `classifier` block: one name for the three
- * sites that fold it (this schema's refine/transform, the loader's per-layer
- * fold, and the save path's leaf removal).
- */
-export const CLASSIFIER_ALIAS_KEY = "typesafe";
 
 /**
  * The safe-knob blocks, hoisted so their key sets can be exported (see
@@ -219,7 +204,7 @@ export const NESTED_CONFIG_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new 
 const configBaseSchema = z.object({
   model: z.string().min(1),
   reasoning: z.enum(REASONING_VALUES).default("off"),
-  timeoutMs: z.number().int().min(1).max(300_000).default(15_000),
+  timeoutMs: timeoutMsSchema.default(15_000),
   // Reviewer answer budget. For a plain chat model 512 is plenty. With
   // reasoning on the provider families differ: budget-based ones (Anthropic,
   // Bedrock) add the thinking budget on top of this, while effort-based ones
@@ -228,11 +213,13 @@ const configBaseSchema = z.object({
   // failure. 4096 keeps the stricter, effort-based case safe.
   maxTokens: z.number().int().min(16).max(32768).default(4096),
 
-  // Chat-lane sampling temperature. Unset omits the field, so the provider
-  // default applies — what every build before this key did. Set it to 0 to
-  // make two reviews of one request agree: the verdict is read straight off
-  // the reply, so decode variance surfaces as a flip between runs.
-  temperature: z.number().min(0).max(2).optional(),
+  // Sampling temperature for both lanes. Unset omits the field, so the
+  // provider default applies — what every build before this key did. Set
+  // it to 0 to make two reviews of one request agree: the verdict is read
+  // straight off the reply, so decode variance surfaces as a flip between
+  // runs. Backends without a sampling knob ignore it (TypeSafe carries
+  // none); llama-cpp scales the label softmax with it.
+  temperature: temperatureSchema.optional(),
 
   // Transcript stripping: how much context to keep for the model review.
   transcript: transcriptSchema
@@ -257,12 +244,8 @@ const configBaseSchema = z.object({
   // single-model behavior.
   fallbacks: registryFallbackSchema.array().max(5).default([]),
 
-  // Classifier verdict thresholds. Both keys stay optional here so "the
-  // operator wrote it" is still observable at refine time (a default would
-  // always materialize one of them); the legacy-key fold below then fills the
-  // winner, and defaults apply to that.
-  classifier: classifierBlockSchema.optional(),
-  [CLASSIFIER_ALIAS_KEY]: classifierBlockSchema.optional(),
+  // Classifier verdict thresholds; an absent block reads as the defaults.
+  classifier: classifierThresholdsSchema.default(CLASSIFIER_THRESHOLD_DEFAULTS),
 
   // How the link disposes the reviewer's non-allow verdicts (the leniency
   // ladder, strictest first). Hard-tier denies (riskLevel high|critical,
@@ -307,10 +290,7 @@ const configBaseSchema = z.object({
     .default({ maxEntries: 128 }),
 });
 
-/**
- * The validated union, before the legacy-key fold (see {@link configSchema}).
- * `reasoning`/`maxTokens` are ignored in classifier mode.
- */
+/** The config shape itself. `reasoning`/`maxTokens` are ignored in classifier mode. */
 const registryShapeSchema = configBaseSchema.extend({
   provider: z.string().min(1),
   modelType: z.enum(MODEL_TYPE_VALUES).default("chat"),
@@ -321,25 +301,14 @@ const registryShapeSchema = configBaseSchema.extend({
  * Every top-level key a layer may set. The loader reports anything else: zod
  * drops unknown keys silently, and a typo in a safety-relevant name
  * (`surfaces`, `modes`) would leave the operator running the default they meant
- * to change. The deprecated alias is accepted here too — the loader folds and
- * reports it itself.
+ * to change.
  */
-export const CONFIG_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
-  ...Object.keys(registryShapeSchema.shape),
-  CLASSIFIER_ALIAS_KEY,
-]);
+export const CONFIG_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(
+  Object.keys(registryShapeSchema.shape),
+);
 
-const configShapeSchema = registryShapeSchema.superRefine(
+export const configSchema = registryShapeSchema.superRefine(
   (config: z.output<typeof registryShapeSchema>, ctx) => {
-    // The alias key is the deprecated spelling of `classifier`. Both written
-    // is a contradiction the operator must resolve — never silently pick one.
-    if (config.classifier !== undefined && config[CLASSIFIER_ALIAS_KEY] !== undefined) {
-      ctx.addIssue({
-        code: "custom",
-        path: [CLASSIFIER_ALIAS_KEY],
-        message: `${CLASSIFIER_ALIAS_KEY} is deprecated; remove it and keep only \`classifier\``,
-      });
-    }
     // Lane slots: a written slot whose lane the pool never runs would
     // silently do nothing — reject, not warn (fail-safe: a config that says
     // what the system won't do must shout). The pool's configured lanes are
@@ -397,7 +366,7 @@ const configShapeSchema = registryShapeSchema.superRefine(
  * operator's configured composition (a classifier fallback the later
  * admission gate skips can narrow it) — all the lane-slot checks need.
  *
- * @param config - The config (or the pre-fold shape it comes from).
+ * @param config - The validated config.
  * @returns The lane names the pool will run, primary first.
  */
 function configuredLanes(config: {
@@ -429,33 +398,8 @@ export function uncoveredInstructionLanes(config: AiGuardConfig): Array<"chat" |
   return configuredLanes(config).filter((lane) => overlay[lane] === undefined);
 }
 
-export const configSchema = configShapeSchema.transform((config): AiGuardConfig => {
-  // Fold the deprecated alias into `classifier` and strip the retired
-  // `timeoutMs`, so every consumer reads one field with no dead knobs. The
-  // alias contributes thresholds only, and blocked defaults fill whichever
-  // block was written without them — a config with neither key gets the same
-  // values. A single file writing both keys never reaches this transform (the
-  // refine rejected it), and the load path folds the alias per layer before
-  // merging, so exactly one key arrives here whatever the files said.
-  const { [CLASSIFIER_ALIAS_KEY]: alias, ...rest } = config;
-  const written = config.classifier ?? alias;
-  if (written === undefined) {
-    return { ...rest, classifier: CLASSIFIER_THRESHOLD_DEFAULTS };
-  }
-  const { timeoutMs: _retired, ...thresholds } = written;
-  return { ...rest, classifier: thresholds };
-});
-
-/**
- * Validated extension configuration (zod schema inference): the legacy
- * `typesafe` key is folded away and `classifier` is required on every member.
- */
-export type AiGuardConfig = Omit<
-  z.output<typeof configShapeSchema>,
-  typeof CLASSIFIER_ALIAS_KEY
-> & {
-  classifier: z.output<typeof classifierThresholdsSchema>;
-};
+/** Validated extension configuration (zod schema inference). */
+export type AiGuardConfig = z.output<typeof configSchema>;
 
 /**
  * Whether the config runs the classifier lane: a registry string provider
@@ -463,7 +407,7 @@ export type AiGuardConfig = Omit<
  * instruction-overlay gate, and the lane instruction slicing all consume
  * this — one predicate, not three shape checks.
  *
- * @param config - The validated config (or the pre-fold shape it comes from).
+ * @param config - The validated config, or one fallback entry.
  * @returns True when the primary reviewer is a classifier endpoint.
  */
 export function isClassifierMode(config: { modelType?: unknown }): boolean {

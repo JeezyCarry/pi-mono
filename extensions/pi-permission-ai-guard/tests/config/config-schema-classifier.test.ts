@@ -36,43 +36,23 @@ describe("provider union", () => {
   it("rejects a misspelled threshold key instead of silently defaulting", () => {
     // A stripped typo would leave the reviewer on 0.5 with no feedback, while
     // the JSON schema (additionalProperties: false) flags it in the editor.
-    // The legacy alias extends the same block, so it inherits the strictness.
     expect(
       configSchema.safeParse({ ...classifierBase, classifier: { intentTreshold: 0.9 } }).success,
     ).toBe(false);
-    expect(
-      configSchema.safeParse({ ...classifierBase, typesafe: { riskTreshold: 0.9 } }).success,
-    ).toBe(false);
   });
 
-  it("folds the deprecated `typesafe` thresholds, dropping its `timeoutMs`", () => {
+  it("strips the retired `typesafe` block (the load layer is what refuses it)", () => {
+    // The top level is not strict, so zod drops an unknown key silently. This
+    // pins that the schema alone would let the block through and that nothing
+    // downstream reads it; `loadAiGuardConfig` turns it into a named failure.
     const parsed = configSchema.safeParse({
       ...classifierBase,
       typesafe: { intentThreshold: 0.9, timeoutMs: 7_000 },
     });
     expect(parsed.success).toBe(true);
     if (!parsed.success) return;
-    // Thresholds still apply; `timeoutMs` is parsed for compatibility but
-    // must not reach `classifier` (the primary timeout is top-level only).
-    expect(parsed.data.classifier).toEqual({
-      intentThreshold: 0.9,
-      riskThreshold: 0.5,
-      confidenceThreshold: 0.5,
-    });
-    expect("timeoutMs" in parsed.data.classifier).toBe(false);
-    // The legacy key is folded away, so no consumer can read it.
     expect("typesafe" in parsed.data).toBe(false);
-  });
-
-  it("rejects both `classifier` and `typesafe` (never silently pick one)", () => {
-    const parsed = configSchema.safeParse({
-      ...classifierBase,
-      classifier: { intentThreshold: 0.4 },
-      typesafe: { intentThreshold: 0.9 },
-    });
-    expect(parsed.success).toBe(false);
-    if (parsed.success) return;
-    expect(parsed.error.issues.some((i) => i.message.includes("deprecated"))).toBe(true);
+    expect(parsed.data.classifier.intentThreshold).toBe(0.5);
   });
 });
 

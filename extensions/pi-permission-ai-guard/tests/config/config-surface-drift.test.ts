@@ -172,14 +172,7 @@ describe("config surface drift", () => {
     // unmaterialized so conditional item types remain valid in editors.
     expect(zodSide.fallbacks).toEqual([]);
     delete zodSide.fallbacks;
-    const expected = jsonDefaults(schemaJson);
-    // The deprecated `typesafe` alias exists for input compatibility
-    // only: zod folds it into `classifier` and drops the key, so its
-    // JSON-schema defaults must not appear in the parsed shape.
-    for (const key of Object.keys(expected)) {
-      if (key.startsWith("typesafe.")) delete expected[key];
-    }
-    expect(zodSide).toEqual(expected);
+    expect(zodSide).toEqual(jsonDefaults(schemaJson));
   });
 
   it("nested anyOf defaults agree with zod (the main walk stops short)", () => {

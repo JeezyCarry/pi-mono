@@ -37,6 +37,13 @@ export interface ClassifierAdapterDeps {
   config: {
     classifier: AiGuardConfig["classifier"];
     instructions: ClassifierOverlay;
+    /**
+     * Sampling temperature for the classifier call. `undefined` omits the
+     * field, so the backend default applies. TypeSafe ignores it (its
+     * protocol carries no sampling knob); backends that do apply it
+     * (llama-cpp scales the label softmax) read it from this slot.
+     */
+    temperature: number | undefined;
   };
   /**
    * Client seam for a classifier endpoint. Production passes the accessor
@@ -87,6 +94,9 @@ export function createClassifierAdapter(deps: ClassifierAdapterDeps): LaneAdapte
             // With backups in the walk the pool's next hop is the retry:
             // each transport retry would spend the shared walk budget again.
             ...(hasFailover ? { maxRetries: 0 } : {}),
+            // `undefined` stays absent: backends that ignore sampling keep
+            // their default, and no absent-key serialization is disturbed.
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
           },
         );
         const outcome: ReviewOutcome = synthesizeClassifierVerdict(
@@ -94,6 +104,9 @@ export function createClassifierAdapter(deps: ClassifierAdapterDeps): LaneAdapte
           classifier,
           now() - startedAt,
         );
+        // Usage rides the outcome into the structured audit record; the
+        // rawReply keeps it too, so a record reader never depends on one path.
+        if (response.usage !== undefined) outcome.usage = response.usage;
         outcome.rawReply = JSON.stringify({ answers: response.answers, usage: response.usage });
         return { kind: "answered", result: { outcome, modelId } };
       } catch (error) {

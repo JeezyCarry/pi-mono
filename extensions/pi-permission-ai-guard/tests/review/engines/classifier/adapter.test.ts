@@ -85,6 +85,7 @@ const classifierConfig = {
     confidenceThreshold: 0.5,
   },
   instructions: {},
+  temperature: undefined,
 };
 
 const adapter = (client: ClassifierClientLike) =>
@@ -241,6 +242,45 @@ describe("classifier adapter disposition", () => {
     // The trimmed attempt budget reaches the call — not the endpoint's own
     // 2000, which is what an equal-value spec could not tell apart.
     expect(seen).toEqual([500]);
+  });
+
+  it("forwards the configured temperature, or omits it when unset", async () => {
+    // The slot exists for backends that apply sampling (llama-cpp scales
+    // the label softmax); TypeSafe ignores it. Absent must stay absent —
+    // an unpinned temperature is not a choice of zero.
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const probe: ClassifierClientLike = {
+      classify: async (_context, options) => {
+        seen.push(options === undefined ? undefined : { ...options });
+        return response();
+      },
+    };
+    const ctx = attemptContext(makeMergedRecordingLog().log);
+    await adapter(probe).attempt(endpoint(), ctx, spec(false));
+    expect(seen[0]).not.toHaveProperty("temperature");
+    const pinned = createClassifierAdapter({
+      config: { ...classifierConfig, temperature: 0.25 },
+      registryClient: () => probe,
+    });
+    await pinned.attempt(endpoint(), ctx, spec(false));
+    expect(seen[1]?.temperature).toBe(0.25);
+  });
+
+  it("carries the backend usage onto the outcome for the audit record", async () => {
+    const usage = {
+      input: 100,
+      output: 20,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 120,
+      cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+    };
+    const attempt = await adapter({
+      classify: async () => ({ ...response(), usage }),
+    }).attempt(endpoint(), attemptContext(makeMergedRecordingLog().log), spec(false));
+    expect(attempt.kind).toBe("answered");
+    if (attempt.kind !== "answered") return;
+    expect(attempt.result.outcome.usage).toEqual(usage);
   });
 
   it("bounds the whole call with the walk's remaining budget", async () => {

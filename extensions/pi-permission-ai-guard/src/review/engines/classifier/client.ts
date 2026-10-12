@@ -26,7 +26,10 @@ import { DANGER_CRITERIA, INTENT_MATCH_CRITERIA, RISK_RUBRIC } from "./questions
  * own fields rather than re-declared, so an upstream rename fails the
  * build instead of drifting silently.
  */
-export type ClassifierCallOptions = Pick<ClassifierOptions, "timeoutMs" | "maxRetries" | "signal">;
+export type ClassifierCallOptions = Pick<
+  ClassifierOptions,
+  "timeoutMs" | "maxRetries" | "signal" | "temperature"
+>;
 
 /** Minimal classifier surface this module uses (the seam unit tests fake). */
 export interface ClassifierClientLike {

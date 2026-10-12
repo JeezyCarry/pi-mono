@@ -181,7 +181,11 @@ export function buildReviewerPool(config: AiGuardConfig, deps: PoolAssemblyDeps)
         modelCall: deps.modelCall,
       }),
       classifier: createClassifierAdapter({
-        config: { classifier: config.classifier, instructions: classifierInstructions },
+        config: {
+          classifier: config.classifier,
+          instructions: classifierInstructions,
+          temperature: config.temperature,
+        },
         registryClient: classifierClientFor,
       }),
     },

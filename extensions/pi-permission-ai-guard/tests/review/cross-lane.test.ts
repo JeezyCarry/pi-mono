@@ -115,6 +115,7 @@ describe("cross-lane failover", () => {
               confidenceThreshold: 0.5,
             },
             instructions: {},
+            temperature: undefined,
           },
           registryClient: () => ({
             classify: async () => {
@@ -186,6 +187,7 @@ describe("cross-lane failover", () => {
               confidenceThreshold: 0.5,
             },
             instructions: {},
+            temperature: undefined,
           },
           registryClient: () => safeClassifier,
         }),
@@ -384,6 +386,7 @@ describe("cross-lane failover", () => {
           config: {
             classifier: { intentThreshold: 0.5, riskThreshold: 0.5, confidenceThreshold: 0.5 },
             instructions: classifier,
+            temperature: undefined,
           },
           registryClient: () => dangerClient,
         }),

@@ -402,6 +402,10 @@ export const DecisionRecord = {
       riskLevel: reviewOutcome.riskLevel ?? null,
       // Empty-reply diagnostics ride along so the review log stands alone.
       diagnostic: reviewOutcome.diagnostic ?? null,
+      // Token usage and its catalog-priced cost, when the backend reported
+      // token counts — the one place a cost stays visible without parsing
+      // rawReply. Null when the call threw before producing usage.
+      usage: reviewOutcome.usage ?? null,
       // rawReply distinguishes three states so audit readers can tell them apart:
       //  - defer with a reply (no-json / invalid-verdict-value / model-defer):
       //    keep the raw text — it's the operator's clue to why parsing failed.
