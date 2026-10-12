@@ -202,16 +202,13 @@ export function renderHeaderLine(parts: HeaderParts): void {
         newline,
       }),
       widthAware: true,
-      // Reuse the last committed width, not termW(): a re-armed frame
-      // must cut exactly where the screen already is, or every bucket
-      // flip shifts the middle-cut.
-      placeholder: fit(text.previewLastWidth ?? termW()),
+      // The placeholder cuts at the protocol's last committed width, not
+      // termW(): a re-armed frame must cut exactly where the screen
+      // already is, or every bucket flip shifts the middle-cut.
+      placeholder: (lastWidth) => fit(lastWidth ?? termW()),
       fallback: full,
       invalidate: ctx.invalidate,
-      render: (w) => {
-        text.previewLastWidth = w;
-        return Promise.resolve(fit(ctx.expanded ? undefined : w));
-      },
+      render: (w) => Promise.resolve(fit(ctx.expanded ? undefined : w)),
     }),
   );
 }

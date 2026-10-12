@@ -39,8 +39,13 @@ export interface PreviewTask {
    * used to prevent, folded into the protocol's single home).
    */
   identity: string;
-  /** Text shown synchronously while the async render is in flight. */
-  placeholder: string;
+  /**
+   * Text shown synchronously while the async render is in flight. A
+   * function form receives the host's last committed width (undefined
+   * before the first commit) and must cut at it — a re-armed frame then
+   * re-cuts nothing, only its live cell changes.
+   */
+  placeholder: string | ((lastWidth: number | undefined) => string);
   /** Text shown when the async render fails. */
   fallback: string;
   /** Asks the TUI to redraw this component. */
@@ -93,9 +98,10 @@ export interface PreviewTextHost extends Component {
   /** The scheduled preview task driving this component. */
   previewTask?: PreviewTask;
   /**
-   * The width the last preview render committed at. The next placeholder
-   * reuses it instead of termW() so a re-armed task cuts where the screen
-   * already shows. Cleared with the rest of the protocol state.
+   * The width the last preview render committed at — the protocol's own
+   * memory, written on commit and handed to a function placeholder so a
+   * re-armed frame cuts where the screen already shows. Cleared with the
+   * rest of the protocol state.
    */
   previewLastWidth?: number;
   /**
@@ -166,7 +172,11 @@ export function attachPreviewTask(text: PreviewTextHost, task: PreviewTask): voi
   text.previewIdentity = task.identity;
   text.previewRenderedKey = undefined;
   text.previewRender = undefined;
-  text.setText(task.placeholder);
+  text.setText(
+    typeof task.placeholder === "function"
+      ? task.placeholder(text.previewLastWidth)
+      : task.placeholder,
+  );
 }
 
 /**
@@ -201,8 +211,12 @@ export type DefinePreviewTaskSpec = PreviewIdentity & {
    *   no width-dependent layout).
    */
   widthAware: boolean;
-  /** Text shown synchronously while the async render is in flight. */
-  placeholder: string;
+  /**
+   * Text shown synchronously while the async render is in flight; the
+   * function form receives the host's last committed width (see
+   * PreviewTask.placeholder).
+   */
+  placeholder: string | ((lastWidth: number | undefined) => string);
   /** Text shown when the async render fails. */
   fallback: string;
   /** Asks the TUI to redraw this component. */
@@ -502,6 +516,10 @@ async function drainPreview(text: PreviewTextHost): Promise<void> {
     }
     queue.inFlight = false;
     if (text.previewRenderedKey === key) {
+      // The commit records its width: a later re-armed placeholder must
+      // cut exactly where the screen already is, or a frame flip shifts
+      // the middle-cut.
+      text.previewLastWidth = width;
       text.setText(rendered);
       task.invalidate();
     }
