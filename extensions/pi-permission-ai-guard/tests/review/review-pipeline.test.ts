@@ -380,6 +380,7 @@ describe("createReviewPipeline — verdicts", () => {
     const record = reviewCalls.findLast((c) => c.event === DECISION_EVENT)!.data;
     expect(record.deferKind).toBe("timeout"); // aborted → timeout, not empty-reply
     expect(record.diagnostic).toEqual({
+      kind: "empty-reply",
       stopReason: "aborted",
       rawStopReason: "max_tokens",
       contentTypes: [],

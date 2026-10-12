@@ -344,6 +344,7 @@ export async function reviewModel(
  */
 function buildEmptyReplyDiagnostic(result: CallResult & { ok: true }): ReviewOutcomeDiagnostic {
   return {
+    kind: "empty-reply",
     stopReason: result.reply.stopReason ?? null,
     rawStopReason: result.reply.rawStopReason ?? null,
     errorMessage: result.reply.errorMessage

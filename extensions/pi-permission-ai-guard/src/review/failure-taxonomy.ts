@@ -242,11 +242,15 @@ export function classifyBackendError(error: unknown): BackendFailure {
     return { reason: switchableStatusReason(error.status), deferKind: nonTimeoutKind(error) };
   }
   // An untyped error carries no status class: a refusal is terminal and
-  // never a timeout, guarded before the abort heuristic.
+  // never a timeout, guarded before the abort heuristic. Anything else —
+  // a wiring bug (a stale module throwing `TypeError` at call time), an
+  // SDK-internal failure the lane never typed — is availability on its
+  // face: the backend could not serve the request, and a backup reviewer
+  // may still answer. A wrong guess only costs one extra call.
   if (mentionsRefusal(errorMessage(error))) return { reason: undefined, deferKind: "call-failed" };
   const timedOut = classifyAbortish(error) === "timeout";
   return {
-    reason: timedOut ? "timeout" : undefined,
+    reason: timedOut ? "timeout" : "unknown-error",
     deferKind: timedOut ? "timeout" : "call-failed",
   };
 }

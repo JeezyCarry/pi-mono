@@ -185,7 +185,12 @@ export function synthesizeClassifierVerdict(
       riskLevel: DANGER_TIER[answers.dangerCategory] ?? "high",
     };
   }
+  // Every exit below carries the label: the log reader grades risk against
+  // whatever the model answered, not against the verdict the verdict
+  // reached. A matched danger denies regardless of score, so risk exits
+  // with it too (the danger path above names its own tier).
   const minConfidence = Math.min(answers.dangerConfidence, answers.riskConfidence);
+  const riskLevel = riskLevelFromScore(answers.riskScore);
   if (minConfidence < thresholds.confidenceThreshold) {
     return {
       verdict: { kind: "defer" },
@@ -198,6 +203,7 @@ export function synthesizeClassifierVerdict(
           : "could not judge how much damage this could do (is it safe to run?)",
       lean: deriveLean(answers, thresholds, false),
       latencyMs,
+      riskLevel,
     };
   }
   // Allow needs both: the anchor authorizes it AND risk stays below the
@@ -206,13 +212,13 @@ export function synthesizeClassifierVerdict(
     answers.intentMatch >= thresholds.intentThreshold &&
     answers.riskScore < thresholds.riskThreshold
   ) {
-    return { verdict: { kind: "allow" }, latencyMs };
+    return { verdict: { kind: "allow" }, latencyMs, riskLevel };
   }
   if (answers.riskScore >= thresholds.riskThreshold) {
     return {
       verdict: { kind: "deny", reason: GENERIC_DENY_REASON },
       latencyMs,
-      riskLevel: riskLevelFromScore(answers.riskScore),
+      riskLevel,
     };
   }
   // Only intent can still fall short here (risk at or above the line already denied above).
@@ -224,5 +230,6 @@ export function synthesizeClassifierVerdict(
     deferReason: "could not tie this action to your request (did you ask for it?)",
     lean: deriveLean(answers, thresholds, true),
     latencyMs,
+    riskLevel,
   };
 }

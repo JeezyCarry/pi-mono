@@ -450,7 +450,12 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // and a machinery denial (the reviewer never produced a verdict) earns
     // a recoverable-tier credit — the doctrine lives beside the breaker
     // (see accountModelOutcome in circuit-breaker).
-    accountModelOutcome(deps.circuitBreaker, reviewOutcome.verdict.kind, emitted);
+    accountModelOutcome(
+      deps.circuitBreaker,
+      reviewOutcome.verdict.kind,
+      emitted,
+      reviewOutcome.deferKind,
+    );
     if (reviewOutcome.verdict.kind !== "defer" && engineResult.cacheable !== false) {
       deps.verdictCache.store(
         commandHash,

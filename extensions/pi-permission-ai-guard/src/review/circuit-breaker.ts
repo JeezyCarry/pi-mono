@@ -3,6 +3,7 @@
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
+import type { ModelCallDeferKind } from "#src/model/model-verdict.ts";
 
 /** Which tier is tripped: the hard session cap or the recoverable streak. */
 export type BreakerTier = "total" | "consecutive";
@@ -172,17 +173,28 @@ export function consumeTrip(breaker: CircuitBreaker, cb: CircuitBreakerConfig): 
  * @param breaker - The session breaker.
  * @param original - The model's verdict kind.
  * @param emitted - The verdict the link emitted.
+ * @param deferKind - The classified defer kind, so a machinery defer the mode
+ *   mapped to allow still credits the consecutive tier.
  */
 export function accountModelOutcome(
   breaker: CircuitBreaker,
   original: AuthorizerVerdict["kind"],
   emitted: AuthorizerVerdict,
+  deferKind: ModelCallDeferKind | undefined,
 ): void {
   breaker.recordVerdict(original);
   if (emitted.kind === "deny" && original === "defer") {
     // strict maps the model's own uncertainty to a deny as well as
     // machinery failures — both are deny-equivalents for the recoverable
     // tier (see recordDenyEquivalent).
+    breaker.recordDenyEquivalent();
+    return;
+  }
+  // A machinery defer is the reviewer failing to answer, not a judgment.
+  // Without this credit a broken guard asks forever: `recordVerdict` leaves
+  // defers alone, so a streak that should trip on the third consecutive
+  // failure never moves. `model-defer` stays a genuine verdict.
+  if (original === "defer" && deferKind !== undefined && deferKind !== "model-defer") {
     breaker.recordDenyEquivalent();
   }
 }

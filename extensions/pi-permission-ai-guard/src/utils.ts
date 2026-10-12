@@ -382,6 +382,18 @@ export function errorMessage(error: unknown): string {
 }
 
 /**
+ * The thrown value's class name: `TypeError`, a realm's `Error`. A message
+ * can carry a URL, a key, or a key-shaped fragment; a class name cannot,
+ * so only the class travels into review logs and notify text.
+ *
+ * @param error - The thrown value.
+ * @returns Its constructor's name, or a stable token for non-errors.
+ */
+export function errorClassName(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : typeof error;
+}
+
+/**
  * Run a best-effort side effect: a throw is swallowed.
  *
  * For writes the caller cannot recover from and must not be cancelled by. The

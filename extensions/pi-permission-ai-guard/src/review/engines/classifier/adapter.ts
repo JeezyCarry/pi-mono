@@ -23,6 +23,7 @@ import type {
   PoolEndpoint,
 } from "#src/review/pool.ts";
 import type { EngineCallContext, EngineReviewResult } from "#src/review/reviewer-engine.ts";
+import { errorClassName } from "#src/utils.ts";
 
 import {
   type ClassifierClientAccessor,
@@ -111,15 +112,24 @@ export function createClassifierAdapter(deps: ClassifierAdapterDeps): LaneAdapte
         return { kind: "answered", result: { outcome, modelId } };
       } catch (error) {
         const { reason, deferKind } = classifyBackendError(error);
+        const diagnostic = errorClassName(error);
         // Recorded where the failure is observed, not where the walk ends: a
         // retryable failure that a backup supersedes never reaches `finalize`,
-        // and the chat lane's own catch records that attempt too.
+        // and the chat lane's own catch records that attempt too. The class
+        // name (never the message: URLs and keys hide in bodies) is the one
+        // question the review log must answer on its own — "was the guard
+        // broken?" — without paging the debug stream.
         emitCallFailure(ctx, deferKind, error);
         // One terminal-defer builder serves both exits: `finalize` runs on
         // exhaustion (backup verdicts stay uncached like the chat lane),
         // the terminal path ships immediately (primary keeps its default).
         const terminalDefer = (): EngineReviewResult => ({
-          outcome: { verdict: { kind: "defer" }, deferKind, latencyMs: now() - startedAt },
+          outcome: {
+            verdict: { kind: "defer" },
+            deferKind,
+            latencyMs: now() - startedAt,
+            diagnostic: { kind: "call-error", errorClass: diagnostic },
+          },
           modelId,
         });
         if (reason) {

@@ -215,6 +215,7 @@ describe("DecisionRecord — per-gate shape", () => {
         latencyMs: 10,
         deferKind: "empty-reply",
         diagnostic: {
+          kind: "empty-reply",
           stopReason: "end_turn",
           rawStopReason: "end_turn",
           contentTypes: [],
@@ -224,11 +225,27 @@ describe("DecisionRecord — per-gate shape", () => {
       "ctxh1",
     );
     expect(withDiagnostic.diagnostic).toEqual({
+      kind: "empty-reply",
       stopReason: "end_turn",
       rawStopReason: "end_turn",
       contentTypes: [],
       errorMessage: null,
     });
+    const callError = DecisionRecord.model(
+      base,
+      "anthropic/haiku",
+      2,
+      {
+        verdict: { kind: "defer" },
+        latencyMs: 10,
+        deferKind: "call-failed",
+        diagnostic: { kind: "call-error", errorClass: "TypeError" },
+      },
+      "ctxh1",
+    );
+    // A thrown call carries no reply: the log names the error class so an
+    // operator can tell a broken reviewer from an uncertain one.
+    expect(callError.diagnostic).toEqual({ kind: "call-error", errorClass: "TypeError" });
     const withoutDiagnostic = DecisionRecord.model(
       base,
       "anthropic/haiku",

@@ -20,6 +20,7 @@ export type AvailabilityReason =
   | "timeout"
   | "connection"
   | "model-unresolved"
+  | "unknown-error"
   | `http-${number}`;
 
 /** Why a model call deferred (for logging/debugging). */
@@ -70,8 +71,8 @@ export interface ReviewOutcome {
   /** Risk level from the model verdict, if provided. */
   riskLevel?: RiskLevel;
   /**
-   * Empty/aborted-reply diagnostics, present only when the reply carried
-   * no text — see {@link ReviewOutcomeDiagnostic}.
+   * Reply or call-failure diagnostics, present only when no verdict could be
+   * read out of the call — see {@link ReviewOutcomeDiagnostic}.
    */
   diagnostic?: ReviewOutcomeDiagnostic;
   /** The latest trusted user message the intent check judged against (audit-only). */
@@ -79,11 +80,16 @@ export interface ReviewOutcome {
 }
 
 /**
- * Why a model reply carried no text, captured when the reply is empty or
- * aborted. Persisted into the decision record so the review log is
- * self-diagnosing even with the permission system's debug log disabled.
+ * Why a model call produced no verdict, persisted into the decision record so
+ * the review log is self-diagnosing even with the permission system's debug
+ * log disabled. Records written before the call-error variant carry no `kind`;
+ * their shape is the reply variant.
  */
-export interface ReviewOutcomeDiagnostic {
+export type ReviewOutcomeDiagnostic = EmptyReplyDiagnostic | CallErrorDiagnostic;
+
+/** A reply arrived, but carried no usable text. */
+export interface EmptyReplyDiagnostic {
+  kind: "empty-reply";
   /** The provider stop reason (null when unknown). */
   stopReason: string | null;
   /** The UNADJUSTED provider stop reason (through the aborted reclassification). */
@@ -92,6 +98,18 @@ export interface ReviewOutcomeDiagnostic {
   contentTypes: string[];
   /** Sanitized provider error message, when the reply carried one. */
   errorMessage: string | null;
+}
+
+/**
+ * The call threw before any reply existed — a backend outage, or a wiring bug
+ * inside the reviewer. Only the error's class name is kept: an error message
+ * can carry a URL, a key, or a key-shaped fragment, and the debug stream holds
+ * the sanitized text for whoever needs it.
+ */
+export interface CallErrorDiagnostic {
+  kind: "call-error";
+  /** The thrown value's class name (`TypeError`, `Error`), or its type. */
+  errorClass: string;
 }
 
 /**

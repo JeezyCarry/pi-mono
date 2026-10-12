@@ -400,7 +400,8 @@ export const DecisionRecord = {
       // lean routes, it never surfaces — null when neutral or not a defer).
       lean: reviewOutcome.lean ?? null,
       riskLevel: reviewOutcome.riskLevel ?? null,
-      // Empty-reply diagnostics ride along so the review log stands alone.
+      // Reply and call-error diagnostics ride along so the review log stands
+      // alone: an operator reads that the call threw without the debug stream.
       diagnostic: reviewOutcome.diagnostic ?? null,
       // Token usage and its catalog-priced cost, when the backend reported
       // token counts — the one place a cost stays visible without parsing

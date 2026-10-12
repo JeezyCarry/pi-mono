@@ -199,13 +199,15 @@ describe("classifier adapter disposition", () => {
     expect(events.map((e) => e.event)).toEqual(["ai_guard.model_call_error"]);
   });
 
-  it("reports terminal defer on unexpected local exceptions", async () => {
+  it("fails over on unexpected local exceptions", async () => {
+    // An untyped local throw (stale module, SDK bug) is availability on
+    // its face, not a refusal: the pool tries the backup before deferring.
     const attempt = await adapter(throwing(new Error("unexpected parsing bug"))).attempt(
       endpoint(),
       attemptContext(makeMergedRecordingLog().log),
       spec(true),
     );
-    expect(attempt.kind).toBe("terminal");
+    expect(attempt.kind).toBe("retryable");
   });
 
   it("preserves single-endpoint retry and disables it with backups", async () => {
@@ -319,39 +321,39 @@ describe("classifier adapter incomplete responses", () => {
   // catch routes to a machinery defer (never allow, in every mode).
   // (A fully-empty answers object is covered at the verdict layer by the
   // projection-throws test — this fixture always carries the base keys.)
-  it("reports terminal machinery defer when answers itself is missing", async () => {
+  it("fails over on a malformed model reply", async () => {
     const attempt = await adapter({
       classify: async () => ({ ...response(), answers: undefined }) as unknown as ClassifierResult,
     }).attempt(endpoint(), attemptContext(makeMergedRecordingLog().log), spec(true));
-    expect(attempt.kind).toBe("terminal");
-    if (attempt.kind !== "terminal") return;
-    expect(attempt.result).toMatchObject({
+    expect(attempt.kind).toBe("retryable");
+    if (attempt.kind !== "retryable") return;
+    expect(attempt.finalize()).toMatchObject({
       outcome: { verdict: { kind: "defer" }, deferKind: "call-failed" },
     });
   });
 
   it.each([[{ danger_category: undefined }], [{ risk: undefined }], [{ intent_match: undefined }]])(
-    "reports terminal machinery defer on missing answers %j",
+    "fails over on missing answers %j",
     async (overrides) => {
       const attempt = await adapter({
         classify: async () => response(overrides as unknown as Record<string, ClassifierAnswer>),
       }).attempt(endpoint(), attemptContext(makeMergedRecordingLog().log), spec(true));
-      expect(attempt.kind).toBe("terminal");
-      if (attempt.kind !== "terminal") return;
-      expect(attempt.result).toMatchObject({
+      expect(attempt.kind).toBe("retryable");
+      if (attempt.kind !== "retryable") return;
+      expect(attempt.finalize()).toMatchObject({
         outcome: { verdict: { kind: "defer" }, deferKind: "call-failed" },
       });
     },
   );
 
-  it("reports terminal machinery defer on a missing reading field", async () => {
+  it("fails over on a missing reading field", async () => {
     const attempt = await adapter({
       classify: async () =>
         response({ risk: { type: "score", confidence: 0.9 } as unknown as ClassifierAnswer }),
     }).attempt(endpoint(), attemptContext(makeMergedRecordingLog().log), spec(true));
-    expect(attempt.kind).toBe("terminal");
-    if (attempt.kind !== "terminal") return;
-    expect(attempt.result).toMatchObject({
+    expect(attempt.kind).toBe("retryable");
+    if (attempt.kind !== "retryable") return;
+    expect(attempt.finalize()).toMatchObject({
       outcome: { verdict: { kind: "defer" }, deferKind: "call-failed" },
     });
   });
@@ -421,19 +423,19 @@ describe("classifier registry seam", () => {
     expect(attempt.result.modelId).toBe("cloudflare-workers-ai/classify-v1");
   });
 
-  it("terminal-defers when an endpoint arrives without a facade", async () => {
-    // The missing-facade throw lands in the attempt's own try/catch, so
-    // it surfaces as a terminal defer (fail-safe: never a throw past
-    // the adapter), not a rejection.
+  it("fails over when an endpoint arrives without a facade", async () => {
+    // The missing-facade throw lands in the attempt's own try/catch and is
+    // untyped, so the pool treats it as availability: a wiring bug on the
+    // primary must not block the backup from answering.
     const withoutFacade = createClassifierAdapter({ config: classifierConfig });
     const attempt = await withoutFacade.attempt(
       registryEndpoint(),
       attemptContext(makeMergedRecordingLog().log),
       spec(false),
     );
-    expect(attempt.kind).toBe("terminal");
-    if (attempt.kind !== "terminal") return;
-    expect(attempt.result).toMatchObject({ outcome: { deferKind: "call-failed" } });
+    expect(attempt.kind).toBe("retryable");
+    if (attempt.kind !== "retryable") return;
+    expect(attempt.finalize()).toMatchObject({ outcome: { deferKind: "call-failed" } });
   });
 });
 
