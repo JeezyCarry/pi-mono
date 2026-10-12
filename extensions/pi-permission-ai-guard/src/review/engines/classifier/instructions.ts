@@ -2,7 +2,6 @@ import type { JsonValue } from "@earendil-works/pi-ai";
 
 import type { ClassifierQuestionId } from "#src/config/config-schema.ts";
 
-/** An instruction overlay value: string, JSON object, or array. */
 type ClassifierInstructionValue = string | { [key: string]: JsonValue } | JsonValue[];
 
 /**

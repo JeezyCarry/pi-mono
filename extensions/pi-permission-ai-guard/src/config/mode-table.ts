@@ -31,7 +31,6 @@ export const SUSPICION_ORDER = [
   "hard-deny",
 ] as const;
 
-/** One rung of the suspicion order. */
 export type Suspicion = (typeof SUSPICION_ORDER)[number];
 
 /**
@@ -51,9 +50,7 @@ export function suspicionRank(suspicion: Suspicion): number {
  * allow / ask / deny bands contiguous (pinned by the contiguity test).
  */
 export interface ModeCuts {
-  /** Suspicion ranks at or below this are auto-allowed. */
   acceptAtOrBelow: Suspicion;
-  /** Suspicion ranks at or above this are auto-denied. */
   rejectAtOrAbove: Suspicion;
 }
 
@@ -69,7 +66,6 @@ export interface ModeFacts {
 
 /** One mode's row in the ladder table. */
 export interface ModeEntry {
-  /** The two cut lines on the suspicion order (the allow / ask / deny bands). */
   cuts: ModeCuts;
   /**
    * The machinery-failure lane — narrower by type than the cuts: a broken

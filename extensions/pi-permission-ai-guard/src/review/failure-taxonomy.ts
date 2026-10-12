@@ -130,10 +130,8 @@ export function availabilityReason(error: unknown): AvailabilityReason | undefin
   const trimmed = message.trim();
   const http =
     /^(?:(?:Error:\s*)?HTTP(?:\/\d(?:\.\d)?)?\s*|Error:\s*)?(\d{3})\b/i.exec(trimmed) ??
-    // The separator is required inside the optional group, not optional beside
-    // it: `\s*[:=]?\s*` lets the two `\s*` split one whitespace run in O(n)
-    // ways per start position, which is quadratic on `status` + a long space
-    // run and only linear once `[:=]` has to be there.
+    // `[:=]` must sit inside the group: as a sibling it lets the two `\s*`
+    // split one whitespace run O(n) ways per start position (quadratic).
     /\b(?:status(?: code)?|upstream returned)\s*(?:[:=]\s*)?(\d{3})\b/i.exec(message);
   if (http) return switchableStatusReason(Number(http[1]));
   if (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name)) {
@@ -182,10 +180,9 @@ export class ClassifierConnectionError extends Error {
 const STATUS_PATTERN = /\((\d{3})\)/;
 
 /**
- * The HTTP status a classifier error message carries (`"... (429): <body>"`),
- * or undefined when it names none. One reader for the status both the
- * rebuild ({@link classifierError}) and the facade's abort branch consult,
- * so "does this message carry a status?" cannot drift between them.
+ * One reader for the status in a classifier error message
+ * (`"... (429): <body>"`): the rebuild ({@link classifierError}) and the
+ * facade's abort branch must not drift on "does this carry a status?".
  *
  * @param message - The classifier result's error message.
  * @returns The embedded status, or undefined.
@@ -218,14 +215,12 @@ export function classifierError(message: string): Error {
   return new ClassifierConnectionError(message);
 }
 
-/** One backend failure's disposition: whether to fail over, and the defer kind it records. */
 export interface BackendFailure {
   /**
    * The failover reason when the backend could not serve the request (worth
    * trying the next endpoint); undefined when the failure is terminal.
    */
   reason: AvailabilityReason | undefined;
-  /** The defer kind the failure records. */
   deferKind: ModelCallDeferKind;
 }
 
@@ -257,8 +252,7 @@ export function classifyBackendError(error: unknown): BackendFailure {
 }
 
 /**
- * The defer kind for a typed error whose class is not itself a timeout or
- * abort: a refusal is "call-failed", else the shared abort heuristic.
+ * The defer kind for a typed error that is not itself a timeout or abort.
  *
  * @param error - The typed lane error.
  * @returns The terminal defer kind.

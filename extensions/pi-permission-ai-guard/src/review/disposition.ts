@@ -53,7 +53,6 @@ import { machineryTarget, type ModelDeferInfo, resolveMapping } from "./verdict-
 export interface VerdictRelease {
   /** The annotated (or plain) decision record. */
   record: DecisionRecordEntry;
-  /** The verdict the gate emits. */
   verdict: AuthorizerVerdict;
 }
 
@@ -86,9 +85,7 @@ export interface VerdictGate {
   record: DecisionRecordEntry;
   /** The reviewer's verdict (model or cached). */
   original: AuthorizerVerdict;
-  /** The verdict the mode mapping emitted. */
   emitted: AuthorizerVerdict;
-  /** The model's risk assessment, if any. */
   riskLevel: RiskLevel | undefined;
   /**
    * The fresh review's defer context (undefined on the cache-hit path —
@@ -104,17 +101,12 @@ export interface VerdictGate {
  * notice through, and whether emitted allows are announced.
  */
 export interface DispositionDeps {
-  /** The pipeline's notify (every notice the release owes). */
   notify: NotifyFn;
   /** Whether to announce emitted allows; ambient notifyLevel still applies. */
   notifyApprovals: boolean;
 }
 
-/**
- * The release seam for one pipeline instance: the two verdict-bearing gate
- * shapes, bound to the pipeline's notify and its once-per-pipeline
- * fail-open notice state.
- */
+/** The release seam for one pipeline instance. */
 export interface Disposition {
   /**
    * Release a pre-call machinery gate. The shared invariants — a broken
@@ -126,9 +118,7 @@ export interface Disposition {
    */
   releaseMachineryGate(gate: MachineryGate): AuthorizerVerdict;
   /**
-   * Release a verdict-bearing gate: resolve the mode mapping, perform its
-   * side effects, and hand back the record to write plus the verdict to
-   * return.
+   * Release a verdict-bearing gate.
    *
    * @param gate - The verdict gate's facts.
    * @returns The record to write and the verdict to return.
@@ -137,11 +127,8 @@ export interface Disposition {
 }
 
 /**
- * Create the release seam for one pipeline instance. The once-per-pipeline
- * fail-open notice state (the mode auto-approves what the reviewer didn't)
- * fires on the first mapped allow, then stays silent — it is held here as a
- * private implementation detail, so no gate has to read, flip, and write it
- * back.
+ * Create the release seam for one pipeline instance. The fail-open notice
+ * state fires on the first mapped allow, then stays silent.
  *
  * @param deps - The per-pipeline notify and approval flag.
  * @returns The release seam.

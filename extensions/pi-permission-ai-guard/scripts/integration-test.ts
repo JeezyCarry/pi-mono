@@ -64,7 +64,6 @@ Environment variables (fallbacks):
 
 interface CliArgs {
   apiKey: string;
-  /** Undefined for typesafe: the provider default applies. */
   baseUrl: string | undefined;
   modelId: string;
   provider: ProviderName;

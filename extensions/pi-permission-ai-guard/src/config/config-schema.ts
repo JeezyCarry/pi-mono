@@ -94,7 +94,6 @@ export const registryFallbackSchema = z
 /** One backup reviewer: a registry model (chat by default, or a classifier). */
 export type FallbackItem = z.infer<typeof registryFallbackSchema>;
 
-/** One instruction value: text, a JSON object, or an array. */
 const instructionValueSchema = z.union([
   z.string().min(1),
   z.record(z.string(), z.json()),
