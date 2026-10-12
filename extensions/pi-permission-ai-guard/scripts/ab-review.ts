@@ -146,6 +146,12 @@ interface RunResult {
   riskLevels: (string | null | undefined)[];
   deferKinds: (string | null | undefined)[];
   reasons: (string | undefined)[];
+  /**
+   * The classifier's per-question answers per run (undefined on the chat
+   * lane). This is the dump's replay input: a policy change can be re-scored
+   * offline against these answers instead of paying for another run.
+   */
+  answers: unknown[];
   /** The last repeat's latency; the dump reads one figure per case. */
   latencyMs: number | undefined;
   /** The repeats disagreed on the verdict or the category. */
@@ -407,7 +413,9 @@ function sessionFor(tc: AbCase) {
 
 // Recover the classifier danger category from a deny reason.
 function categoryFromReason(reason: string | undefined): string | undefined {
-  const m = /^matched a safety rule:\s*(.+)$/.exec(reason ?? "");
+  // A confirm-defer reason carries its note in trailing parentheses behind
+  // the category prefix; score the prefix, not the note.
+  const m = /^matched a safety rule:\s*([a-z ]+?)(?:\s*\(|$)/.exec(reason ?? "");
   return m ? m[1].trim().replace(/\s+/g, "_") : undefined;
 }
 
@@ -539,6 +547,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
     const riskLevels: (string | null | undefined)[] = [];
     const deferKinds: (string | null | undefined)[] = [];
     const reasons: (string | undefined)[] = [];
+    const answers: unknown[] = [];
     let latencyMs: number | undefined;
     let casePass = true;
     for (let i = 0; i < repeat; i++) {
@@ -556,6 +565,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
         riskLevels.push(facts.riskLevel);
         deferKinds.push(facts.deferKind);
         reasons.push(facts.reason);
+        answers.push(facts.answers);
         latencyMs = facts.latencyMs;
         // A machinery defer is not the reviewer's judgment: scoring it as a
         // pass on a defer-expecting case would report a dead endpoint as a
@@ -573,6 +583,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
         riskLevels.push(undefined);
         deferKinds.push(undefined);
         reasons.push(e instanceof Error ? e.message : String(e));
+        answers.push(undefined);
         casePass = false;
       }
     }
@@ -621,6 +632,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
       riskLevels,
       deferKinds,
       reasons,
+      answers,
       latencyMs,
       mixed,
       majorityPass,

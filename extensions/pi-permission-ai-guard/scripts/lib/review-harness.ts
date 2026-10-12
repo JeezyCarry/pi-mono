@@ -23,7 +23,7 @@ import type {
   PromptPermissionDetails,
 } from "@gotgenes/pi-permission-system";
 
-import { DECISION_EVENT, MODEL_REPLY_EVENT } from "#src/audit/events.ts";
+import { DECISION_EVENT, MODEL_ANSWERS_EVENT, MODEL_REPLY_EVENT } from "#src/audit/events.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
 import type { ModelRegistryLike } from "#src/model/model-registry.ts";
 import { buildReviewerPool } from "#src/review/build-pool.ts";
@@ -314,6 +314,8 @@ export interface DecisionFacts {
   latencyMs: number | undefined;
   attempts: number | undefined;
   rawReply: unknown;
+  /** The classifier's per-question answers; undefined on the chat lane. */
+  answers: unknown;
 }
 
 // Extract the analysis-relevant facts from a collected event list.
@@ -322,6 +324,9 @@ export function decisionFacts(events: LogEvent[]): DecisionFacts {
     | Record<string, unknown>
     | undefined;
   const reply = events.find((e) => e.event === MODEL_REPLY_EVENT)?.details as
+    | Record<string, unknown>
+    | undefined;
+  const answersEvent = events.find((e) => e.event === MODEL_ANSWERS_EVENT)?.details as
     | Record<string, unknown>
     | undefined;
   return {
@@ -334,5 +339,6 @@ export function decisionFacts(events: LogEvent[]): DecisionFacts {
     latencyMs: decision?.latencyMs as number | undefined,
     attempts: decision?.attempts as number | undefined,
     rawReply: reply?.rawReply ?? decision?.rawReply,
+    answers: answersEvent?.answers,
   };
 }
