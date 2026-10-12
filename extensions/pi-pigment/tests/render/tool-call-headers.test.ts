@@ -195,4 +195,42 @@ describe("tool call headers", () => {
       now.mockRestore();
     }
   });
+
+  it("an expanded header's placeholder equals the committed full line (no wrap-jump)", async () => {
+    // Regression: the placeholder ignored `expanded` and always ellipsized
+    // at a numeric width, so every heartbeat bucket flip flashed an
+    // ellipsized one-liner before the committed soft-wrapped frame — the
+    // row height jumped by the wrapped lines. The placeholder must mirror
+    // render's regime.
+    // The path must exceed termW() (196 in this env: COLUMNS unset -> 200)
+    // or the buggy placeholder would not ellipsize and the test would pass
+    // vacuously.
+    resetPigmentForTest();
+    const tools = await registerTools();
+    const tool = toolOf(tools, "read");
+    const { ctx } = makeRenderCtx();
+    const longPath = `src/${"deep-directory/".repeat(20)}file-name-here.ts`;
+    ctx.args = { path: longPath };
+    ctx.isPartial = true;
+    ctx.executionStarted = true;
+    ctx.expanded = true;
+    const now = vi.spyOn(Date, "now").mockReturnValue(0);
+    try {
+      const component = tool.renderCall!(ctx.args, buildRenderTheme(), ctx) as {
+        text: { text: string };
+        render(width: number): string[];
+      };
+      // The placeholder lands synchronously at attach; it must already be
+      // the full line, never a middle-cut.
+      const placeholder = plain(component.text.text);
+      expect(placeholder).toContain(longPath);
+      expect(placeholder).not.toContain("…");
+      // And the committed frame is byte-identical: no single-frame flip.
+      component.render(200);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(plain(component.text.text)).toBe(placeholder);
+    } finally {
+      now.mockRestore();
+    }
+  });
 });

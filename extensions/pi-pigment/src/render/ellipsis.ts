@@ -202,10 +202,12 @@ export function renderHeaderLine(parts: HeaderParts): void {
         newline,
       }),
       widthAware: true,
-      // The placeholder cuts at the protocol's last committed width, not
-      // termW(): a re-armed frame must cut exactly where the screen
-      // already is, or every bucket flip shifts the middle-cut.
-      placeholder: (lastWidth) => fit(lastWidth ?? termW()),
+      // The placeholder mirrors render's regime: expanded commits the
+      // full (TUI-soft-wrapped) line, so a re-armed frame must not
+      // ellipsize first and unwrap after — that single-frame flip is the
+      // jitter. Collapsed commits at the protocol's last committed
+      // width, never termW().
+      placeholder: (lastWidth) => fit(ctx.expanded ? undefined : (lastWidth ?? termW())),
       fallback: full,
       invalidate: ctx.invalidate,
       render: (w) => Promise.resolve(fit(ctx.expanded ? undefined : w)),
