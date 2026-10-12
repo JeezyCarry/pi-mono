@@ -8,6 +8,7 @@
 
 import type { ToolRenderers, WriteToolInput } from "@earendil-works/pi-coding-agent";
 
+import type { IndicatorStyle } from "#src/config/config-schema.ts";
 import { expandTabs, inertText } from "#src/core/ansi.ts";
 import { fnv1a } from "#src/core/keys.ts";
 import { countLines, linesOf } from "#src/core/lines.ts";
@@ -19,11 +20,14 @@ import { setCallHeader } from "./error-frame.ts";
 import { clearToolHeaderBg, padDiffBody, summarize, resultLine } from "./header.ts";
 import { decorativeExists, resolveToolPath } from "./paths.ts";
 import { borderBar, gutterWidth, numberedRows } from "./row-frame.ts";
+import type { FrameView } from "./session.ts";
 import {
   attachDiffPreview,
   attachPreviewTask,
   definePreviewTask,
   renderEmpty,
+  type PreviewTask,
+  type PreviewTextHost,
 } from "./text-task.ts";
 import { createToolRenderer, renderPlainTextFallback } from "./tool-factory.ts";
 import { COLLAPSED_LINES, collapsedView, joinBodyTail, newFileKey } from "./tool-output.ts";
@@ -75,6 +79,113 @@ function newFileBody(options: NewFileBodyOptions): string {
     indicatorGlyph,
     width,
   }).join("\n");
+}
+
+interface NewFilePreviewInput {
+  /** The host Text component to attach the task to. */
+  text: PreviewTextHost;
+  /** The frame view (scheme, theme, highlighter). */
+  view: FrameView;
+  /** The render context (invalidate callback). */
+  ctx: Pick<PreviewTask, "invalidate">;
+  /** Configured change-indicator style. */
+  indicatorStyle: IndicatorStyle;
+  /** The created file's path (identity and language). */
+  filePath: string;
+  /** The raw (not yet inert) content — inerted inside the keyed render. */
+  rawContent: () => string;
+  /** The content's line count (the stats memo's). */
+  lineCount: number;
+  /** The content's fingerprint (the stats memo's). */
+  fingerprint: string;
+  /** Whether the row is expanded (ctrl+o). */
+  expanded: boolean;
+  /**
+   * True while the result still streams (frames render plain — partials
+   * never re-tokenize growing content). Snapshot at attach time: the
+   * async render may run after settle, and a late read of mutable frame
+   * state would revert to the tokenizing path.
+   */
+  streaming: boolean;
+}
+
+/**
+ * Attach the new-file preview task (write's create branch). The key
+ * builder and the render closure are authored side by side, so a change
+ * to what the frame depends on lands next to the render that reads it.
+ *
+ * @param input - The preview's inputs (see NewFilePreviewInput).
+ */
+function setNewFilePreviewTask(input: NewFilePreviewInput): void {
+  const {
+    text,
+    view,
+    ctx,
+    indicatorStyle,
+    filePath,
+    rawContent,
+    lineCount,
+    fingerprint,
+    expanded,
+    streaming,
+  } = input;
+  const { scheme, theme } = view;
+  const language = detectLanguage(filePath);
+  attachPreviewTask(
+    text,
+    definePreviewTask({
+      identity: newFileKey({
+        prefix: "nf",
+        filePath,
+        identity: scheme.identity,
+        lineCount,
+        fingerprint,
+        expanded,
+        streaming,
+      }),
+      widthAware: true,
+      placeholder: padDiffBody(theme.fg("muted", "rendering file…"), scheme),
+      fallback: "",
+      invalidate: ctx.invalidate,
+      render: async (width: number) => {
+        // Tabs expand BEFORE highlight/wrap (split/unified parity): Shiki
+        // keeps tabs inside tokens and the renderer measures a tab as one
+        // column, while pi-tui's Text renders it as three spaces — an
+        // unexpanded tab makes long indented rows wrap twice (the
+        // trailing-bar artifact).
+        const content = expandTabs(rawContent());
+        if (!content) return "";
+        // Streaming frames stay plain (no re-tokenize per partial); the
+        // settled frame highlights and populates the cache.
+        const bodyLines = streaming
+          ? linesOf(content)
+          : await view.highlight({ code: content, language });
+        // The shared window authority: the collapsed budget AND the
+        // expanded cap (MAX_RENDER_LINES) flow through one call, one tail
+        // grammar (write shows no Took footer — the SDK's own write
+        // renderer never did either).
+        const { shown, tail, hidden } = collapsedView(bodyLines, {
+          budget: COLLAPSED_LINES.write,
+          expanded,
+          expandedCap: MAX_RENDER_LINES,
+          theme,
+        });
+        return joinBodyTail(
+          padDiffBody(
+            newFileBody({
+              lines: shown,
+              scheme,
+              indicatorGlyph: borderBar(indicatorStyle),
+              width,
+            }),
+            scheme,
+          ),
+          tail,
+          hidden,
+        );
+      },
+    }),
+  );
 }
 
 /**
@@ -174,7 +285,7 @@ export function createWriteRenderer(
     // Render the finished call: the diff preview (async task), the new-file
     // preview, the no-change notice, or a plain fallback.
     renderResult: ({ text, view, ctx, result, options }) => {
-      const { scheme, theme } = view;
+      const { theme } = view;
       const { details: d } = result as { details: WriteResultDetails | undefined };
       if (d?.kind === "diff") {
         // The stats bridge (the edit renderer's shape): the call header
@@ -228,85 +339,26 @@ export function createWriteRenderer(
           };
           ctx.state.newFileStats = stats;
         }
-        const lineCount = stats.lineCount;
-        // Inert at intake (ADR 0004): model-authored content gets the same
-        // neutralization as file reads before highlighting/wrapping see
-        // it. The inert pass lives INSIDE the keyed render below — a
-        // trigger frame (expand, invalidate) pays nothing.
-        const rawContent = (): string => inertText(rawArgs);
         // The ✓ summary bridges to the header suffix (the next call render
         // picks it up); the result slot below carries ONLY the content
         // preview — one summary position across every renderer.
         clearToolHeaderBg(text);
-        // newFileKey owns the width-neutral stamp list (the attach guard
-        // compares the identity it returns — the old newFileKey state
-        // field retired; the content fingerprint seals the key against a
-        // same-path same-lineCount rewrite); the WIDTH joins the task key
-        // only (widthAware): the body pre-wraps per render width, so a
-        // resize must re-render.
-        // The pending gate snapshots at attach time (the async render may
-        // run after settle — a late read of mutable frame state would
-        // revert to the tokenizing path).
-        const pending = resultStreaming(ctx);
-        const lg = detectLanguage(fp);
-        attachPreviewTask(
+        // Inert at intake (ADR 0004): model-authored content gets the same
+        // neutralization as file reads before highlighting/wrapping see
+        // it. The inert pass lives INSIDE the keyed render — a trigger
+        // frame (expand, invalidate) pays nothing.
+        setNewFilePreviewTask({
           text,
-          definePreviewTask({
-            identity: newFileKey({
-              prefix: "nf",
-              filePath: fp,
-              identity: scheme.identity,
-              lineCount,
-              fingerprint: stats.fingerprint,
-              expanded: options.expanded,
-              streaming: pending,
-            }),
-            widthAware: true,
-            placeholder: padDiffBody(theme.fg("muted", "rendering file…"), scheme),
-            fallback: "",
-            invalidate: ctx.invalidate,
-            render: async (width: number) => {
-              // Tabs expand BEFORE highlight/wrap (split/unified parity):
-              // Shiki keeps tabs inside tokens and the renderer measures a
-              // tab as one column, while pi-tui's Text renders it as three
-              // spaces — an unexpanded tab makes long indented rows wrap
-              // twice (the trailing-bar artifact).
-              const content = expandTabs(rawContent());
-              if (!content) return "";
-              // Streaming frames stay plain (no re-tokenize per partial);
-              // the settled frame highlights and populates the cache.
-              const bodyLines = pending
-                ? linesOf(content)
-                : await view.highlight({
-                    code: content,
-                    language: lg,
-                  });
-              // The shared window authority: the collapsed budget AND the
-              // expanded cap (MAX_RENDER_LINES) flow through one call, one
-              // tail grammar (write shows no Took footer — the SDK's own
-              // write renderer never did either).
-              const { shown, tail, hidden } = collapsedView(bodyLines, {
-                budget: COLLAPSED_LINES.write,
-                expanded: options.expanded,
-                expandedCap: MAX_RENDER_LINES,
-                theme,
-              });
-              return joinBodyTail(
-                `${padDiffBody(
-                  newFileBody({
-                    lines: shown,
-                    scheme,
-                    indicatorGlyph: borderBar(indicatorStyle),
-                    width,
-                  }),
-                  scheme,
-                )}`,
-                tail,
-                hidden,
-              );
-            },
-          }),
-        );
+          view,
+          ctx,
+          indicatorStyle,
+          filePath: fp,
+          rawContent: () => inertText(rawArgs),
+          lineCount: stats.lineCount,
+          fingerprint: stats.fingerprint,
+          expanded: options.expanded,
+          streaming: resultStreaming(ctx),
+        });
         return text;
       }
 

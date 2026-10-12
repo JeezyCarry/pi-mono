@@ -185,7 +185,11 @@ export function attachPreviewTask(text: PreviewTextHost, task: PreviewTask): voi
  * - `{ identity }` — the precomputed form: every renderer composes its key through a NAMED builder
  *   (outputTaskKey for grep/find/ls, errorFrameKey / diffPreviewKey / newFileKey / headerLineKey
  *   for the diff-class previews) and hands over the string — the stamp lists and their sentinels
- *   live in those builders, never hand-copied at a call site;
+ *   live in those builders, never hand-copied at a call site. Product code never touches
+ *   `definePreviewTask` directly: every preview kind enters through its named attach helper
+ *   (setDiffPreviewTask, setNewFilePreviewTask, assembleOutputBody, renderHeaderLine, the factory's
+ *   error frame) — the builder and the render closure then stay authored side by side, so what a
+ *   frame depends on lands next to the render that reads it;
  * - `{ prefix, stamps }` — the derived form: `taskKeyOf` joins them into the identity. The low-level
  *   form the builders themselves land on, kept here for ad-hoc keys (tests); a call site listing
  *   raw stamps must justify why no named builder covers it.
