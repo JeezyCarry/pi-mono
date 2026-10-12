@@ -3,6 +3,13 @@ import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 import { MODEL_DEFER_KIND } from "#src/model/machinery-kinds.ts";
 import type { ReviewOutcome, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
+import {
+  classifierCostlyReason,
+  classifierDangerCriteria,
+  classifierDangerNote,
+  classifierIntentGapReason,
+  classifierUncertainReason,
+} from "#src/review/verdict-copy.ts";
 import { underscoresToWords } from "#src/utils.ts";
 
 import { DANGER_NONE, RISK_RUBRIC } from "./questions.ts";
@@ -159,10 +166,8 @@ function deriveLean(
  * @returns The parenthetical note for the confirm-defer, or null.
  */
 function dangerNote(answers: ClassifierAnswers, thresholds: ClassifierThresholds): string | null {
-  if (answers.dangerConfidence < thresholds.confidenceThreshold)
-    return "could not establish whether it applies; proceed?";
-  if (answers.intentMatch >= thresholds.intentThreshold)
-    return "the anchor appears to authorize it; proceed?";
+  if (answers.dangerConfidence < thresholds.confidenceThreshold) return classifierDangerNote(false);
+  if (answers.intentMatch >= thresholds.intentThreshold) return classifierDangerNote(true);
   return null;
 }
 
@@ -188,14 +193,12 @@ export function synthesizeClassifierVerdict(
   latencyMs: number,
 ): ReviewOutcome {
   if (answers.dangerCategory !== DANGER_NONE) {
-    const criteria = `matched a safety rule: ${underscoresToWords(answers.dangerCategory)}`;
+    const criteria = classifierDangerCriteria(underscoresToWords(answers.dangerCategory));
     const riskLevel = DANGER_TIER[answers.dangerCategory] ?? "high";
     const note = dangerNote(answers, thresholds);
     if (note === null) {
       return { verdict: { kind: "deny", reason: criteria }, latencyMs, riskLevel };
     }
-    // The category leads: readers attribute a defer to its danger lane by
-    // that prefix; the confirmation note rides behind it in parentheses.
     return {
       verdict: { kind: "defer" },
       deferKind: MODEL_DEFER_KIND,
@@ -213,11 +216,8 @@ export function synthesizeClassifierVerdict(
     return {
       verdict: { kind: "defer" },
       deferKind: MODEL_DEFER_KIND,
-      // The ternary names the reading that fell short; the ask is one shape.
-      deferReason:
-        answers.dangerConfidence <= answers.riskConfidence
-          ? "could not tell whether this is dangerous (is it safe to run?)"
-          : "could not judge how much damage this could do (is it safe to run?)",
+      // The flag names the reading that fell short; the ask is one shape.
+      deferReason: classifierUncertainReason(answers.dangerConfidence <= answers.riskConfidence),
       lean: deriveLean(answers, thresholds, false),
       latencyMs,
       riskLevel,
@@ -239,8 +239,7 @@ export function synthesizeClassifierVerdict(
       return {
         verdict: { kind: "defer" },
         deferKind: MODEL_DEFER_KIND,
-        deferReason:
-          "this looks costly or hard to reverse even though the anchor asks for it (proceed?)",
+        deferReason: classifierCostlyReason(),
         lean: "deny",
         latencyMs,
         riskLevel,
@@ -257,9 +256,7 @@ export function synthesizeClassifierVerdict(
   return {
     verdict: { kind: "defer" },
     deferKind: MODEL_DEFER_KIND,
-    // Deliberately not byte-equal to the chat lane's example: a lane-spanning
-    // constant would put one content-free line in front of the operator twice.
-    deferReason: "could not tie this action to your request (did you ask for it?)",
+    deferReason: classifierIntentGapReason(),
     lean: deriveLean(answers, thresholds, true),
     latencyMs,
     riskLevel,

@@ -12,6 +12,14 @@ import type {
   ClassifierAnswers,
   ClassifierThresholds,
 } from "#src/review/engines/classifier/verdict.ts";
+import {
+  classifierCostlyReason,
+  classifierDangerCriteria,
+  classifierDangerNote,
+  classifierIntentGapReason,
+  classifierUncertainReason,
+} from "#src/review/verdict-copy.ts";
+import { denyTier } from "#src/review/verdict-rule.ts";
 
 const THRESHOLDS: ClassifierThresholds = {
   intentThreshold: 0.5,
@@ -94,6 +102,50 @@ describe("synthesizeClassifierVerdict", () => {
     expect(out.verdict).toEqual({ kind: "defer" });
     expect(out.deferKind).toBe("model-defer");
     expect(out.deferReason).toMatch(DEFER_REASON_SHAPE);
+  });
+
+  it("renders every line from verdict-copy, never inline", () => {
+    // The synthesis decides the shape; the words live in verdict-copy.
+    // An inlined rewording breaks here, not in front of the operator.
+    const danger = synthesizeClassifierVerdict(
+      confident({
+        dangerCategory: "secrets_credentials",
+        dangerConfidence: 0.9,
+        intentMatch: 0.1,
+      }),
+      THRESHOLDS,
+      7,
+    );
+    expect(danger.verdict).toEqual({
+      kind: "deny",
+      reason: classifierDangerCriteria("secrets credentials"),
+    });
+    const confirm = synthesizeClassifierVerdict(
+      confident({
+        dangerCategory: "secrets_credentials",
+        dangerConfidence: 0.9,
+        intentMatch: 0.9,
+      }),
+      THRESHOLDS,
+      7,
+    );
+    expect(confirm.deferReason).toBe(
+      `${classifierDangerCriteria("secrets credentials")} (${classifierDangerNote(true)})`,
+    );
+    const unsure = synthesizeClassifierVerdict(confident({ dangerConfidence: 0.3 }), THRESHOLDS, 7);
+    expect(unsure.deferReason).toBe(classifierUncertainReason(true));
+    const costly = synthesizeClassifierVerdict(
+      confident({ intentMatch: 0.9, riskScore: 0.8 }),
+      THRESHOLDS,
+      7,
+    );
+    expect(costly.deferReason).toBe(classifierCostlyReason());
+    const gap = synthesizeClassifierVerdict(
+      confident({ intentMatch: 0.1, riskScore: 0.1 }),
+      THRESHOLDS,
+      7,
+    );
+    expect(gap.deferReason).toBe(classifierIntentGapReason());
   });
 
   it("names the reading that fell short, not a fixed line", () => {
@@ -184,6 +236,21 @@ describe("synthesizeClassifierVerdict", () => {
       synthesizeClassifierVerdict(confident({ riskScore: 0.5, intentMatch: 0.2 }), THRESHOLDS, 7)
         .verdict.kind,
     ).toBe("deny");
+  });
+
+  it("keeps every default-line risk deny inside the hard tier", () => {
+    // riskLevelFromScore and denyTier jointly hold this: at the default 0.5
+    // line a risk-lane deny always reads high/critical, so it blocks in
+    // every mode. Either side moving alone breaks it — this fails first.
+    for (const riskScore of [0.5, 0.6, 0.74]) {
+      const out = synthesizeClassifierVerdict(
+        confident({ riskScore, intentMatch: 0.2 }),
+        THRESHOLDS,
+        7,
+      );
+      expect(out.verdict.kind).toBe("deny");
+      expect(denyTier(out.riskLevel)).toBe("hard");
+    }
   });
 
   it("follows a raised risk line: 0.6 allows under a 0.7 line", () => {

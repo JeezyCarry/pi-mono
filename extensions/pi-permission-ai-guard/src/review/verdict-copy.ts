@@ -11,6 +11,65 @@ import type { MachineryFailureKind } from "#src/model/machinery-kinds.ts";
 import type { RiskLevel } from "#src/model/model-verdict.ts";
 
 /**
+ * The classifier lane's synthesized lines. The synthesis in
+ * engines/classifier/verdict.ts decides the outcome shape; these render it.
+ * Deliberately not shared with the chat lane's wording (prompt-principles
+ * §12): the defer shape is the contract, the words stay per-lane.
+ */
+
+/**
+ * The danger-hit prefix: readers attribute a defer to its lane by it.
+ *
+ * @param category - The danger category in words.
+ * @returns The category-leading prefix.
+ */
+export function classifierDangerCriteria(category: string): string {
+  return `matched a safety rule: ${category}`;
+}
+
+/**
+ * The confirmation note riding behind the danger prefix in parentheses.
+ *
+ * @param authorized - Whether the anchor authorizes the hit.
+ * @returns The parenthetical confirmation note.
+ */
+export function classifierDangerNote(authorized: boolean): string {
+  return authorized
+    ? "the anchor appears to authorize it; proceed?"
+    : "could not establish whether it applies; proceed?";
+}
+
+/**
+ * The low-confidence defer: names the reading that fell short.
+ *
+ * @param dangerReadingShort - Whether the danger reading fell short.
+ * @returns The uncertain defer line.
+ */
+export function classifierUncertainReason(dangerReadingShort: boolean): string {
+  return dangerReadingShort
+    ? "could not tell whether this is dangerous (is it safe to run?)"
+    : "could not judge how much damage this could do (is it safe to run?)";
+}
+
+/**
+ * The authorized-but-costly defer: the anchor's request is why it confirms.
+ *
+ * @returns The costly defer line.
+ */
+export function classifierCostlyReason(): string {
+  return "this looks costly or hard to reverse even though the anchor asks for it (proceed?)";
+}
+
+/**
+ * The intent-gap defer.
+ *
+ * @returns The intent-gap defer line.
+ */
+export function classifierIntentGapReason(): string {
+  return "could not tie this action to your request (did you ask for it?)";
+}
+
+/**
  * The deny reason when the reviewer's own uncertainty is denied with no
  * clarification request attached.
  *
