@@ -77,9 +77,21 @@ export function collapseTail(hidden: number, theme: RenderTheme, expandHint: str
 export interface DerivedOutput {
   /** The full inert output text. */
   output: string;
+  /**
+   * Whether the output is empty (the empty guard — no per-frame trim).
+   * Per-producer semantics: grep/find/ls mean "no non-whitespace
+   * text"; read means "exact empty string" (its folded/expanded
+   * guards already test `masked === ""`, so the flag just records it).
+   */
+  isEmpty: boolean;
   /** The content lines: empty lines kept (grep's budget unit), the SDK's limit notice excluded. */
   lines: string[];
-  /** Non-empty content lines (find/ls: the SDK's path-list shape), the notice excluded. */
+  /**
+   * Non-empty content lines (find/ls: the SDK's path-list shape), the
+   * notice excluded. Read aliases `lines` (its window slices `lines`
+   * and `outputTaskKey` reads only output.length + hash) — do not read
+   * emptiness-filtered semantics off a read derivation.
+   */
   entries: string[];
   /**
    * The SDK's bracketed limit notice ("[1000 results limit reached. …]")
@@ -441,6 +453,7 @@ export function outputMemoOf(cell: OutputMemoCell): OutputDerive {
     const lines = body ? linesOf(body) : [];
     const derived: DerivedOutput = {
       output,
+      isEmpty: output.trim() === "",
       lines,
       // find/ls filter empty lines (the SDK's path list shape); grep
       // keeps them (a blank line is still an output line for its budget).
