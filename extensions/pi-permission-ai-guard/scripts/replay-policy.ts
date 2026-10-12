@@ -95,7 +95,7 @@ function oldGate(a: Answers, t: Thresholds): Replayed {
   if (a.riskScore >= t.risk) return { verdict: "deny", reason: GENERIC_DENY };
   return {
     verdict: "defer",
-    reason: "could not tie this action to your request (did you ask for it?)",
+    reason: "no request covers this action (did you ask for it?)",
     lean: a.intentMatch < t.intent ? "allow" : undefined,
   };
 }
@@ -118,8 +118,8 @@ function newGate(a: Answers, t: Thresholds): Replayed {
     // lane. Undecided reasons name the missing evidence.
     const what =
       row === "confirm"
-        ? `the anchor appears to authorize it — confirm`
-        : `could not establish whether this is dangerous — confirm`;
+        ? `the anchor covers it (confirm to run it?)`
+        : `unsure it applies (confirm to run it?)`;
     return {
       verdict: "defer",
       reason: `matched a safety rule: ${words(a.dangerCategory)} (${what})`,
@@ -135,7 +135,7 @@ function newGate(a: Answers, t: Thresholds): Replayed {
     if (a.intentMatch >= t.intent) {
       return {
         verdict: "defer",
-        reason: "high risk the anchor appears to authorize (confirm)",
+        reason: "the anchor asks for it but it looks costly or hard to reverse (confirm the cost?)",
         lean: "deny",
       };
     }

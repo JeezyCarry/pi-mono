@@ -35,8 +35,8 @@ export function classifierDangerCriteria(category: string): string {
  */
 export function classifierDangerNote(authorized: boolean): string {
   return authorized
-    ? "the anchor appears to authorize it; proceed?"
-    : "could not establish whether it applies; proceed?";
+    ? "the anchor covers it (confirm to run it?)"
+    : "unsure it applies (confirm to run it?)";
 }
 
 /**
@@ -47,8 +47,8 @@ export function classifierDangerNote(authorized: boolean): string {
  */
 export function classifierUncertainReason(dangerReadingShort: boolean): string {
   return dangerReadingShort
-    ? "could not tell whether this is dangerous (is it safe to run?)"
-    : "could not judge how much damage this could do (is it safe to run?)";
+    ? "unsure this is dangerous (is it safe to run?)"
+    : "unsure how much damage this could do (is it safe to run?)";
 }
 
 /**
@@ -57,7 +57,7 @@ export function classifierUncertainReason(dangerReadingShort: boolean): string {
  * @returns The costly defer line.
  */
 export function classifierCostlyReason(): string {
-  return "this looks costly or hard to reverse even though the anchor asks for it (proceed?)";
+  return "the anchor asks for it but it looks costly or hard to reverse (confirm the cost?)";
 }
 
 /**
@@ -66,7 +66,7 @@ export function classifierCostlyReason(): string {
  * @returns The intent-gap defer line.
  */
 export function classifierIntentGapReason(): string {
-  return "could not tie this action to your request (did you ask for it?)";
+  return "no request covers this action (did you ask for it?)";
 }
 
 /**
