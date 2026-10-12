@@ -21,7 +21,7 @@
  *   instruction — {@link resolveMapping} attaches it).
  *
  * The pure deciding rules stay where they are (`resolveMapping` /
- * `machineryTarget` in verdict-rule): this module performs, it does not
+ * `applyVerdictMode` in verdict-rule): this module performs, it does not
  * decide. Gates declare verdict + facts; the ritual lives here.
  */
 
@@ -43,7 +43,7 @@ import {
   type ReviewCost,
   withAgentInstruction,
 } from "./verdict-copy.ts";
-import { machineryTarget, type ModelDeferInfo, resolveMapping } from "./verdict-rule.ts";
+import { applyVerdictMode, type ModelDeferInfo, resolveMapping } from "./verdict-rule.ts";
 
 /**
  * What a verdict release hands back to its gate: the record to write, and
@@ -138,7 +138,11 @@ export function createDisposition(deps: DispositionDeps): Disposition {
 
   return {
     releaseMachineryGate({ mode, kind, record, breaker, log }) {
-      if (machineryTarget(mode) !== "deny") {
+      // The pre-call gate never holds a parsed verdict, so it maps a bare
+      // defer with no model-defer context: `applyVerdictMode` takes the
+      // machinery lane, the ladder's single execution site for this axis.
+      const mappedVerdict = applyVerdictMode(mode, { kind: "defer" });
+      if (mappedVerdict.kind !== "deny") {
         log.review(DECISION_EVENT, record);
         // Forced defer interrupts the human with no dialog context of its
         // own — same doctrine as the breaker trip: name the cause.
