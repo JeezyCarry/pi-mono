@@ -12,6 +12,7 @@
  */
 
 import { emitCallFailure } from "#src/audit/call-failure.ts";
+import { MODEL_ANSWERS_EVENT } from "#src/audit/events.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
 import type { ReviewOutcome } from "#src/model/model-verdict.ts";
 import { classifyBackendError } from "#src/review/failure-taxonomy.ts";
@@ -100,6 +101,14 @@ export function createClassifierAdapter(deps: ClassifierAdapterDeps): LaneAdapte
             ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
           },
         );
+        // Emitted for every verdict, not just defers: a policy replay needs
+        // the answers that produced an allow or a deny too, and the audit
+        // record carries a sentinel for those.
+        ctx.log.debug(MODEL_ANSWERS_EVENT, {
+          requestId: ctx.requestId,
+          modelId,
+          answers: response.answers,
+        });
         const outcome: ReviewOutcome = synthesizeClassifierVerdict(
           projectClassifierAnswers(response.answers),
           classifier,

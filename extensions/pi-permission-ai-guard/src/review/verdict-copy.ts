@@ -64,10 +64,16 @@ export type DenyInstructionSource = "content" | "machinery";
 
 /**
  * The behavioral instruction for a content deny (the request was judged). No
- * trailing period: the host's agent-side reason render appends its own.
+ * trailing period: the host's agent-side reason render appends its own. The
+ * reader is the agent, so the unlocking move is named as the user's: a content
+ * deny means the anchor did not authorize the action, and a fresh explicit
+ * request from the user is what a later review reads as authorization (a
+ * danger hit then confirms with them rather than being denied outright — see
+ * {@link synthesizeClassifierVerdict}). The prohibition names the two bypass
+ * shapes (retry, work-around); a rephrase is one of them, not a third thing.
  */
 const CONTENT_DENY_INSTRUCTION =
-  "Automatic review denied this, not the user. Do not rephrase, retry, or work around it; if the user wants it, they should ask explicitly";
+  "Denied by automatic review, not the user. Do not retry or work around it; the user can request it explicitly if it matters";
 
 const MACHINERY_DENY_INSTRUCTION =
   "Automatic review failed (not the request). Retry later, or ask the user to request it if urgent";

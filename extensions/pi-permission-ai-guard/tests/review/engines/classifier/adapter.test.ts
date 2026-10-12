@@ -106,24 +106,37 @@ const safe: ClassifierClientLike = { classify: async () => response() };
 
 describe("classifier adapter disposition", () => {
   it("answers a valid allow with the primary identity", async () => {
-    const attempt = await adapter(safe).attempt(
-      endpoint(),
-      attemptContext(makeMergedRecordingLog().log),
-      spec(false),
-    );
+    const { events, log } = makeMergedRecordingLog();
+    const attempt = await adapter(safe).attempt(endpoint(), attemptContext(log), spec(false));
     expect(attempt.kind).toBe("answered");
     if (attempt.kind !== "answered") return;
     expect(attempt.result.outcome.verdict.kind).toBe("allow");
     expect(attempt.result.modelId).toBe("typesafe/jev-1.13");
     expect(attempt.result.cacheable).toBeUndefined();
+    // The policy replay reads answers from the audit stream, so the emission
+    // is pinned here: one debug event whose payload carries the wire answers.
+    const answersEvents = events.filter((e) => e.event === "ai_guard.model_answers");
+    expect(answersEvents).toHaveLength(1);
+    expect(answersEvents[0].details).toMatchObject({ answers: expect.anything() });
   });
 
   it("answers danger and low-confidence outcomes without failover signal", async () => {
     for (const [overrides, expected] of [
-      // Danger denies outright; an unsure confidence defers for the operator.
+      // A confident danger hit nobody asked for denies; the same hit with the
+      // anchor behind it confirms instead. An unsure confidence defers.
       [
-        { danger_category: { type: "choice", choice: "secrets_credentials", confidence: 0.9 } },
+        {
+          danger_category: { type: "choice", choice: "secrets_credentials", confidence: 0.9 },
+          intent_match: { type: "bool", probability: 0.1 },
+        },
         { verdict: { kind: "deny" } },
+      ],
+      [
+        {
+          danger_category: { type: "choice", choice: "secrets_credentials", confidence: 0.9 },
+          intent_match: { type: "bool", probability: 0.9 },
+        },
+        { verdict: { kind: "defer" }, deferKind: "model-defer", lean: "deny" },
       ],
       [
         { risk: { type: "score", score: 0.4, confidence: 0.1 } },
