@@ -6,9 +6,9 @@ It is a consumer of [`@gotgenes/pi-permission-system`](https://github.com/gotgen
 
 ## Why
 
-Each model review call sends **only stripped context** (user messages + tool call names), not the full transcript — assistant text and tool results, the token-heaviest parts, are discarded, with minimal impact on verdict quality.
+Each model review call sends **only stripped context** (user messages + tool call names), not the full transcript. Assistant text and tool results, the token-heaviest parts, are discarded, with minimal impact on verdict quality.
 
-Two structural choices distinguish the reviewer from a plain classifier: the verdict **lean never feeds back** into the model's own context (each review is stateless — an agent cannot anchor the reviewer toward its own history), and both ladder extremes are **lean-inert** (`strict` denies every non-allow, `permissive` passes everything short of a hard deny or a reviewer failure — the lean only routes the middle rungs). These mitigate the classifier drift documented in Anthropic's [auto-mode writeup](https://www.anthropic.com/engineering/claude-code-auto-mode), where consent-shaped evidence in history was the top failure mode — structure instead of prompt-tuning.
+Two structural choices distinguish the reviewer from a plain classifier. The verdict **lean never feeds back** into the model's own context (each review is stateless, so an agent cannot anchor the reviewer toward its own history), and both ladder extremes are **lean-inert** (`strict` denies every non-allow; `permissive` passes everything short of a hard deny or a reviewer failure; the lean only routes the middle rungs). This answers the classifier drift in Anthropic's [auto-mode writeup](https://www.anthropic.com/engineering/claude-code-auto-mode), where consent-shaped evidence in history was the top failure mode: structure instead of prompt-tuning.
 
 ## How it works
 
@@ -16,19 +16,17 @@ The reviewer runs a short, cheap decision on each ask and defers at the first mi
 
 1. Surface match: the ask's surface is in `surfaces` (otherwise defer).
 2. Extract the review target (the value being authorized).
-3. Policy gate: query the deterministic engine at gate parity — if the policy already says `allow` or `deny`, defer. This link only adds value when the engine is undecided (`ask`).
+3. Policy gate: query the deterministic engine at gate parity. If the policy already says `allow` or `deny`, defer: this link only adds value when the engine is undecided (`ask`).
 4. Circuit breaker: a tripped breaker short-circuits without a model call.
 5. Resolve the model (fails fast on a config error).
 6. Strip transcript (token-optimized, secrets redacted): feeds both the verdict cache's context fingerprint and the review prompt.
 7. Verdict cache lookup: a repeated ask in a stable conversation skips the model.
-8. Resolve auth — after the cache, so a cached repeat ask survives an auth flap.
+8. Resolve auth after the cache, so a cached repeat ask survives an auth flap.
 9. Build prompt (the command and request fields are redacted).
 10. Model review: JSON verdict.
-11. Record the verdict into the breaker counters and cache.
+11. Record the verdict into the breaker counters and cache. Any miss along the way resolves to `defer`: missing model, invalid config, timeout, unparseable reply, unsure verdict. The ask falls through to the normal permission prompt.
 
-Fail-safe by construction: a missing model, invalid config, model timeout, unparseable reply, or an unsure verdict — any unexpected error path — resolves to `defer`, and the ask falls through to the normal permission prompt.
-
-A defer on a short approval is the same fail-safe doing its job. "Ok" or "rename it" names no action of its own: its referent is the agent's own prose, which the reviewer never sees. Both lanes judge such an anchor by the human's own words alone, and their defer reason names what the reviewer could not establish, then asks the one thing that would settle it — so the operator, who did see the proposal, answers with what the reviewer could not know.
+A defer on a short approval ("Ok", "rename it") is the same fail-safe: the anchor's referent is the agent's prose, which the reviewer never sees. The defer reason names what could not be established and asks the one thing that would settle it. The operator saw the proposal; the reviewer did not.
 
 With no backups, chat reviewers retry provider failures once inside `timeoutMs`; an empty reply may also retry at the review layer. The classifier lane (`modelType: "classifier"`) uses Pi's classifier retries. With backups, provider retries are replaced by [ordered backup reviewers](#backup-chat-models).
 
@@ -47,7 +45,7 @@ With no backups, chat reviewers retry provider failures once inside `timeoutMs`;
 
 Two extensions, two config files: **pi-permission-system** owns the policy and the chain (its config names the link); **this extension** declares the reviewer model and behavior.
 
-1. Install [pi-permission-system](https://github.com/gotgenes/pi-packages) (>= 40.0.0, which itself requires pi >= 1.0.0) and configure its permission policy — see its [Quick Start](https://github.com/gotgenes/pi-packages/blob/main/packages/pi-permission-system/README.md#quick-start).
+1. Install [pi-permission-system](https://github.com/gotgenes/pi-packages) (>= 40.0.0, which itself requires pi >= 1.0.0) and configure its permission policy; see its [Quick Start](https://github.com/gotgenes/pi-packages/blob/main/packages/pi-permission-system/README.md#quick-start).
 
    ```bash
    pi install npm:@gotgenes/pi-permission-system
@@ -61,14 +59,14 @@ Two extensions, two config files: **pi-permission-system** owns the policy and t
 
    Or add to `settings.json`: `{ "packages": ["npm:pi-permission-ai-guard"] }`.
 
-3. **Name the link** in pi-permission-system's config — installing the extension registers the link, but a link decides nothing until you name it (the chain is opt-in):
+3. **Name the link** in pi-permission-system's config. Installing the extension registers the link, but a link decides nothing until you name it (the chain is opt-in):
 
    ```jsonc
    // ~/.pi/agent/extensions/pi-permission-system/config.json
    { "authorizerChain": ["ai-guard"] }
    ```
 
-4. Declare the reviewer in this extension's config (`config.jsonc` or `config.json`, JSONC — comments and trailing commas are fine; when both exist, `config.jsonc` wins):
+4. Declare the reviewer in this extension's config (`config.jsonc` or `config.json`; JSONC, so comments and trailing commas are fine; when both exist, `config.jsonc` wins):
 
    ```jsonc
    // ~/.pi/agent/extensions/pi-permission-ai-guard/config.jsonc
@@ -85,13 +83,13 @@ See [`config/config.example.json`](config/config.example.json) for a complete ex
 
 Chain facts that shape how this link behaves:
 
-- **Only `ask` reaches the chain** — a request the deterministic policy already decided (`allow`/`deny`) never consults the link.
-- **Config order fixes chain order**, never registration order; a missing link is skipped fail-safe — absence means more prompting, never less.
-- **The chain owner caps a link's `allow` on the `external_directory`/`path` surface families to `defer`** — reviewing those surfaces can deny or defer, never allow. The default `surfaces` list stays clear of them.
-- **A subagent's ask is reviewed one hop up** — by the chain of the session serving it, so your links review subagent asks in the session you are watching.
+- **Only `ask` reaches the chain**: a request the deterministic policy already decided (`allow`/`deny`) never consults the link.
+- **Config order fixes chain order**, never registration order. A missing link is skipped fail-safe: absence means more prompting, never less.
+- **The chain owner caps a link's `allow` on the `external_directory`/`path` surface families to `defer`**: reviewing those surfaces can deny or defer, never allow. The default `surfaces` list stays clear of them.
+- **A subagent's ask is reviewed one hop up**, by the chain of the session serving it, so your links review subagent asks in the session you are watching.
 - The chain ends at the default terminal: the interactive prompt (or a headless deny).
 
-> **Where to put hard-deny rules:** secrets, dangerous commands, and safe auto-allow patterns belong in **pi-permission-system's** rule config, not here. The link queries the engine at gate parity and defers whenever the engine already decided — a deterministic block costs no model call and holds in every mode.
+> **Where to put hard-deny rules:** secrets, dangerous commands, and safe auto-allow patterns belong in **pi-permission-system's** rule config, not here. The link queries the engine at gate parity and defers whenever the engine already decided. A deterministic block costs no model call and holds in every mode.
 
 ## Configuration
 
@@ -130,11 +128,11 @@ Any string value may reference environment variables:
 }
 ```
 
-A ref with no value and no fallback skips that layer (the layer beneath it still applies) and the loader reports it by variable name, never by the value it sat in. **Saving** a config keeps the placeholder: a leaf read as `"${MY_GATEWAY_URL}"` is written back as that ref rather than as its expanded value, so `/ai-guard save-config` never persists a secret that only lived in the environment. A ref that no longer resolves — or that now resolves to a value other than the one being saved — refuses the write and names the ref.
+A ref with no value and no fallback skips that layer (the layer beneath it still applies) and the loader reports it by variable name, never by the value it sat in. **Saving** a config keeps the placeholder: a leaf read as `"${MY_GATEWAY_URL}"` is written back as that ref rather than as its expanded value, so `/ai-guard save-config` never persists a secret that only lived in the environment. A ref that no longer resolves, or that now resolves to a value other than the one being saved, refuses the write and names the ref.
 
 ### Transcript
 
-Caps for the stripped transcript (see the stripping table above). Defaults follow a recency principle; the three caps bound the worst case (~15KB) — there is deliberately no fourth, total-budget field.
+Caps for the stripped transcript (see the stripping table above). Defaults follow a recency principle; the three caps bound the worst case (~15KB). There is deliberately no fourth, total-budget field.
 
 | Field              | Default | Description                              |
 | ------------------ | ------- | ---------------------------------------- |
@@ -154,10 +152,7 @@ Free models may hit usage limits or disappear without notice. In chat-model mode
 }
 ```
 
-Each backup uses its own registered provider credentials; this config does not accept API keys or base URLs for chat-model entries. AI Guard tries backups in order, and only on availability failures:
-
-- switch: the model disappears from the registry, or its provider clearly reports quota/payment limits, an unavailable model (HTTP 404/410), a timeout, network failure, or server error;
-- stop and ask you instead: ambiguous errors, a real allow, deny, or uncertain verdict, a malformed reply, an authentication failure, or an access refusal — backups never get a second vote on a decision.
+Each backup uses its own registered provider credentials; this config does not accept API keys or base URLs for chat-model entries. AI Guard tries backups in order, and only on availability failures (quota, missing model, timeout, connection, server error — the same table as the classifier lane). Anything decided — a real allow, deny, or uncertain verdict, a malformed reply, an auth failure, a refusal — stops and asks you instead: backups never get a second vote.
 
 Auth failure on any backup stops the chain rather than bypassing that provider. When all models fail, the existing mode rules apply; nothing gets automatically approved by an outage. An explicitly configured backup's allow is trusted even in `strict` mode.
 
@@ -244,7 +239,7 @@ If your primary classifier runs out of quota, drops a model, or becomes unavaila
 }
 ```
 
-AI Guard tries a backup only after an availability failure (quota or payment limit, missing model/endpoint, HTTP 409/425 conflict, connection, timeout, or server error — one table shared with the chat-model lane). The no-second-vote rule, the stop-and-ask cases, and the all-failed behavior are the same as the chat-model lane above: a real allow, deny, or uncertain decision is final, and nothing gets automatically approved by an outage. A backup's valid allow is treated as a reviewer allow **even in `strict` mode**: configuring a backup explicitly trusts it to decide when the primary cannot answer. Fallback attempts appear in the permission review log without URLs or keys. Backup decisions are not cached, so the primary gets another chance next time. Backups receive the same permission request (including command text and target paths) and stripped conversation context; use only providers you trust with that data. If a local model produces different probability scales, test its approval thresholds before trusting it with permissions.
+Failover semantics are the same as the chat lane above: availability failures switch, decided verdicts stop and ask, nothing is approved by an outage. A backup's valid allow counts as a reviewer allow **even in `strict` mode** — configuring it is trusting it to decide when the primary cannot. Backup decisions are not cached, and every contacted model receives the request plus stripped context: trust the provider with that data, and test a local model's probability scales before trusting its thresholds.
 
 With backups configured, each endpoint gets one request rather than the transport's normal retries. Timeouts apply **per endpoint**, so set the top-level `timeoutMs` (the primary) and each backup's optional `timeoutMs` low enough for an acceptable worst-case wait.
 
@@ -290,7 +285,7 @@ Rules that hold in every mode:
 - A model deny that holds or escalates notifies in every mode (`reviewer denied this request (risk high); <reason>`), because the host renders no dialog for denials; the notify line is the operator's only copy. A mode-softened deny adds `, asking you to decide instead`. `permissive` swallows soft denies whole; `lenient` passes benign-leaned defers silently and fires a one-time fail-open notice (`lenient auto-approves uncertainty; soft denials still ask`) on the first neutral defer. Reasons go out whole; the audit record keeps the full text.
 - The lean never caches: defers are never stored, so an identical benign defer re-reviews every time.
 - A link's `deny` is final — it short-circuits the chain and never reaches a prompt. A `defer` falls through to the interactive permission prompt (the denying terminal in headless sessions — headless mode collapses every defer to deny).
-- `strict`'s one exception: a breaker explicitly configured to force `defer` still reaches the human (the reviewer-untrusted escape valve); headless sessions resolve those defers to deny either way. `lenient` records a passed defer's clarification request as `emittedReason: "clarification-suppressed"` in the audit. `permissive`'s first mapped allow surfaces a one-time notice (`permissive auto-approves non-allow verdicts — hard-tier denials still block`); the footer renders the value in warning red.
+- `strict`'s one exception: a breaker forced to `defer` still reaches the human (the reviewer-untrusted escape valve); headless sessions resolve those defers to deny either way. `permissive`'s first mapped allow surfaces a one-time notice; the footer renders the value in warning red.
 
 Set `"notifyApprovals": true` to see when AI Guard approves a request. Fresh reviews show their total cost (`reviewer approved this request (1.2s)`; mode-mapped allows name the mode), cache replays say `(cached)`. Notices never include the command or target. Off by default.
 
@@ -350,7 +345,7 @@ Each reviewer-relevant decision writes an `ai_guard.decision` record to pi-permi
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gate`        | Which decision gate produced the record (see How it works)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `verdict`     | `allow` / `deny` / `defer`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `reason`      | Sanitized model explanation. Present on deny (from the model, or `GENERIC_DENY_REASON` fallback) and on `model-defer` (what the model found unclear). Absent for allow and defer-without-explanation. The circuit-breaker gate uses a static `BREAKER_DENY_REASON` instead                                                                                                                                                                                                                                                                                                                              |
+| `reason`      | Sanitized model explanation: on deny (model text or `GENERIC_DENY_REASON` fallback) and on `model-defer` (what was unclear). Absent for allow and explanation-less defer. The breaker gate uses a static `BREAKER_DENY_REASON` instead                                                                                                                                                                                                                                                                                                                                                                  |
 | `deferKind`   | Why it deferred (classification). Model-gate: `empty-reply` (a completed reply without text — genuine model silence), `no-json` (text present but no JSON found), `timeout` (per-call timeout elapsed), `call-failed` (the call threw, or a provider error resolved as a non-thrown reply — rate limits, proxy/WAF blocks; classifier 429s retry inside Pi only when no backups are configured), `model-defer`, `invalid-verdict-value`. Other gates: `circuit-breaker`, `model-unresolved`, `auth-failed`, `no-target`, `transcript-error`, `policy-allow`, `policy-deny`. `null` for clean allow/deny |
 | `latencyMs`   | End-to-end model-call latency (cumulative across attempts)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `attempts`    | Present (`2`) only when the empty-reply retry fired; absent on single-attempt reviews                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
