@@ -94,8 +94,15 @@ const FORMAT_CHARACTERS = /[\u200B-\u200D\u2060\uFEFF\u202A-\u202E\u2066-\u2069]
  * (`user:p@ssw0rd@host`) is swallowed whole instead of up to the first `@`;
  * it cannot cross `/`, `?` or `#`, so a path like `example.com/@user` is left
  * alone. The scheme and host survive, the credentials go away.
+ *
+ * The scheme quantifier is bounded on purpose. An unbounded `*` backtracks
+ * over the rest of the input at every start position, so a long
+ * `[a-z0-9+.-]` run that never reaches `://` — a model reply, a base64 blob —
+ * costs O(n²): seconds past a few hundred KB, on a path every audit record
+ * walks. Real schemes are a handful of characters, so the bound redacts
+ * exactly the same URLs and the scan stays linear.
  */
-const URL_USERINFO_PATTERN = /([a-z][a-z0-9+.-]*:\/\/)[^/\s?#]*@/gi;
+const URL_USERINFO_PATTERN = /([a-z][a-z0-9+.-]{0,31}:\/\/)[^/\s?#]*@/gi;
 
 /** A run of whitespace — how every collapsed-text site splits and joins. */
 export const WHITESPACE_RUN = /\s+/g;

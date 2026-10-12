@@ -301,6 +301,20 @@ describe("redactSecrets", () => {
     );
   });
 
+  it("stays linear on a long scheme-like run that never reaches ://", () => {
+    // The URL userinfo pattern once carried an unbounded scheme quantifier: on
+    // a long `[a-z0-9+.-]` run with no `://`, it backtracked over the rest of
+    // the input at every start position, so 200k characters cost ~37s and one
+    // tool reply could stall the permission gate. Only a timing assertion
+    // catches that returning — the correctness tests above pass either way.
+    // The budget is ~100x the linear cost and still ~18x below the quadratic
+    // one, so machine load cannot fake a failure.
+    const text = "x".repeat(200_000);
+    const startedAt = performance.now();
+    expect(redactSecrets(text)).toBe(text);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it("redacts aws_secret_access_key assignments", () => {
     const input = "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
     expect(redactSecrets(input)).toBe("aws_secret_access_key = [REDACTED]");
