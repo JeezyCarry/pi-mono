@@ -79,7 +79,7 @@ function words(category: string): string {
  */
 function oldGate(a: Answers, t: Thresholds): Replayed {
   if (a.dangerCategory !== DANGER_NONE) {
-    return { verdict: "deny", reason: `matched a safety rule: ${words(a.dangerCategory)}` };
+    return { verdict: "deny", reason: `flagged ${words(a.dangerCategory)}` };
   }
   const minConf = Math.min(a.dangerConfidence, a.riskConfidence);
   if (minConf < t.confidence) {
@@ -95,7 +95,7 @@ function oldGate(a: Answers, t: Thresholds): Replayed {
   if (a.riskScore >= t.risk) return { verdict: "deny", reason: GENERIC_DENY };
   return {
     verdict: "defer",
-    reason: "no request covers this action (did you ask for it?)",
+    reason: "no matching request (did you ask for it?)",
     lean: a.intentMatch < t.intent ? "allow" : undefined,
   };
 }
@@ -111,18 +111,18 @@ function newGate(a: Answers, t: Thresholds): Replayed {
   if (a.dangerCategory !== DANGER_NONE) {
     const row = dangerRow(a, t);
     if (row === "hard") {
-      return { verdict: "deny", reason: `matched a safety rule: ${words(a.dangerCategory)}` };
+      return { verdict: "deny", reason: `flagged ${words(a.dangerCategory)}` };
     }
     // confirm AND undecided-lowconf both route to the operator: deny-lean,
     // category intact so the scorer still attributes them to the danger
     // lane. Undecided reasons name the missing evidence.
     const what =
       row === "confirm"
-        ? `the anchor covers it (confirm to run it?)`
-        : `unsure it applies (confirm to run it?)`;
+        ? `the human's request covers this action; do you want to proceed?`
+        : `it is unclear whether this safety concern applies; do you want to proceed?`;
     return {
       verdict: "defer",
-      reason: `matched a safety rule: ${words(a.dangerCategory)} (${what})`,
+      reason: `flagged ${words(a.dangerCategory)} (${what})`,
       lean: "deny",
     };
   }
@@ -135,7 +135,7 @@ function newGate(a: Answers, t: Thresholds): Replayed {
     if (a.intentMatch >= t.intent) {
       return {
         verdict: "defer",
-        reason: "the anchor asks for it but it looks costly or hard to reverse (confirm the cost?)",
+        reason: "authorized but costly or hard to reverse (proceed?)",
         lean: "deny",
       };
     }

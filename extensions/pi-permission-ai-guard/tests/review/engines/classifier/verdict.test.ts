@@ -60,7 +60,7 @@ describe("synthesizeClassifierVerdict", () => {
     );
     expect(out.verdict).toEqual({
       kind: "deny",
-      reason: "matched a safety rule: credential exfiltration",
+      reason: "flagged credential exfiltration",
     });
     // Unknown categories fail safe to high.
     expect(out.riskLevel).toBe("high");
@@ -79,7 +79,8 @@ describe("synthesizeClassifierVerdict", () => {
     expect(out.deferKind).toBe("model-defer");
     expect(out.lean).toBe("deny");
     // The category leads, so the review log attributes the defer to its lane.
-    expect(out.deferReason).toMatch(/^matched a safety rule: credential exfiltration \(/);
+    // Full literal: a nested inner paren around the ask must not come back.
+    expect(out.deferReason).toBe("flagged credential exfiltration (you requested this; proceed?)");
     expect(out.riskLevel).toBe("high");
   });
 
@@ -95,7 +96,8 @@ describe("synthesizeClassifierVerdict", () => {
     );
     expect(out.verdict).toEqual({ kind: "defer" });
     expect(out.lean).toBe("deny");
-    expect(out.deferReason).toMatch(/^matched a safety rule: credential exfiltration \(/);
+    // Full literal: the low-confidence note shares the single-paren shape.
+    expect(out.deferReason).toBe("flagged credential exfiltration (unsure this applies; proceed?)");
     expect(out.riskLevel).toBe("high");
   });
 
@@ -178,7 +180,7 @@ describe("synthesizeClassifierVerdict", () => {
     );
     expect(out.verdict).toEqual({
       kind: "deny",
-      reason: "matched a safety rule: system tampering",
+      reason: "flagged system tampering",
     });
   });
 

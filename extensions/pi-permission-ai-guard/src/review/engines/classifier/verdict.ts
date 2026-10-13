@@ -186,7 +186,7 @@ export function synthesizeClassifierVerdict(
     return {
       verdict: { kind: "defer" },
       deferKind: MODEL_DEFER_KIND,
-      deferReason: `${criteria} (${classifierDangerNote(row === "confirm")})`,
+      deferReason: `${criteria} (${classifierDangerNote(dangerTrusted)})`,
       lean: "deny",
       latencyMs,
       riskLevel,

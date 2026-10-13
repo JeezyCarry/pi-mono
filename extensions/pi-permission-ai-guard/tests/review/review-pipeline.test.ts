@@ -192,6 +192,28 @@ describe("createReviewPipeline — guard clauses", () => {
     expect(notifications[0][0]).toContain("policy exploded");
   });
 
+  it("keeps a paren-carrying cause out of extra parens on crash", async () => {
+    // The cause is dynamic text and may carry its own parens; the framing
+    // joins it with a semicolon so it never nests inside another pair.
+    const { notify, notifications } = makeNotifySpy();
+    const authorize = createReviewPipeline(makePipeline({ notify }));
+    const throwingQuery = {
+      ...makeQuery("ask"),
+      checkPermission: () => {
+        throw new Error("boom (retry 3)");
+      },
+    };
+
+    const verdict = await authorize(makeDetails({ value: "ls" }), throwingQuery, noLog);
+
+    expect(verdict).toEqual({ kind: "defer" });
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0][1]).toBe("error");
+    expect(notifications[0][0]).toBe(
+      "automatic review failed, asking you to decide; boom (retry 3)",
+    );
+  });
+
   it("records the crash defer in the review log too", async () => {
     // The notify is the operator channel; the review log is the audit trail —
     // without a record there, a crashed review looks like a silent pass.

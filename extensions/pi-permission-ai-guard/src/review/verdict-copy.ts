@@ -19,24 +19,27 @@ import type { RiskLevel } from "#src/model/model-verdict.ts";
 
 /**
  * The danger-hit prefix: readers attribute a defer to its lane by it.
+ * Names a concern, not a confirmed hit — the low-confidence branch
+ * has not established that the rule matches.
  *
  * @param category - The danger category in words.
  * @returns The category-leading prefix.
  */
 export function classifierDangerCriteria(category: string): string {
-  return `matched a safety rule: ${category}`;
+  return `flagged ${category}`;
 }
 
 /**
  * The confirmation note riding behind the danger prefix in parentheses.
+ * The two branches name different unknowns: a trusted reading whose
+ * authorization is established, versus a reading whose match itself
+ * is unestablished.
  *
- * @param authorized - Whether the anchor authorizes the hit.
+ * @param dangerTrusted - Whether the danger reading cleared the confidence floor.
  * @returns The parenthetical confirmation note.
  */
-export function classifierDangerNote(authorized: boolean): string {
-  return authorized
-    ? "the anchor covers it (confirm to run it?)"
-    : "unsure it applies (confirm to run it?)";
+export function classifierDangerNote(dangerTrusted: boolean): string {
+  return dangerTrusted ? "you requested this; proceed?" : "unsure this applies; proceed?";
 }
 
 /**
@@ -47,8 +50,8 @@ export function classifierDangerNote(authorized: boolean): string {
  */
 export function classifierUncertainReason(dangerReadingShort: boolean): string {
   return dangerReadingShort
-    ? "unsure this is dangerous (is it safe to run?)"
-    : "unsure how much damage this could do (is it safe to run?)";
+    ? "unsure this is dangerous (safe to run?)"
+    : "unsure how much damage this could do (safe to run?)";
 }
 
 /**
@@ -57,7 +60,7 @@ export function classifierUncertainReason(dangerReadingShort: boolean): string {
  * @returns The costly defer line.
  */
 export function classifierCostlyReason(): string {
-  return "the anchor asks for it but it looks costly or hard to reverse (confirm the cost?)";
+  return "authorized but costly or hard to reverse (proceed?)";
 }
 
 /**
@@ -66,7 +69,7 @@ export function classifierCostlyReason(): string {
  * @returns The intent-gap defer line.
  */
 export function classifierIntentGapReason(): string {
-  return "no request covers this action (did you ask for it?)";
+  return "no matching request (did you ask for it?)";
 }
 
 /**
@@ -89,7 +92,7 @@ export function uncertainDenyReason(mode: Mode): string {
  * @returns The notification message.
  */
 export function machineryDeferNotice(kind: MachineryFailureKind): string {
-  return `reviewer could not complete the review (${kind}), deferring to you`;
+  return `review unavailable (${kind}); you decide`;
 }
 
 /**
@@ -105,7 +108,7 @@ export function machineryDenyReason(
   deferKind: MachineryFailureKind | undefined,
   mode: Mode,
 ): string {
-  return `reviewer could not complete the review (${deferKind ?? "unknown"}), so ${mode} mode denied the request`;
+  return `review unavailable (${deferKind ?? "unknown"}), so ${mode} denied it`;
 }
 
 /**

@@ -5,6 +5,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   approvalNotice,
+  classifierCostlyReason,
+  classifierDangerCriteria,
+  classifierDangerNote,
+  classifierIntentGapReason,
+  classifierUncertainReason,
   escalationMessage,
   failOpenNotice,
   machineryDeferNotice,
@@ -166,6 +171,14 @@ describe("notify skeleton — builder-rendered lines", () => {
     // These reach ctx.notify() through expressions, so the source scan above
     // cannot see them, and they carry the highest-stakes copy.
     const rendered = [
+      // The classifier danger defer rides notify whole (verdict-rule defers
+      // emit their reason verbatim), so the full lines are checked here.
+      `${classifierDangerCriteria("secrets credentials")} (${classifierDangerNote(true)})`,
+      `${classifierDangerCriteria("secrets credentials")} (${classifierDangerNote(false)})`,
+      classifierUncertainReason(true),
+      classifierUncertainReason(false),
+      classifierCostlyReason(),
+      classifierIntentGapReason(),
       machineryDeferNotice("timeout"),
       machineryDenyReason("timeout", "strict"),
       uncertainDenyReason("strict"),

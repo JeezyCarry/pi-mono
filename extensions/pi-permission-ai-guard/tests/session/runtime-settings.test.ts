@@ -656,6 +656,24 @@ describe("RuntimeSettings — save to config layer actions", () => {
     expectNotified(notify, { level: "error", contains: ["not valid JSONC"] });
   });
 
+  it("names a newly created file without nested parens", async () => {
+    const saveConfig = vi.fn<SaveConfigFn>(() => ({
+      path: "/cfg.json",
+      created: true,
+      changed: true,
+    }));
+    const { settings, notify } = makeSettings({}, { saveConfig });
+    const ctx = makeUiCtx();
+
+    await settings.command.handler("save-config global", ctx);
+
+    // Single paren pair: the created marker rides the path tail, never its own parens.
+    expectNotified(notify, {
+      level: "info",
+      contains: ["saved to global config (cfg.json, new file)"],
+    });
+  });
+
   it("a no-override session saves the config's own value — no dead key shadows", async () => {
     const saveConfig = vi.fn<SaveConfigFn>(() => ({
       path: "/cfg.json",

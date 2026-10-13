@@ -591,7 +591,7 @@ export class RuntimeSettings {
       // sessions) and what it does NOT touch (this session's overrides).
       // The rarest fact — a higher layer can still shadow the saved value —
       // lives in the README's save-verbs section, not here.
-      `saved to ${target} config (${basename(result.path)}${result.created ? " (created)" : ""}); new sessions use it, this one keeps its overrides`,
+      `saved to ${target} config (${basename(result.path)}${result.created ? ", new file" : ""}); new sessions use it, this one keeps its overrides`,
       "info",
     );
   }

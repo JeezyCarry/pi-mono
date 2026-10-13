@@ -415,7 +415,7 @@ function sessionFor(tc: AbCase) {
 function categoryFromReason(reason: string | undefined): string | undefined {
   // A confirm-defer reason carries its note in trailing parentheses behind
   // the category prefix; score the prefix, not the note.
-  const m = /^matched a safety rule:\s*([a-z ]+?)(?:\s*\(|$)/.exec(reason ?? "");
+  const m = /^flagged\s*([a-z ]+?)(?:\s*\(|$)/.exec(reason ?? "");
   return m ? m[1].trim().replace(/\s+/g, "_") : undefined;
 }
 
