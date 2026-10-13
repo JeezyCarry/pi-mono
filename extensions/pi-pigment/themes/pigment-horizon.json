@@ -1,6 +1,7 @@
 {
-  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://pi.dev/schemas/theme.schema.json",
   "name": "pigment-horizon",
+  "appearance": "dark",
   "colors": {
     "accent": "#24a2ad",
     "border": "#515258",

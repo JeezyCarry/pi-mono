@@ -1,6 +1,7 @@
 {
-  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://pi.dev/schemas/theme.schema.json",
   "name": "pigment-gruvbox-light-soft",
+  "appearance": "light",
   "colors": {
     "accent": "#9d0006",
     "border": "#bbb194",

@@ -56,6 +56,8 @@ export interface PiThemeColors {
 export interface PiThemeJson {
   $schema: string;
   name: string;
+  /** The background the theme is designed for (pi detects it when omitted). */
+  appearance?: "dark" | "light";
   colors: PiThemeColors;
   export?: PiThemeExport;
 }
@@ -134,9 +136,8 @@ export const PI_REQUIRED_TOKENS = [
 /** The 3 optional pi color tokens (with documented fallbacks). */
 export const PI_OPTIONAL_TOKENS = ["thinkingMax", "searchMatchBg", "searchMatchText"] as const;
 
-/** Pi's theme schema URL (editor validation for hand-edited copies). */
-const PI_THEME_SCHEMA =
-  "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json";
+/** Pi's published theme schema (editor validation for hand-edited copies). */
+const PI_THEME_SCHEMA = "https://pi.dev/schemas/theme.schema.json";
 
 /**
  * The hue-anchored state colors per polarity: green/red/amber references
@@ -557,6 +558,9 @@ export function convertToPiTheme(
     doc: {
       $schema: PI_THEME_SCHEMA,
       name,
+      // The Shiki theme's declared polarity (the guard above narrows it to
+      // the two literals) — pi then never guesses it from the colors.
+      appearance: theme.type,
       colors,
       export: {
         pageBg: rgbToHex(canvas),

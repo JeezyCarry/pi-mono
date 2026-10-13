@@ -276,11 +276,12 @@ describe("convertToPiTheme: token set and structure", () => {
     }
   });
 
-  it("carries the pi schema URL and the registered name", async () => {
+  it("carries the pi schema URL, the registered name, and the declared appearance", async () => {
     const theme = (await loadBundledTheme("nord"))!;
     const { doc } = convertToPiTheme(theme, "pigment-nord");
-    expect(doc!.$schema).toContain("theme-schema.json");
+    expect(doc!.$schema).toBe("https://pi.dev/schemas/theme.schema.json");
     expect(doc!.name).toBe("pigment-nord");
+    expect(doc!.appearance).toBe(theme.type);
   });
 });
 
@@ -295,6 +296,7 @@ describe("the generated themes/ directory (golden assets)", () => {
         await readFile(join(import.meta.dirname, "..", "..", "themes", file), "utf-8"),
       );
       expect(doc.name).toBe(file.replace(/\.json$/, ""));
+      expect(doc.appearance).toMatch(/^(light|dark)$/);
       expect(Object.keys(doc.colors).toSorted()).toEqual(
         [...PI_REQUIRED_TOKENS, ...PI_OPTIONAL_TOKENS].toSorted(),
       );
