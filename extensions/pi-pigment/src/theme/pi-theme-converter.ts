@@ -7,11 +7,9 @@
  *
  * Two AA surfaces, never confused (the converter owns only the first):
  *
- * - Converter AA: chrome slots (success/error/warning/accent, the fg ladder) are enforced against the
- *   CANVAS — pi paints its own chrome on the canvas, so those colors must read there. The
- *   user-theme channel's conversion opts OUT (enforceAa: false — author colors verbatim, the
- *   enforcement boundary: colors YOU set render verbatim); the bundled ships are
- *   pi-pigment-supplied and keep the sweep.
+ * - Converter AA: each foreground is enforced against the surfaces pi actually paints that token on
+ *   (pi's own binding table, `theme/system-theme.js` RULES). Both conversion channels run it — the
+ *   bundled ships and the user `themes/` directory read alike.
  * - Runtime AA: token colors are enforced at render time by enforceThemeColors against the scheme's
  *   blend backgrounds (the tint ladders). The nine syntax colors in the FILE serve pi's own
  *   markdown code rendering — same source, different precision than the full tokenColors the diff
@@ -29,6 +27,8 @@
 import type { RgbColor } from "@earendil-works/pi-tui";
 
 import {
+  compositeHexOver,
+  contrastRatio,
   isLightRgb,
   mixRgb,
   parseOpaqueHex,
@@ -39,7 +39,14 @@ import {
 import type { Issue } from "#src/core/issue.ts";
 
 import {
-  enforceWcag,
+  AA_FLOOR,
+  aaAdjust,
+  type AaOptions,
+  type AaToken,
+  type SurfaceColors,
+} from "./aa-policy.ts";
+import type { DiffRoots } from "./scheme.ts";
+import {
   scopeSemanticKey,
   SEMANTIC_TO_PI,
   type MaterializedTheme,
@@ -212,13 +219,17 @@ function extractSyntaxColors(theme: MaterializedTheme): Partial<SemanticColors> 
 }
 
 /**
- * The most saturated of the candidate token colors — the theme's accent.
+ * The theme's accent: its declared link color when it has one (the
+ * semantic UI foreground pi's accent stands for), else the most
+ * saturated token with a mid-lightness guard.
  *
  * @param theme - The materialized theme.
- * @param fallback - The polarity default when no token qualifies.
+ * @param fallback - The polarity default when nothing qualifies.
  * @returns The accent RGB.
  */
 function pickAccent(theme: MaterializedTheme, fallback: RgbColor): RgbColor {
+  const declaredLink = optionalOpaqueHex(theme.colors?.["textLink.foreground"]);
+  if (declaredLink) return declaredLink;
   let best: { rgb: RgbColor; saturation: number } | undefined;
   for (const rule of theme.tokenColors ?? []) {
     const rgb = optionalOpaqueHex(rule.settings?.foreground);
@@ -236,15 +247,18 @@ function pickAccent(theme: MaterializedTheme, fallback: RgbColor): RgbColor {
 }
 
 /**
- * Diff-root greens/reds from the theme's tokens.
+ * Diff-root greens/reds from the theme's tokens: the declared
+ * `markup.inserted`/`markup.deleted` marker first, then the RGB hue guess.
  *
  * @param theme - The materialized theme.
  * @param isLight - The canvas polarity.
+ * @param canvas - The canvas the chosen color is painted on.
  * @returns The added/removed hex candidates (with polarity fallbacks).
  */
 function extractDiffColors(
   theme: MaterializedTheme,
   isLight: boolean,
+  canvas: RgbColor,
 ): { added?: string; removed?: string } {
   const candidates = { added: [] as RgbColor[], removed: [] as RgbColor[] };
   for (const rule of theme.tokenColors ?? []) {
@@ -264,9 +278,46 @@ function extractDiffColors(
   }
   const state = isLight ? STATE_HUES.light : STATE_HUES.dark;
   return {
-    added: mostSaturatedHex(candidates.added) ?? state.success,
-    removed: mostSaturatedHex(candidates.removed) ?? state.error,
+    added:
+      extractDiffMarker(theme, "inserted") ??
+      mostSaturatedHex(candidates.added, canvas) ??
+      state.success,
+    removed:
+      extractDiffMarker(theme, "deleted") ??
+      mostSaturatedHex(candidates.removed, canvas) ??
+      state.error,
   };
+}
+
+/**
+ * The diff-marker foreground a theme declares: the color of its
+ * `markup.inserted`/`markup.deleted` scope (or a dotted refinement). The
+ * author's own diff-content color — it beats the RGB hue guess. The
+ * broadest declared scope wins (the syntax-nine rule: a per-language
+ * refinement must not hijack the marker); equal-length ties keep file order.
+ *
+ * @param theme - The materialized theme.
+ * @param marker - The side's scope stem (inserted/deleted).
+ * @returns The marker hex, or undefined when undeclared.
+ */
+function extractDiffMarker(
+  theme: MaterializedTheme,
+  marker: "inserted" | "deleted",
+): string | undefined {
+  const stem = `markup.${marker}`;
+  let best: { hex: string; breadth: number } | undefined;
+  for (const rule of theme.tokenColors ?? []) {
+    const rgb = optionalOpaqueHex(rule.settings?.foreground);
+    if (!rgb) continue;
+    const scopes = typeof rule.scope === "string" ? rule.scope.split(",") : (rule.scope ?? []);
+    for (const entry of scopes) {
+      const scope = entry.trim();
+      if (scope !== stem && !scope.startsWith(`${stem}.`)) continue;
+      if (!best || scope.length < best.breadth)
+        best = { hex: rgbToHex(rgb), breadth: scope.length };
+    }
+  }
+  return best?.hex;
 }
 
 /**
@@ -283,16 +334,21 @@ function towardCanvas(color: RgbColor, canvas: RgbColor, ratio: number): RgbColo
 
 /**
  * The most saturated color in a list (the theme's canonical hue for a
- * diff-root side).
+ * diff-root side), restricted to candidates that clear the readability floor
+ * on the canvas. A hue guess is only worth taking if it can be read where it
+ * lands; an unreadable one is no better than the polarity hue, and forcing
+ * AA onto it would move the color far further than falling back.
  *
  * @param list - The candidate RGBs.
- * @returns The most saturated hex, or undefined for an empty list.
+ * @param canvas - The canvas the chosen color is painted on.
+ * @returns The most saturated readable hex, or undefined when none qualifies.
  */
-function mostSaturatedHex(list: RgbColor[]): string | undefined {
-  if (list.length === 0) return undefined;
-  let best = list[0];
+function mostSaturatedHex(list: RgbColor[], canvas: RgbColor): string | undefined {
+  const readable = list.filter((rgb) => contrastRatio(rgb, canvas) >= AA_FLOOR);
+  if (readable.length === 0) return undefined;
+  let best = readable[0];
   let bestSat = -1;
-  for (const rgb of list) {
+  for (const rgb of readable) {
     const max = Math.max(rgb.r, rgb.g, rgb.b);
     const min = Math.min(rgb.r, rgb.g, rgb.b);
     const sat = max === 0 ? 0 : (max - min) / max;
@@ -304,28 +360,43 @@ function mostSaturatedHex(list: RgbColor[]): string | undefined {
   return rgbToHex(best);
 }
 
-/** Author-declared diff-root overrides (the TextMate theme file's `diff` key). */
-export interface DiffRootOverrides {
-  /** The added-side text root (opaque hex; a tint's hue stands in when absent). */
-  added?: string;
-  /** The removed-side text root (opaque hex; a tint's hue stands in when absent). */
-  removed?: string;
-  /** The added-side tint (8-digit hex) — its hue becomes the side's text root when `added` is unset. */
-  addedTint?: string;
-  /**
-   * The removed-side tint (8-digit hex) — its hue becomes the side's text root when `removed` is
-   * unset.
-   */
-  removedTint?: string;
+/**
+ * Resolve a theme-declared color over the canvas: an opaque value lands as-is,
+ * a translucent one composites onto the canvas. An absent or unusable
+ * declaration yields undefined so the caller picks its own fallback.
+ *
+ * @param value - The raw declaration.
+ * @param canvas - The theme's canvas.
+ * @returns The resolved RGB, or undefined.
+ */
+function resolveDeclaredColor(value: string | undefined, canvas: RgbColor): RgbColor | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = parseRootColor(value);
+  if (!parsed) return undefined;
+  return parsed.alpha < 1 ? (compositeHexOver(value, canvas) ?? parsed.rgb) : parsed.rgb;
 }
 
 /**
- * Strip a tint's alpha channel: the 8-digit hue as an opaque line color —
- * the fallback a side's text root takes from its tint (ADR 0003: the tint
- * anchors the emphasis ladder; its hue IS the author's line-color intent).
+ * A declared background resolved over the canvas, or the computed tint.
+ *
+ * @param value - The raw declaration.
+ * @param canvas - The theme's canvas.
+ * @param fallback - The computed tint.
+ * @returns The resolved background RGB.
+ */
+function resolveBackground(
+  value: string | undefined,
+  canvas: RgbColor,
+  fallback: RgbColor,
+): RgbColor {
+  return resolveDeclaredColor(value, canvas) ?? fallback;
+}
+
+/**
+ * Drop a tint's alpha: the 8-digit value's RGB as the opaque pi diff root.
  *
  * @param tint - The 8-digit tint hex, or undefined.
- * @returns The opaque hue, or undefined when no tint.
+ * @returns The opaque RGB, or undefined when no tint.
  */
 function tintHue(tint: string | undefined): string | undefined {
   if (!tint) return undefined;
@@ -333,14 +404,15 @@ function tintHue(tint: string | undefined): string | undefined {
   return rgb ? rgbToHex(rgb.rgb) : undefined;
 }
 
-/**
- * The conversion options: author-declared diff-root overrides and the AA
- * switch (the user-theme channel opts out — colors render verbatim).
- */
+/** The conversion options: author-declared diff roots and the AA switch. */
 export interface ConvertOptions {
-  /** Author-declared diff-root overrides (author intent beats token extraction). */
-  diff?: DiffRootOverrides;
-  /** The default true keeps the AA sweep; the user channel passes false. */
+  /** Author-declared diff roots (author intent beats token extraction). */
+  diff?: DiffRoots;
+  /**
+   * Test-only escape hatch: `false` skips the AA sweep. Colors are preserved as
+   * authored, but not byte-for-byte — token extraction normalizes syntax hex to
+   * 6-digit lowercase. An author-declared `diff` root keeps its own byte form.
+   */
   enforceAa?: boolean;
 }
 
@@ -393,47 +465,87 @@ export function convertToPiTheme(
 
   // Foreground: editor.foreground, else the polarity's neutral gray.
   const neutralFg = isLight ? { r: 0x33, g: 0x33, b: 0x33 } : { r: 0xcc, g: 0xcc, b: 0xcc };
-  const fg = optionalOpaqueHex(theme.colors?.["editor.foreground"]) ?? neutralFg;
+  const fg = resolveDeclaredColor(theme.colors?.["editor.foreground"], canvas) ?? neutralFg;
   const successRgb = stateHueRgb(state.success);
-  const errorRgb = stateHueRgb(state.error);
-  const warningRgb = stateHueRgb(state.warning);
+  // The theme's own state declarations win (fidelity); the polarity hue is
+  // the fallback. Success has no source declaration to prefer — a theme's
+  // `editorInfo.foreground` is an info hue, not a success green.
+  const errorRgb =
+    resolveDeclaredColor(theme.colors?.["editorError.foreground"], canvas) ??
+    stateHueRgb(state.error);
+  const warningRgb =
+    resolveDeclaredColor(theme.colors?.["editorWarning.foreground"], canvas) ??
+    stateHueRgb(state.warning);
 
-  // The AA backgrounds for chrome slots: the canvas itself (pi paints
-  // chrome directly on it). The subtle message-bg tints are close enough
-  // to the canvas that canvas-level AA carries them. ENFORCEMENT SCOPE:
-  // only the colors WE choose (state colors, accent, diff roots, syntax
-  // fallbacks) — the theme's own fg stays verbatim (its identity, the
-  // same policy as the runtime: user colors are never enforced). pi's
-  // built-ins ship sub-AA texts themselves (light's toolDiffAdded is
-  // 3.72) — softness is a deliberate look, not a bug we must fix.
-  const aaBackgrounds: readonly RgbColor[] = [canvas];
-  const enforce = (hex: string): string => {
-    // The user-theme channel converts with the sweep OFF — verbatim
-    // author colors are its whole point (the same boundary the runtime
-    // applies: user colors are never enforced).
-    if (!enforceAa) return hex;
-    const rgb = parseOpaqueHex(hex);
-    return rgb ? rgbToHex(enforceWcag(rgb, aaBackgrounds, !isLight)) : hex;
+  // The surfaces pi paints on. The terminal's own background is not a pi
+  // token (an empty slot compiles to SGR 49), so the theme's
+  // `editor.background` — the canvas — stands in for it.
+  const surfaces: SurfaceColors = {
+    toolPendingBg: canvas,
+    toolSuccessBg: mixRgb(canvas, successRgb, isLight ? 0.25 : 0.1),
+    toolErrorBg: mixRgb(canvas, errorRgb, isLight ? 0.25 : 0.1),
+    userMessageBg: tintCanvas(fg, canvas, 0.03),
+    customMessageBg: tintCanvas(fg, canvas, 0.05),
+    selectedBg: resolveBackground(
+      theme.colors?.["editor.selectionBackground"],
+      canvas,
+      tintCanvas(fg, canvas, 0.12),
+    ),
+    searchMatchBg: resolveBackground(
+      theme.colors?.["editor.findMatchBackground"],
+      canvas,
+      tintCanvas(fg, canvas, 0.2),
+    ),
   };
 
-  // The fg ladder.
-  const muted = towardCanvas(fg, canvas, 0.3);
-  const dim = towardCanvas(fg, canvas, 0.55);
-  const thinkingText = towardCanvas(fg, canvas, 0.4);
-  const border = towardCanvas(fg, canvas, 0.7);
+  // AA is a pairing property, so `aa-policy.ts` owns which surfaces each
+  // token carries and the contrast it must clear. Here we only hand it the
+  // surfaces this theme resolved, and report what it flagged.
+  const aaOptions: AaOptions = {
+    themeName: theme.name,
+    colors: surfaces,
+    enforceAa,
+    towardWhite: !isLight,
+  };
+  const reported = new Set<string>();
+  const adjust = (token: AaToken, rgb: RgbColor): RgbColor => {
+    const verdict = aaAdjust(token, rgb, aaOptions);
+    for (const note of verdict.notes) {
+      if (reported.has(note.key)) continue;
+      reported.add(note.key);
+      issues.push({ message: note.message });
+    }
+    return verdict.rgb;
+  };
+  const emit = (token: AaToken, rgb: RgbColor): string => rgbToHex(adjust(token, rgb));
+  const emitHex = (token: AaToken, hex: string): string => {
+    // Under the escape hatch a raw hex (an author-declared diff root) keeps its
+    // own byte form rather than being normalized on the way out.
+    if (!enforceAa) return hex;
+    const rgb = parseOpaqueHex(hex);
+    return rgb ? emit(token, rgb) : hex;
+  };
+
+  // The fg ladder. Each level is a text role; its surfaces and tier live in
+  // the policy table. `borderMuted` is a decorative separator, unmeasured.
+  const fgText = adjust("text", fg);
+  const muted = adjust("muted", towardCanvas(fg, canvas, 0.3));
+  const dim = adjust("dim", towardCanvas(fg, canvas, 0.55));
+  const thinkingText = adjust("thinkingText", towardCanvas(fg, canvas, 0.4));
+  const border = adjust("border", towardCanvas(fg, canvas, 0.7));
   const borderMuted = towardCanvas(fg, canvas, 0.85);
 
-  // Accent: the theme's most saturated token color, AA-protected.
+  // Accent: the declared link color, else the most saturated token.
   const accentFallback = isLight ? { r: 0x09, g: 0x69, b: 0xda } : { r: 0x58, g: 0xa6, b: 0xff };
   const accentRgb = pickAccent(theme, accentFallback);
-  const accent = enforce(rgbToHex(accentRgb));
+  const accent = emit("accent", accentRgb);
 
-  // State colors: polarity hues, AA-protected.
-  const success = enforce(state.success);
-  const error = enforce(state.error);
-  const warning = enforce(state.warning);
+  // State colors: the declared state foreground, else the polarity hue.
+  const success = emit("success", successRgb);
+  const error = emit("error", errorRgb);
+  const warning = emit("warning", warningRgb);
 
-  // Syntax nine: extraction with fg-ladder fallbacks, AA-protected.
+  // Syntax nine: extraction with fg-ladder fallbacks.
   const extracted = extractSyntaxColors(theme);
   const syntax: PiThemeColors = {};
   const syntaxDefaults: Record<SemanticKey, RgbColor> = {
@@ -448,25 +560,32 @@ export function convertToPiTheme(
     punctuation: fg,
   };
   for (const key of Object.keys(SEMANTIC_TO_PI) as SemanticKey[]) {
-    syntax[SEMANTIC_TO_PI[key]] = enforce(extracted[key] ?? rgbToHex(syntaxDefaults[key]));
+    syntax[SEMANTIC_TO_PI[key]] = emitHex(
+      SEMANTIC_TO_PI[key],
+      extracted[key] ?? rgbToHex(syntaxDefaults[key]),
+    );
   }
 
-  // Diff roots: the file's explicit diff key (author intent) beats token
-  // extraction (greens/reds), which beats the polarity-hue fallbacks.
-  const extractedDiff = extractDiffColors(theme, isLight);
-  const diffAdded = enforce(
-    diffOverrides?.added ??
-      tintHue(diffOverrides?.addedTint) ??
+  // Diff roots: the explicit diff text beats the declared tint hue, which
+  // beats the theme's own diff-marker scope and token greens/reds, which
+  // beat the polarity-hue fallbacks. The extraction prefers a token that is
+  // readable on the canvas; an unreadable one falls back to the polarity hue.
+  const extractedDiff = extractDiffColors(theme, isLight, canvas);
+  const diffAdded = emitHex(
+    "toolDiffAdded",
+    diffOverrides?.added?.text ??
+      tintHue(diffOverrides?.added?.tint) ??
       extractedDiff.added ??
       state.success,
   );
-  const diffRemoved = enforce(
-    diffOverrides?.removed ??
-      tintHue(diffOverrides?.removedTint) ??
+  const diffRemoved = emitHex(
+    "toolDiffRemoved",
+    diffOverrides?.removed?.text ??
+      tintHue(diffOverrides?.removed?.tint) ??
       extractedDiff.removed ??
       state.error,
   );
-  const diffContext = enforce(rgbToHex(muted));
+  const diffContext = emit("toolDiffContext", muted);
 
   // Thinking ladder: dim → fg, seven steps + max.
   const thinkingSteps = [
@@ -481,17 +600,15 @@ export function convertToPiTheme(
   const thinking: Record<string, string> = {};
   thinkingSteps.forEach((token, i) => {
     const t = i / (thinkingSteps.length - 1); // 0 = dim, 1 = fg
-    thinking[token] = rgbToHex(mixRgb(dim, fg, t));
+    thinking[token] = rgbToHex(mixRgb(dim, fgText, t));
   });
 
-  // Selected / search backgrounds take the theme's own declarations when
-  // present (author colors, verbatim — outside the AA sweep), else the
-  // computed canvas tints.
-  const selectedBgRgb =
-    optionalOpaqueHex(theme.colors?.["editor.selectionBackground"]) ?? tintCanvas(fg, canvas, 0.12);
-  const searchMatchBgRgb =
-    optionalOpaqueHex(theme.colors?.["editor.findMatchBackground"]) ?? tintCanvas(fg, canvas, 0.2);
-  const searchMatchTextRgb = optionalOpaqueHex(theme.colors?.["editor.findMatchForeground"]) ?? fg;
+  // The search hit is the one pairing that is not a panel: its own
+  // `searchMatchBg`.
+  const searchMatchText = emit(
+    "searchMatchText",
+    resolveDeclaredColor(theme.colors?.["editor.findMatchForeground"], canvas) ?? fg,
+  );
   const colors: PiThemeColors = {
     // Core UI
     accent,
@@ -503,7 +620,7 @@ export function convertToPiTheme(
     warning,
     muted: rgbToHex(muted),
     dim: rgbToHex(dim),
-    text: rgbToHex(fg),
+    text: rgbToHex(fgText),
     thinkingText: rgbToHex(thinkingText),
     scrollbarTrack: rgbToHex(towardCanvas(fg, canvas, 0.75)),
     scrollbarThumb: rgbToHex(towardCanvas(fg, canvas, 0.5)),
@@ -511,16 +628,16 @@ export function convertToPiTheme(
     // exact canvas, zero shift (no status hint while a call streams);
     // success and error take the polarity's state hues at the same
     // polarity-gated ratio (visible on light canvases, subtle on dark).
-    selectedBg: rgbToHex(selectedBgRgb),
-    searchMatchBg: rgbToHex(searchMatchBgRgb),
-    searchMatchText: rgbToHex(searchMatchTextRgb),
-    userMessageBg: rgbToHex(tintCanvas(fg, canvas, 0.03)),
-    userMessageText: rgbToHex(fg),
-    customMessageBg: rgbToHex(tintCanvas(fg, canvas, 0.05)),
-    customMessageText: rgbToHex(fg),
+    selectedBg: rgbToHex(surfaces.selectedBg),
+    searchMatchBg: rgbToHex(surfaces.searchMatchBg),
+    searchMatchText,
+    userMessageBg: rgbToHex(surfaces.userMessageBg),
+    userMessageText: rgbToHex(fgText),
+    customMessageBg: rgbToHex(surfaces.customMessageBg),
+    customMessageText: rgbToHex(fgText),
     customMessageLabel: accent,
     toolPendingBg: rgbToHex(canvas),
-    toolSuccessBg: rgbToHex(mixRgb(canvas, successRgb, isLight ? 0.25 : 0.1)),
+    toolSuccessBg: rgbToHex(surfaces.toolSuccessBg),
     // The error tint's alpha is polarity-gated: 10% reads on dark
     // canvases, but on light canvases 10% of the error red over
     // near-white is imperceptible — the aborted-tool frame looked plain
@@ -528,18 +645,18 @@ export function convertToPiTheme(
     // take a stronger tint so the error surface stays visible in
     // truecolor terminals, where the 256-color quantization no longer
     // rescues the subtle blend.
-    toolErrorBg: rgbToHex(mixRgb(canvas, errorRgb, isLight ? 0.25 : 0.1)),
-    toolTitle: rgbToHex(fg),
-    toolOutput: rgbToHex(fg),
+    toolErrorBg: rgbToHex(surfaces.toolErrorBg),
+    toolTitle: rgbToHex(fgText),
+    toolOutput: rgbToHex(fgText),
     // Markdown
     mdHeading: accent,
     mdLink: accent,
     mdLinkUrl: rgbToHex(muted),
     mdCode: accent,
-    mdCodeBlock: rgbToHex(fg),
+    mdCodeBlock: rgbToHex(fgText),
     mdCodeBlockBorder: rgbToHex(muted),
     mdQuote: rgbToHex(muted),
-    mdQuoteBorder: rgbToHex(border),
+    mdQuoteBorder: rgbToHex(adjust("mdQuoteBorder", border)),
     mdHr: rgbToHex(borderMuted),
     mdListBullet: accent,
     // Tool diffs

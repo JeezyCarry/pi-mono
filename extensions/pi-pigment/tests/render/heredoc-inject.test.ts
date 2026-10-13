@@ -194,7 +194,7 @@ describe("injection rendering (discriminating colors, end-to-end)", () => {
     // The discriminator: under the shell grammar the WHOLE body line is
     // the heredoc string blob (one color); under python the keyword gets
     // its own color — "import" must not be one big string.
-    expect(bodyLine).not.toContain("38;2;224;185;169mimport");
+    expect(bodyLine).not.toContain("38;2;223;184;167mimport");
     // eslint-disable-next-line no-control-regex -- intentionally matches ESC
     expect(bodyLine).toMatch(/\x1b\[38;2;\d+;\d+;\d+mimport\x1b\[39m/);
     // print carries the function color, impossible under the string blob.
@@ -216,7 +216,7 @@ describe("injection rendering (discriminating colors, end-to-end)", () => {
       language: "python",
     });
     // "import" is python-colored, not the shell string blob.
-    expect(body[0] ?? "").not.toContain("38;2;224;185;169mimport");
+    expect(body[0] ?? "").not.toContain("38;2;223;184;167mimport");
     // eslint-disable-next-line no-control-regex -- intentionally matches ESC
     expect(body[0] ?? "").toMatch(/\x1b\[38;2;\d+;\d+;\d+mimport\x1b\[39m/);
   });

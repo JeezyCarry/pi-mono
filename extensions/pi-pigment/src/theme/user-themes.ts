@@ -251,18 +251,11 @@ export function convertThemes(
       });
       return { ok: false, stem, reason: "invalid" } as const;
     }
-    // The user channel converts with the AA sweep OFF (enforceAa: false):
-    // the author's colors land in the output verbatim — the same boundary
-    // the runtime applies (colors YOU set render verbatim; the bundled
-    // ships are pi-pigment's own and keep their generation-time sweep).
+    // The converted custom theme runs the same AA policy as the bundled
+    // ones: a Generated theme must read like any other, whatever its
+    // source declared.
     const { doc, issues: convertIssues } = convertToPiTheme(file.theme, piName, {
-      enforceAa: false,
-      diff: {
-        added: file.diffRoots?.added?.text,
-        removed: file.diffRoots?.removed?.text,
-        addedTint: file.diffRoots?.added?.tint,
-        removedTint: file.diffRoots?.removed?.tint,
-      },
+      diff: file.diffRoots,
     });
     for (const issue of convertIssues) {
       issues.push({ message: issue.message, sourcePath: stem });

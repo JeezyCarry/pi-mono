@@ -414,6 +414,22 @@ describe("enforceThemeColors (bundled-name enforcement)", () => {
     expect(enforced.name).toMatch(/-aa-/);
   });
 
+  it("keeps a color no lightness can clear, and ships the theme under its plain name", () => {
+    // Mixed polarities: light text cannot read on the near-white surface, dark
+    // text cannot read on the near-black one. Nothing can satisfy both, so the
+    // author's color stays and the theme keeps its plain name — no `-aa-`
+    // suffix, because it genuinely did not take the sweep.
+    const mixed = [hexToRgbObj("#101010"), hexToRgbObj("#f0f0f0")];
+    const theme = {
+      name: "mixed",
+      type: "dark" as const,
+      tokenColors: [{ scope: "keyword", settings: { foreground: "#7a7a7a" } }],
+    };
+    const enforced = enforceThemeColors(theme, mixed, true);
+    expect(enforced).toBe(theme); // unchanged, same object
+    expect(enforced.tokenColors?.[0]?.settings?.foreground).toBe("#7a7a7a");
+  });
+
   it("never mutates the input theme (immutability)", () => {
     const theme = {
       name: "mut",

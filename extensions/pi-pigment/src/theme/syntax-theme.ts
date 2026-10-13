@@ -15,19 +15,15 @@
  * character survives.
  */
 
-import { TinyColor } from "@ctrl/tinycolor";
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { RgbColor } from "@earendil-works/pi-tui";
 import type { ThemeRegistration } from "shiki/core";
 import type { BundledTheme } from "shiki/themes";
 
-import { contrastRatio, parseAnsiRgb, parseHexColor, rgbToHex } from "#src/core/color.ts";
+import { parseAnsiRgb, parseHexColor, rgbToHex, wcagAdjusted } from "#src/core/color.ts";
 import { fnv1a } from "#src/core/keys.ts";
 
 import type { ResolvedTheme, RenderTheme } from "./scheme.ts";
-
-/** WCAG AA contrast ratio for normal-size text. */
-const WCAG_AA = 4.5;
 
 /**
  * The pi theme's `syntax*` color slots — reused from the SDK's
@@ -49,7 +45,7 @@ type SemanticKeyOf<T extends string> = T extends `syntax${infer Rest}` ? Lowerca
 export type SemanticKey = SemanticKeyOf<PiSyntaxColor>;
 
 /** Semantic short key → the pi theme's `syntax*` color name (one source). */
-export const SEMANTIC_TO_PI: Record<SemanticKey, PiSyntaxColor> = {
+export const SEMANTIC_TO_PI = {
   comment: "syntaxComment",
   keyword: "syntaxKeyword",
   function: "syntaxFunction",
@@ -59,7 +55,10 @@ export const SEMANTIC_TO_PI: Record<SemanticKey, PiSyntaxColor> = {
   type: "syntaxType",
   operator: "syntaxOperator",
   punctuation: "syntaxPunctuation",
-};
+} satisfies Record<SemanticKey, PiSyntaxColor>;
+
+/** The `syntax*` slots the mapping addresses — the AA table must cover these. */
+export type PiSyntaxSlot = (typeof SEMANTIC_TO_PI)[SemanticKey];
 
 /**
  * The semantic keys, in mapping order — drives the config schema's enum and
@@ -111,58 +110,6 @@ const SCOPE_MAP: ReadonlyArray<{ scopes: string[]; color: PiSyntaxColor }> = [
 ];
 
 /**
- * The minimum contrast a color achieves over the background set.
- *
- * @param color - The color to measure.
- * @param backgrounds - The backgrounds to measure against.
- * @returns The smallest contrast ratio.
- */
-function minContrast(color: RgbColor, backgrounds: readonly RgbColor[]): number {
-  return Math.min(...backgrounds.map((bg) => contrastRatio(color, bg)));
-}
-
-/**
- * Nudge a color's HSL lightness toward the scheme's safe extreme until it
- * clears WCAG AA over every background. Hue and saturation are preserved.
- * Returns the original color when it already complies. Exported for the
- * pi-theme converter (the AA tool is shared, not forked).
- *
- * @param color - The syntax color to adjust.
- * @param backgrounds - The backgrounds the color must read on.
- * @param towardWhite - Adjust upward (dark palettes) or downward (light).
- * @returns The WCAG-compliant color (original if already compliant).
- */
-export function enforceWcag(
-  color: RgbColor,
-  backgrounds: readonly RgbColor[],
-  towardWhite: boolean,
-): RgbColor {
-  if (minContrast(color, backgrounds) >= WCAG_AA) return color;
-  // TinyColor's HSL: h in degrees, s/l in [0, 1]. Keep hue and saturation,
-  // sweep lightness in 1% steps: cheap, monotone, deterministic.
-  const { h, s, l: start } = new TinyColor(color).toHsl();
-  for (let step = 0.01; step <= 1.001; step += 0.01) {
-    const l = towardWhite ? Math.min(1, start + step) : Math.max(0, start - step);
-    const candidate = rgbOfHsl(h, s, l);
-    if (minContrast(candidate, backgrounds) >= WCAG_AA) return candidate;
-    if (l >= 1 || l <= 0) break;
-  }
-  return rgbOfHsl(h, s, towardWhite ? 1 : 0);
-}
-
-/**
- * Build an RGB from TinyColor's HSL scale (h in degrees, s/l in [0, 1]).
- *
- * @param h - Hue in degrees [0, 360).
- * @param s - Saturation in [0, 1].
- * @param l - Lightness in [0, 1].
- * @returns The RGB color.
- */
-function rgbOfHsl(h: number, s: number, l: number): RgbColor {
-  const rgb = new TinyColor({ h, s, l }).toRgb();
-  return { r: rgb.r, g: rgb.g, b: rgb.b };
-}
-/**
  * Read one syntax color from the pi theme as RGB, or null when absent.
  *
  * @param theme - The pi theme to read from.
@@ -204,6 +151,25 @@ export function aaCheckBackgrounds(scheme: ResolvedTheme): RgbColor[] {
     bgRgbOr(scheme.bgAddedWord, neutral),
     bgRgbOr(scheme.bgRemovedWord, neutral),
   ];
+}
+
+/**
+ * The token color to render: the authored color nudged along its own hue to
+ * the nearest one clearing WCAG AA on every diff background. A color no
+ * lightness can rescue ships as authored — this path has no channel to report
+ * it, unlike the converter's, which does.
+ *
+ * @param color - The token color to enforce.
+ * @param backgrounds - The blended diff backgrounds it must read on.
+ * @param towardWhite - Adjust upward (dark themes) or downward (light).
+ * @returns The color to render.
+ */
+function wcagNearest(
+  color: RgbColor,
+  backgrounds: readonly RgbColor[],
+  towardWhite: boolean,
+): RgbColor {
+  return wcagAdjusted(color, backgrounds, towardWhite).rgb;
 }
 
 /**
@@ -259,7 +225,7 @@ export function buildPiSyntaxTheme(
     const patched = userColors?.[key];
     // A user patch is verbatim; anything falsy (including an empty string,
     // which no schema allows) falls through to the enforced variant.
-    adjusted[key] = patched || rgbToHex(enforceWcag(rgb, backgrounds, !scheme.isLight));
+    adjusted[key] = patched || rgbToHex(wcagNearest(rgb, backgrounds, !scheme.isLight));
   }
 
   // The canvas color's hex: the parsed scheme bg, else the polarity's
@@ -457,17 +423,21 @@ export function buildSemanticTheme(
 }
 
 /**
- * Enforce WCAG AA on every fg color of a TextMate theme (bundled names
- * and the fallback pair — the colors WE choose). Each distinct foreground —
- * tokenColors rules and the editor default fg — walks HSL lightness toward
- * the scheme-safe extreme until it clears AA on every background; hue and
- * fontStyle are preserved, non-hex colors are skipped. Immutable: the input
- * theme is never modified (bundled-theme loaders return shared references).
+ * Enforce WCAG AA on every fg color of a TextMate theme (bundled names and
+ * the fallback pair — the colors WE choose). Each distinct foreground takes
+ * the least HSL-lightness move that clears AA on every background, trying the
+ * opposite direction when the preferred one cannot; hue and fontStyle are
+ * preserved, non-hex colors skipped. A foreground no lightness can clear (a
+ * background set straddling both polarities, so light text fails one surface
+ * and dark text another) is left untouched rather than forced to an unreadable
+ * extreme — and the theme then keeps its plain name, with no `-aa-` suffix,
+ * because it genuinely did not take the sweep. Immutable: the input theme is
+ * never modified (bundled-theme loaders return shared references).
  *
  * @param theme - The theme to enforce.
  * @param backgrounds - The effective renderer backgrounds.
- * @param towardWhite - Adjust upward (dark palettes) or downward (light).
- * @returns The enforced theme (new object), or the input when already AA.
+ * @param towardWhite - The preferred direction: upward (dark palettes) or downward (light).
+ * @returns The enforced theme (new object), or the input when nothing moved.
  */
 export function enforceThemeColors(
   theme: MaterializedTheme,
@@ -485,7 +455,7 @@ export function enforceThemeColors(
     const memoized = cache.get(hex);
     if (memoized !== undefined) return memoized;
     const rgb = parseHexColor(hex);
-    const adjusted = rgb ? rgbToHex(enforceWcag(rgb, backgrounds, towardWhite)) : hex;
+    const adjusted = rgb ? rgbToHex(wcagNearest(rgb, backgrounds, towardWhite)) : hex;
     cache.set(hex, adjusted);
     return adjusted;
   };

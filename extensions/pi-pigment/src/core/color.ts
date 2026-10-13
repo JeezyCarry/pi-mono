@@ -1,9 +1,10 @@
 /**
- * Pure color math: the RGB/hex/ANSI-color conversions and WCAG measures
- * the scheme and syntax themes derive from. No SGR escape literals
- * live here (escapes.ts owns those) — everything in this module maps colors
- * to colors or numbers. Backed by @ctrl/tinycolor (WCAG contrast is
- * bit-identical to the spec; see ADR 0001 for why colord was rejected).
+ * Pure color math: the RGB/hex/ANSI-color conversions and the WCAG measures
+ * and AA lightness lift that the scheme, the syntax themes and the theme
+ * converter derive from. No SGR escape literals live here (escapes.ts owns
+ * those) — everything in this module maps colors to colors or numbers. Backed
+ * by @ctrl/tinycolor (WCAG contrast is bit-identical to the spec; see ADR 0001
+ * for why colord was rejected).
  */
 
 import { readability, TinyColor } from "@ctrl/tinycolor";
@@ -257,4 +258,78 @@ export function isLightRgb(rgb: RgbColor): boolean {
  */
 export function contrastRatio(a: RgbColor, b: RgbColor): number {
   return readability(new TinyColor(a), new TinyColor(b));
+}
+
+/** WCAG AA contrast ratio for normal-size text — the default target. */
+const WCAG_AA = 4.5;
+
+/**
+ * The minimum contrast a color achieves over a background set.
+ *
+ * @param color - The color to measure.
+ * @param backgrounds - The backgrounds to measure against.
+ * @returns The smallest contrast ratio.
+ */
+export function minContrast(color: RgbColor, backgrounds: readonly RgbColor[]): number {
+  return Math.min(...backgrounds.map((bg) => contrastRatio(color, bg)));
+}
+
+/** A WCAG adjustment: the color to emit and whether the target was met. */
+export interface WcagAdjustment {
+  /** The color to emit (the original when no lightness can meet the target). */
+  rgb: RgbColor;
+  /** False when the target is unreachable in both directions. */
+  met: boolean;
+}
+
+/**
+ * Nudge a color's HSL lightness just far enough to clear WCAG `target` over
+ * every background, preserving hue and saturation: bisect for the passing
+ * interval and contrast the emitted 8-bit RGB directly. A color that already
+ * complies is returned unchanged, and so is one no lightness in either
+ * direction can rescue — the caller reports that case, it is never papered
+ * over with a distorted color.
+ *
+ * @param color - The color to adjust.
+ * @param backgrounds - The backgrounds the color must read on.
+ * @param towardWhite - The preferred direction (dark palettes adjust up).
+ * @param target - The contrast ratio to clear (WCAG AA by default).
+ * @returns The adjustment: the color to emit, and whether the target was met.
+ */
+export function wcagAdjusted(
+  color: RgbColor,
+  backgrounds: readonly RgbColor[],
+  towardWhite: boolean,
+  target: number = WCAG_AA,
+): WcagAdjustment {
+  if (minContrast(color, backgrounds) >= target) return { rgb: color, met: true };
+  // TinyColor's HSL: h in degrees, s/l in [0, 1]. The preferred direction
+  // first: a background on the far side can leave that unreachable while the
+  // other works (black text on a mid grey), so it is a fallback, not a failure.
+  const { h, s, l: start } = new TinyColor(color).toHsl();
+  for (const extreme of [towardWhite ? 1 : 0, towardWhite ? 0 : 1]) {
+    if (minContrast(rgbOfHsl(h, s, extreme), backgrounds) < target) continue;
+    let fail = start;
+    let pass = extreme;
+    for (let i = 0; i < 24; i += 1) {
+      const mid = (fail + pass) / 2;
+      if (minContrast(rgbOfHsl(h, s, mid), backgrounds) >= target) pass = mid;
+      else fail = mid;
+    }
+    return { rgb: rgbOfHsl(h, s, pass), met: true };
+  }
+  return { rgb: color, met: false };
+}
+
+/**
+ * Build an RGB from TinyColor's HSL scale (h in degrees, s/l in [0, 1]).
+ *
+ * @param h - Hue in degrees [0, 360).
+ * @param s - Saturation in [0, 1].
+ * @param l - Lightness in [0, 1].
+ * @returns The RGB color.
+ */
+function rgbOfHsl(h: number, s: number, l: number): RgbColor {
+  const rgb = new TinyColor({ h, s, l }).toRgb();
+  return { r: rgb.r, g: rgb.g, b: rgb.b };
 }

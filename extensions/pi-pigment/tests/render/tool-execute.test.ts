@@ -782,7 +782,7 @@ describe("grep renderResult highlight swap", () => {
     // The guarded swap never landed: the key stays superseded and the
     // highlight color (the swap's landing signature) never appears.
     expect(stale.previewRenderedKey).toBe("g:superseded");
-    expect(stale.text.text).not.toContain("38;2;224;185;169m");
+    expect(stale.text.text).not.toContain("38;2;223;184;167m");
     // Sanity: WITHOUT the poisoning the swap DOES land (the same drive
     // with an intact key delivers the color) — proving the assertion
     // above is guarding the guard, not a quirk of the theme.
@@ -795,8 +795,8 @@ describe("grep renderResult highlight swap", () => {
       freshCtx,
     );
     live.render(120);
-    await waitFor(() => (live.text.text.includes("38;2;224;185;169m") ? true : undefined));
-    expect(live.text.text).toContain("38;2;224;185;169m");
+    await waitFor(() => (live.text.text.includes("38;2;223;184;167m") ? true : undefined));
+    expect(live.text.text).toContain("38;2;223;184;167m");
   });
 
   it("a settled repeat frame skips the placeholder rebuild (the early-return guard)", async () => {
