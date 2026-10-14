@@ -48,13 +48,12 @@ async function main(): Promise<void> {
     const { doc, issues: convertIssues } = convertToPiTheme(file.theme, `pigment-${name}`, {
       diff: file.diffRoots,
     });
-    // A conversion diagnostic (an AA conflict no lightness can satisfy, say)
-    // is reported, never fatal: the theme still ships, closest lightness
-    // kept. Only a theme that produces no file at all fails the run. That is
-    // safe because every input to the AA decision — the token color and all
-    // seven surfaces — is emitted verbatim into the JSON, so a conflict that
-    // newly appears either changes the committed file (caught by the
-    // freshness diff) or comes from a rule change visible in review.
+    // A conversion diagnostic (an AA conflict no color could satisfy, say) is
+    // reported, never fatal: the theme still ships with the color it was
+    // authored with, and only a theme that produces no file at all fails the
+    // run. The check that keeps the committed assets honest only asserts they
+    // match a fresh conversion — it is not a conflict gate — so these lines are
+    // the report.
     for (const issue of convertIssues) warnings.push(issue.message);
     if (!doc) {
       failures.push(`theme "${name}" produced no theme file`);

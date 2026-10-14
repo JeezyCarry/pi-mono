@@ -26,10 +26,14 @@ const WHITE = { r: 255, g: 255, b: 255 };
 const STYLE_ZONE = { r: 0x6c, g: 0x6c, b: 0x6c };
 /** On black: 2.48:1 — below the readability floor. */
 const SUB_FLOOR = { r: 0x4d, g: 0x4d, b: 0x4d };
-/** On black 5.32:1, on white 3.95:1 — no single lightness clears 4.5 on both. */
-const UNRESCUABLE = { r: 0x80, g: 0x80, b: 0x80 };
-/** On black 18.4:1, on white 1.14:1 — no single lightness clears even 3 on both. */
+/** Short of AA on white (3.95:1) and clear of it on black (5.32:1). */
+const MID_GRAY = { r: 0x80, g: 0x80, b: 0x80 };
+/** Short of even the 3:1 floor on white (1.14:1). */
 const NEAR_WHITE = { r: 0xf0, g: 0xf0, b: 0xf0 };
+/** Luminance 0.0036 — a canvas dark enough to keep white out of reach. */
+const NEAR_BLACK = { r: 0x0a, g: 0x0c, b: 0x10 };
+/** Luminance 0.0704 — just past where the 3:1 floor stops bridging to white. */
+const MID_DARK = { r: 0x4b, g: 0x4b, b: 0x4b };
 
 /**
  * Every surface at black, then the overrides.
@@ -47,6 +51,25 @@ const surfaces = (overrides: Partial<SurfaceColors> = {}): SurfaceColors => ({
   searchMatchBg: BLACK,
   ...overrides,
 });
+
+/**
+ * Every surface at `base`, then the overrides.
+ *
+ * @param base - The color every surface starts at.
+ * @param overrides - Surfaces to set away from `base`.
+ * @returns The surface set.
+ */
+const surfacesOf = (base: RgbColor, overrides: Partial<SurfaceColors> = {}): SurfaceColors =>
+  surfaces({
+    toolPendingBg: base,
+    toolSuccessBg: base,
+    toolErrorBg: base,
+    userMessageBg: base,
+    customMessageBg: base,
+    selectedBg: base,
+    searchMatchBg: base,
+    ...overrides,
+  });
 
 const options = (overrides: Partial<AaOptions> = {}): AaOptions => ({
   themeName: "t",
@@ -120,18 +143,40 @@ describe("aa policy: indicator tier", () => {
   });
 });
 
+describe("aa policy: a plateau between the endpoints", () => {
+  // Black at one end, white at the other: neither endpoint clears both, but the
+  // passing lightnesses form a plateau in the middle (#757575 reads 4.56 on
+  // black and 4.61 on white). The search has to seed itself inside that plateau
+  // instead of reading a missing endpoint as an unreachable direction.
+  it("finds the plateau when neither endpoint clears every surface", () => {
+    const colors = surfaces({ selectedBg: WHITE });
+    expect(reach("text", MID_GRAY, colors)).toBeLessThan(4.5);
+
+    const verdict = aaAdjust("text", MID_GRAY, options({ colors }));
+    expect(reach("text", verdict.rgb, colors)).toBeGreaterThanOrEqual(4.5);
+    expect(verdict.notes).toEqual([]);
+  });
+});
+
 describe("aa policy: unreachable pairings", () => {
   it("keeps the authored color and reports a conflict", () => {
-    const colors = surfaces({ selectedBg: WHITE });
-    const verdict = aaAdjust("text", UNRESCUABLE, options({ colors }));
+    // A canvas close to black rather than black. The span has to be this wide
+    // for the target to be genuinely out of reach: against a black canvas white
+    // is the only failing surface, and the mid grey above clears it.
+    const colors = surfacesOf(NEAR_BLACK, { selectedBg: WHITE });
+    expect(reach("text", MID_GRAY, colors)).toBeLessThan(4.5);
 
-    expect(verdict.rgb).toEqual(UNRESCUABLE);
+    const verdict = aaAdjust("text", MID_GRAY, options({ colors }));
+
+    expect(verdict.rgb).toEqual(MID_GRAY);
     expect(verdict.notes).toHaveLength(1);
+    expect(verdict.notes[0].key).toBe("text|selectedBg|4.5");
     expect(verdict.notes[0].message).toContain("cannot reach 4.5:1 on selectedBg");
   });
 
   it("reports a secondary conflict against its floor, on every failing surface", () => {
-    const colors = surfaces({ selectedBg: WHITE, customMessageBg: WHITE });
+    // Mid-dark rather than black, for the same reason at the floor.
+    const colors = surfacesOf(MID_DARK, { selectedBg: WHITE, customMessageBg: WHITE });
     const verdict = aaAdjust("muted", NEAR_WHITE, options({ colors }));
 
     expect(verdict.rgb).toEqual(NEAR_WHITE);

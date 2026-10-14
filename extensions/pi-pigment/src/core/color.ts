@@ -260,6 +260,23 @@ export function contrastRatio(a: RgbColor, b: RgbColor): number {
   return readability(new TinyColor(a), new TinyColor(b));
 }
 
+/**
+ * The WCAG contrast ratio between two relative luminances.
+ *
+ * Spelled the way TinyColor's `readability` spells it — the same expression,
+ * the same operands — so that a luminance compared here and a color measured
+ * through `contrastRatio` reach the same verdict bit for bit. `interiorPassing`
+ * leans on that: it bisects its band edges out of this, and its candidates are
+ * still accepted by the measurement.
+ *
+ * @param a - One relative luminance.
+ * @param b - The other relative luminance.
+ * @returns The contrast ratio (>= 1).
+ */
+function contrastOfLuminance(a: number, b: number): number {
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
 /** WCAG AA contrast ratio for normal-size text — the default target. */
 const WCAG_AA = 4.5;
 
@@ -276,19 +293,33 @@ export function minContrast(color: RgbColor, backgrounds: readonly RgbColor[]): 
 
 /** A WCAG adjustment: the color to emit and whether the target was met. */
 export interface WcagAdjustment {
-  /** The color to emit (the original when no lightness can meet the target). */
+  /** The color to emit (the original when the search finds no other). */
   rgb: RgbColor;
-  /** False when the target is unreachable in both directions. */
+  /** False when the search found no color that clears the target. */
   met: boolean;
 }
 
 /**
- * Nudge a color's HSL lightness just far enough to clear WCAG `target` over
- * every background, preserving hue and saturation: bisect for the passing
- * interval and contrast the emitted 8-bit RGB directly. A color that already
- * complies is returned unchanged, and so is one no lightness in either
- * direction can rescue — the caller reports that case, it is never papered
- * over with a distorted color.
+ * What a search walks and what it has to clear: the hue and saturation held
+ * fixed, the surfaces the color reads on, and the contrast ratio to clear.
+ */
+interface ContrastSearch {
+  readonly h: number;
+  readonly s: number;
+  readonly backgrounds: readonly RgbColor[];
+  readonly target: number;
+}
+
+/**
+ * Nudge a color's HSL lightness until it clears WCAG `target` over every
+ * background, preserving hue and saturation: take the first direction whose
+ * segment reaches the target, bisect for a passing lightness, and contrast the
+ * emitted 8-bit RGB directly. A color that already complies is returned
+ * unchanged, and so is one the search finds no passing lightness for — the
+ * caller reports that case, it is never papered over with a distorted color.
+ * `met` is a promise about the color returned with it: every value that comes
+ * back alongside a true has been measured clear on every background, and a
+ * false leaves the authored color untouched.
  *
  * @param color - The color to adjust.
  * @param backgrounds - The backgrounds the color must read on.
@@ -307,18 +338,137 @@ export function wcagAdjusted(
   // first: a background on the far side can leave that unreachable while the
   // other works (black text on a mid grey), so it is a fallback, not a failure.
   const { h, s, l: start } = new TinyColor(color).toHsl();
+  const search: ContrastSearch = { h, s, backgrounds, target };
+  const clears = (l: number) => minContrast(rgbOfHsl(h, s, l), backgrounds) >= target;
   for (const extreme of [towardWhite ? 1 : 0, towardWhite ? 0 : 1]) {
-    if (minContrast(rgbOfHsl(h, s, extreme), backgrounds) < target) continue;
-    let fail = start;
-    let pass = extreme;
-    for (let i = 0; i < 24; i += 1) {
-      const mid = (fail + pass) / 2;
-      if (minContrast(rgbOfHsl(h, s, mid), backgrounds) >= target) pass = mid;
-      else fail = mid;
-    }
-    return { rgb: rgbOfHsl(h, s, pass), met: true };
+    // An endpoint that clears the target is the classic case: bisect toward it
+    // and land on the lightness nearest the authored color. A background on the
+    // far side can instead put the target on a plateau in the middle — a mid
+    // grey clears both black and white while neither endpoint clears both — so
+    // an endpoint missing the target does not prove the direction is dead.
+    const pass = clears(extreme) ? extreme : interiorPassing(search, start, extreme);
+    if (pass === undefined) continue;
+    return { rgb: rgbOfHsl(h, s, crossing(start, pass, clears)), met: true };
   }
   return { rgb: color, met: false };
+}
+
+/**
+ * A lightness that clears `target`, on the segment between `from` and `to`, or
+ * undefined when the segment holds none — the seed the bisection above needs
+ * when the endpoint it aims at misses the target.
+ *
+ * Every background clears two rays of relative luminance, and a color has to
+ * clear every background, so what a color can use is the intersection of those
+ * rays. Intersecting rather than subtracting the forbidden bands keeps the
+ * endpoints: where one band ends exactly where the next begins, the single
+ * luminance between them still clears both and stays in the list. The edges
+ * come from bisecting the contrast itself, so they are decided by the same
+ * arithmetic that decides whether a color clears.
+ *
+ * Luminance rises with lightness but jumps rather than ramps, because the
+ * emitted color is 8-bit, so each plateau is entered by bisecting that monotone
+ * step against the edge the authored color is on, resolved to adjacent doubles,
+ * rather than by stepping a fixed ladder of lightnesses across it — a ladder
+ * skips a plateau the ramp crosses between two rungs. A plateau whose first
+ * representable lightness does not clear there is passed over, and the walk
+ * moves to the next one; an undefined answer means the search found no color
+ * that clears. The plateaus are walked from the authored end, so the first hit
+ * is the one the bisection above settles on anyway.
+ *
+ * @param search - The ramp to walk and the ratio it has to clear.
+ * @param from - The segment's start lightness (the authored color).
+ * @param to - The segment's end lightness (the direction's extreme).
+ * @returns A clearing lightness on the segment, or undefined when there is none.
+ */
+function interiorPassing(search: ContrastSearch, from: number, to: number): number | undefined {
+  const { h, s, backgrounds, target } = search;
+  const luminanceAt = (l: number) => rgbLuminance(rgbOfHsl(h, s, l));
+  const authored = luminanceAt(from);
+  const opposite = luminanceAt(to);
+  // Relative luminance rises with lightness, so the segment is one luminance
+  // interval and each forbidden band is a plain interval on it.
+  const upward = authored <= opposite;
+  const lo = upward ? authored : opposite;
+  const hi = upward ? opposite : authored;
+  // Each background leaves two rays of luminance that clear it, and a color has
+  // to clear every background, so the plateaus are their intersection.
+  let plateaus: Array<[number, number]> = [[lo, hi]];
+  for (const bg of backgrounds) {
+    const [bandLow, bandHigh] = forbiddenLuminances(bg, target);
+    plateaus = plateaus.flatMap(([a, b]) => {
+      const pieces: Array<[number, number]> = [];
+      if (a <= bandLow) pieces.push([a, Math.min(b, bandLow)]);
+      if (b >= bandHigh) pieces.push([Math.max(a, bandHigh), b]);
+      return pieces;
+    });
+  }
+  for (const [low, high] of upward ? plateaus : plateaus.toReversed()) {
+    const edge = upward ? low : high;
+    const reached = crossing(from, to, (l) =>
+      upward ? luminanceAt(l) >= edge : luminanceAt(l) <= edge,
+    );
+    if (minContrast(rgbOfHsl(h, s, reached), backgrounds) >= target) return reached;
+  }
+  return undefined;
+}
+
+/**
+ * The lightness where a monotone predicate that fails at `from` and holds at
+ * `to` first holds, resolved to the last bit a double carries. Either end may be
+ * the higher one; the halving walks from `from` toward `to`.
+ *
+ * Halving stops when the interval has collapsed onto adjacent doubles, so the
+ * answer is the first lightness the domain can represent where the predicate
+ * holds rather than an approximation to some chosen precision.
+ *
+ * @param from - The lightness the predicate fails at.
+ * @param to - The lightness the predicate holds at.
+ * @param holds - The monotone predicate, on a lightness.
+ * @returns The first lightness where it holds.
+ */
+function crossing(from: number, to: number, holds: (l: number) => boolean): number {
+  let fail = from;
+  let pass = to;
+  for (;;) {
+    const mid = fail + (pass - fail) / 2;
+    if (mid === fail || mid === pass) return pass;
+    if (holds(mid)) pass = mid;
+    else fail = mid;
+  }
+}
+
+/**
+ * The two relative luminances between which one background forbids a color: it
+ * clears at or below the first and at or above the second, and either is
+ * infinite where that side never clears.
+ *
+ * Each edge is bisected out of `contrastOfLuminance` rather than solved for, so
+ * it lands on the exact luminance where the measurement turns over. An edge off
+ * by a rounding step would put a color the measurement accepts outside the
+ * bands the search looks in.
+ *
+ * @param bg - The background.
+ * @param target - The contrast ratio to clear.
+ * @returns The lower and the upper edge of the band it forbids.
+ */
+function forbiddenLuminances(bg: RgbColor, target: number): [number, number] {
+  const base = rgbLuminance(bg);
+  const clears = (l: number) => contrastOfLuminance(l, base) >= target;
+  // A color at the background's own luminance reads 1:1, so nothing is
+  // forbidden unless the target itself is that low.
+  if (clears(base)) return [base, base];
+  let lower = Number.NEGATIVE_INFINITY;
+  if (clears(0)) {
+    // Contrast falls as luminance rises toward the background.
+    lower = crossing(base, 0, clears);
+  }
+  let upper = Number.POSITIVE_INFINITY;
+  if (clears(1)) {
+    // Contrast rises again as luminance climbs away from the background.
+    upper = crossing(base, 1, clears);
+  }
+  return [lower, upper];
 }
 
 /**

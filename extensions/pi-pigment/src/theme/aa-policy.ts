@@ -139,6 +139,15 @@ export interface AaOptions {
 }
 
 /**
+ * One token's adjustment and the conversion it belongs to: enough for a note to
+ * look the rule up again and name the theme it belongs to.
+ */
+interface AaSlot {
+  readonly token: AaToken;
+  readonly options: AaOptions;
+}
+
+/**
  * The AA verdict for one token: its color after enforcement, plus a note for
  * every surface the pairing does not clear.
  *
@@ -158,53 +167,41 @@ export function aaAdjust(token: AaToken, rgb: RgbColor, options: AaOptions): AaV
   const reach = minContrast(rgb, backgrounds);
   if (reach >= target) return { rgb, notes: [] };
 
+  const slot: AaSlot = { token, options };
   // The style zone keeps the author's color (see the module doc); only the
   // floor is enforced. `reach` is the minimum, so clearing the floor here
   // means every surface did.
   if (floor < target && reach >= floor) {
-    return {
-      rgb,
-      notes: shortfalls(token, rgb, spec, backgrounds, target, "style-zone", options),
-    };
+    return { rgb, notes: shortfalls(slot, rgb, "style-zone") };
   }
   const { rgb: adjusted, met } = wcagAdjusted(rgb, backgrounds, options.towardWhite, floor);
   return met
     ? { rgb: adjusted, notes: [] }
-    : {
-        rgb: adjusted,
-        notes: shortfalls(token, rgb, spec, backgrounds, floor, "conflict", options),
-      };
+    : { rgb: adjusted, notes: shortfalls(slot, rgb, "conflict") };
 }
 
 /**
  * Build one note per surface the authored color does not clear.
  *
- * @param token - The token, for the message and the dedup key.
+ * @param slot - The token and the conversion it belongs to.
  * @param color - The authored color the message quotes.
- * @param spec - The token's rule, for the surface names.
- * @param backgrounds - The surfaces' RGB, in `spec.surfaces` order.
- * @param limit - The ratio a surface must reach to go unreported.
- * @param kind - Which shortfall this is; it picks the message and the key.
- * @param options - The conversion's name.
- * @returns The notes, in surface order.
+ * @param kind - Which shortfall this is; it picks the message, the key, and the
+ *   ratio to report against.
+ * @returns The notes, in the rule's surface order.
  */
-function shortfalls(
-  token: string,
-  color: RgbColor,
-  spec: AaRule,
-  backgrounds: readonly RgbColor[],
-  limit: number,
-  kind: "conflict" | "style-zone",
-  options: AaOptions,
-): AaNote[] {
+function shortfalls(slot: AaSlot, color: RgbColor, kind: "conflict" | "style-zone"): AaNote[] {
+  const { token, options } = slot;
+  const spec = AA_RULES[token];
+  const { target, floor } = TIERS[spec.tier];
+  // A conflict reports the ratio the lift aimed for; the style zone fell short
+  // of AA without being lifted, so it reports against the target.
+  const limit = kind === "conflict" ? floor : target;
   const notes: AaNote[] = [];
   const hex = rgbToHex(color);
-  spec.surfaces.forEach((name, i) => {
-    const ratio = contrastRatio(color, backgrounds[i]);
+  spec.surfaces.forEach((name) => {
+    const ratio = contrastRatio(color, options.colors[name]);
     if (ratio >= limit) return;
     const shown = `(${ratio.toFixed(2)}:1)`;
-    // A conflict names the ratio the lift aimed for; the style zone is short
-    // of AA but was never lifted, so it names the role instead.
     notes.push(
       kind === "conflict"
         ? {
