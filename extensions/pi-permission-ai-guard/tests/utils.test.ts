@@ -3,13 +3,50 @@ import { describe, expect, it } from "vitest";
 import {
   attempt,
   bestEffort,
+  cacheKey,
   encodeActionTextForPrompt,
   isObjectRecord,
   normalizeAndRedactText,
   normalizeText,
   redactSecrets,
+  textFromContent,
   truncateMiddle,
 } from "#src/utils.ts";
+
+describe("cacheKey", () => {
+  it("separates adjacent fields so concatenation cannot collide", () => {
+    expect(cacheKey("a", "b")).toBe("a\0b");
+    expect(cacheKey("a", "bc")).not.toBe(cacheKey("ab", "c"));
+    expect(cacheKey("a", "b", "c")).toBe("a\0b\0c");
+  });
+
+  it("normalizes an absent part to empty", () => {
+    expect(cacheKey("a", undefined)).toBe(cacheKey("a", ""));
+  });
+});
+
+describe("textFromContent", () => {
+  it("skips empty text blocks so separators only join real text", () => {
+    expect(
+      textFromContent([
+        { type: "text", text: "a" },
+        { type: "text", text: "" },
+        { type: "text", text: "b" },
+      ]),
+    ).toBe("a\nb");
+  });
+
+  it("ignores non-text and malformed blocks", () => {
+    expect(
+      textFromContent([
+        null,
+        { type: "image" },
+        { type: "text", text: 42 },
+        { type: "text", text: "ok" },
+      ]),
+    ).toBe("ok");
+  });
+});
 
 describe("bestEffort / attempt", () => {
   it("bestEffort swallows a throw and keeps going", () => {
@@ -262,6 +299,20 @@ describe("redactSecrets", () => {
     expect(redactSecrets("open https://example.com/?email=a@b.com")).toBe(
       "open https://example.com/?email=a@b.com",
     );
+  });
+
+  it("stays linear on a long scheme-like run that never reaches ://", () => {
+    // The URL userinfo pattern once carried an unbounded scheme quantifier: on
+    // a long `[a-z0-9+.-]` run with no `://`, it backtracked over the rest of
+    // the input at every start position, so 200k characters cost ~37s and one
+    // tool reply could stall the permission gate. Only a timing assertion
+    // catches that returning — the correctness tests above pass either way.
+    // The budget is ~100x the linear cost and still ~18x below the quadratic
+    // one, so machine load cannot fake a failure.
+    const text = "x".repeat(200_000);
+    const startedAt = performance.now();
+    expect(redactSecrets(text)).toBe(text);
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
   });
 
   it("redacts aws_secret_access_key assignments", () => {

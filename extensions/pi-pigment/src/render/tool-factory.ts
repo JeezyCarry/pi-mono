@@ -21,6 +21,7 @@ import type { RenderTheme } from "#src/theme/scheme.ts";
 import { renderHeaderLine } from "./ellipsis.ts";
 import { ERROR_FRAME_DEFAULT_WIDTH, formatToolErrorResult, setToolErrorBg } from "./error-frame.ts";
 import { clearToolHeaderBg, resultLine } from "./header.ts";
+import { armHeartbeat, clearHeartbeat, type HeartbeatState } from "./heartbeat.ts";
 import type { FrameView } from "./session.ts";
 import {
   attachPreviewTask,
@@ -227,6 +228,13 @@ export function createToolRenderer<TState extends object = Record<string, unknow
       // execution arms the clock, and a resumed row renders with
       // executionStarted false, so it never gets one.
       armTiming(ctx.state as ExecutionTimingState, ctx.executionStarted);
+      // The heartbeat driver runs only while the execution is live; every
+      // other frame sweeps it so a settled row never keeps ticking.
+      if (callStateOf(ctx) === "pending" && ctx.executionStarted) {
+        armHeartbeat(ctx.state as HeartbeatState, ctx.invalidate);
+      } else {
+        clearHeartbeat(ctx.state as HeartbeatState);
+      }
       if (spec.renderHeader) {
         const view = services.render.forTheme(theme);
         renderHeaderLine({
@@ -288,6 +296,7 @@ export function createToolRenderer<TState extends object = Record<string, unknow
       // the resource — the renderer owns it.
       if (status !== "pending") {
         spec.onSettled?.(ctx);
+        clearHeartbeat(ctx.state as HeartbeatState);
       }
 
       if (status === "error") {

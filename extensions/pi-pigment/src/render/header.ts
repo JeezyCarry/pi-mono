@@ -39,6 +39,20 @@ export function resultLine(...segments: Array<string | undefined>): string {
 }
 
 /**
+ * The header status slot: a `· <mark>` cell trailing the body, or ""
+ * when there is no mark. One home for the slot's grammar — the pending
+ * heartbeat, the settled `✓`, and the `✗ exit N` badge all ride it, so
+ * the separator never drifts between call sites.
+ *
+ * @param theme - The pi theme (the muted slot).
+ * @param mark - The styled status mark (already themed; "" = no slot).
+ * @returns The slotted cell, or "".
+ */
+export function statusCell(theme: Pick<RenderTheme, "fg">, mark: string): string {
+  return mark ? ` ${theme.fg("muted", "·")} ${mark}` : "";
+}
+
+/**
  * Prefix decorated tool names with the arrow marker pi uses for mutations.
  *
  * @param name - The tool name.

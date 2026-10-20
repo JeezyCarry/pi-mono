@@ -36,19 +36,19 @@ const allGates: Array<{ name: string; record: DecisionRecordEntry }> = [
   { name: "cacheHit", record: DecisionRecord.cacheHit(base, { kind: "allow" }) },
   {
     name: "model",
-    record: DecisionRecord.model(
+    record: DecisionRecord.model({
       base,
-      "anthropic/test",
-      3,
-      {
+      modelId: "anthropic/test",
+      strippedCount: 3,
+      reviewOutcome: {
         verdict: { kind: "deny", reason: "unsafe" },
         latencyMs: 42,
         deferKind: undefined,
         riskLevel: "high",
         rawReply: '{"verdict":"deny"}',
       },
-      "ctxh1",
-    ),
+      contextHash: "ctxh1",
+    }),
   },
 ];
 
@@ -141,137 +141,154 @@ describe("DecisionRecord — per-gate shape", () => {
 
   it("model attaches rawReply for any defer path that has one", () => {
     // no-json → rawReply attached
-    const noJson = DecisionRecord.model(
+    const noJson = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "no-json",
         rawReply: "garbage",
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(noJson.gate).toBe("model");
     expect(noJson.modelCalled).toBe(true);
     expect(noJson.rawReply).toBe("garbage");
 
     // invalid-verdict-value (JSON parsed but verdict illegal) → rawReply attached
-    const invalid = DecisionRecord.model(
+    const invalid = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "invalid-verdict-value",
         rawReply: '{"verdict":"maybe"}',
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(invalid.rawReply).toBe('{"verdict":"maybe"}');
 
     // clean verdict → rawReply is a sentinel (NOT null, to distinguish from
     // the throw-based absence) — the parsed JSON is already in structured fields
-    const clean = DecisionRecord.model(
+    const clean = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "allow" },
         latencyMs: 10,
         rawReply: '{"verdict":"allow"}',
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(clean.rawReply).toBe("(clean verdict, rawReply omitted)");
     expect(clean.riskLevel).toBe(null);
     expect(clean.deferKind).toBe(null);
 
     // clean deny → same sentinel as clean allow, but the deny reason is
     // persisted in the structured `reason` field
-    const cleanDeny = DecisionRecord.model(
+    const cleanDeny = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "deny", reason: "unsafe" },
         latencyMs: 10,
         rawReply: '{"verdict":"deny"}',
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(cleanDeny.rawReply).toBe("(clean verdict, rawReply omitted)");
     expect(cleanDeny.reason).toBe("unsafe");
 
     // empty-reply outcome carries diagnostics → persisted (null when absent)
-    const withDiagnostic = DecisionRecord.model(
+    const withDiagnostic = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "empty-reply",
         diagnostic: {
+          kind: "empty-reply",
           stopReason: "end_turn",
           rawStopReason: "end_turn",
           contentTypes: [],
           errorMessage: null,
         },
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(withDiagnostic.diagnostic).toEqual({
+      kind: "empty-reply",
       stopReason: "end_turn",
       rawStopReason: "end_turn",
       contentTypes: [],
       errorMessage: null,
     });
-    const withoutDiagnostic = DecisionRecord.model(
+    const callError = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
+        verdict: { kind: "defer" },
+        latencyMs: 10,
+        deferKind: "call-failed",
+        diagnostic: { kind: "call-error", errorClass: "TypeError" },
+      },
+      contextHash: "ctxh1",
+    });
+    // A thrown call carries no reply: the log names the error class so an
+    // operator can tell a broken reviewer from an uncertain one.
+    expect(callError.diagnostic).toEqual({ kind: "call-error", errorClass: "TypeError" });
+    const withoutDiagnostic = DecisionRecord.model({
+      base,
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "timeout",
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(withoutDiagnostic.diagnostic).toBeNull();
 
     // throw-based defer (timeout) → no rawReply on outcome → null (genuine
     // absence, distinct from the clean-verdict sentinel)
-    const timeout = DecisionRecord.model(
+    const timeout = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "timeout",
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(timeout.rawReply).toBe(null);
 
     // model-defer → explanation is persisted for audit alongside its
     // classification; raw reply remains available for debugging.
-    const modelDefer = DecisionRecord.model(
+    const modelDefer = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "model-defer",
         deferReason: "The target is not specific enough.",
         rawReply: '{"verdict":"defer"}',
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(modelDefer.reason).toBe("The target is not specific enough.");
     expect(modelDefer.rawReply).toBe('{"verdict":"defer"}');
   });
@@ -281,13 +298,18 @@ describe("DecisionRecord — per-gate shape", () => {
     // log line (ADR 0010 bounds what the logs accumulate). Mid-truncation keeps
     // the tail, so a defer stays replayable.
     const huge = `{"verdict":"defer"}${"x".repeat(50_000)}`;
-    const bounded = DecisionRecord.model(
+    const bounded = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      { verdict: { kind: "defer" }, latencyMs: 10, deferKind: "no-json", rawReply: huge },
-      "ctxh1",
-    );
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
+        verdict: { kind: "defer" },
+        latencyMs: 10,
+        deferKind: "no-json",
+        rawReply: huge,
+      },
+      contextHash: "ctxh1",
+    });
     const recorded = String(bounded.rawReply);
     // The documented bound, as a literal: the changeset and the README promise
     // "2000 characters", so a constant change has to break this test and force
@@ -296,34 +318,34 @@ describe("DecisionRecord — per-gate shape", () => {
     expect(recorded).toContain("[...truncated...]");
 
     // A reply inside the bound is untouched.
-    const short = DecisionRecord.model(
+    const short = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      2,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "no-json",
         rawReply: "garbage",
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(short.rawReply).toBe("garbage");
   });
 
   it("model passes through riskLevel + latencyMs + strippedCount", () => {
-    const r = DecisionRecord.model(
+    const r = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      5,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 5,
+      reviewOutcome: {
         verdict: { kind: "deny", reason: "unsafe" },
         latencyMs: 250,
         deferKind: undefined,
         riskLevel: "critical",
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(r.latencyMs).toBe(250);
     expect(r.strippedCount).toBe(5);
     expect(r.riskLevel).toBe("critical");
@@ -332,56 +354,86 @@ describe("DecisionRecord — per-gate shape", () => {
     expect(r.deferKind).toBe(null); // undefined → null
   });
 
-  it("model records the authorization anchor when the outcome carries one", () => {
-    const anchored = DecisionRecord.model(
+  it("model records the authorization anchor beside the outcome", () => {
+    const anchored = DecisionRecord.model({
       base,
-      "typesafe/jev-1.13",
-      5,
-      {
+      modelId: "typesafe/jev-1.13",
+      strippedCount: 5,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 250,
         deferKind: "model-defer",
-        anchorText: "run the failing test",
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+      deferReplySanitized: undefined,
+      anchorText: "run the failing test",
+    });
     expect(anchored.anchorText).toBe("run the failing test");
-    const bare = DecisionRecord.model(
+    const bare = DecisionRecord.model({
       base,
-      "typesafe/jev-1.13",
-      5,
-      { verdict: { kind: "allow" }, latencyMs: 250 },
-      "ctxh1",
-    );
+      modelId: "typesafe/jev-1.13",
+      strippedCount: 5,
+      reviewOutcome: { verdict: { kind: "allow" }, latencyMs: 250 },
+      contextHash: "ctxh1",
+    });
     expect(bare.anchorText).toBe(null);
   });
 
-  it("model omits reason for allow and defer-without-explanation verdicts", () => {
-    const allow = DecisionRecord.model(
+  it("model records token usage and cost when the outcome carries it", () => {
+    // The classifier backend prices usage from the catalog; the record is
+    // the one place that cost stays visible without parsing rawReply.
+    const usage = {
+      input: 100,
+      output: 20,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 120,
+      cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
+    };
+    const withUsage = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      1,
-      {
+      modelId: "typesafe/jev-1.13",
+      strippedCount: 5,
+      reviewOutcome: { verdict: { kind: "allow" }, latencyMs: 250, usage },
+      contextHash: "ctxh1",
+    });
+    expect(withUsage.usage).toEqual(usage);
+    const bare = DecisionRecord.model({
+      base,
+      modelId: "typesafe/jev-1.13",
+      strippedCount: 5,
+      reviewOutcome: { verdict: { kind: "allow" }, latencyMs: 250 },
+      contextHash: "ctxh1",
+    });
+    expect(bare.usage).toBe(null);
+  });
+
+  it("model omits reason for allow and defer-without-explanation verdicts", () => {
+    const allow = DecisionRecord.model({
+      base,
+      modelId: "anthropic/haiku",
+      strippedCount: 1,
+      reviewOutcome: {
         verdict: { kind: "allow" },
         latencyMs: 10,
         rawReply: '{"verdict":"allow"}',
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(allow.reason).toBeUndefined();
 
-    const defer = DecisionRecord.model(
+    const defer = DecisionRecord.model({
       base,
-      "anthropic/haiku",
-      1,
-      {
+      modelId: "anthropic/haiku",
+      strippedCount: 1,
+      reviewOutcome: {
         verdict: { kind: "defer" },
         latencyMs: 10,
         deferKind: "no-json",
         rawReply: "garbage",
       },
-      "ctxh1",
-    );
+      contextHash: "ctxh1",
+    });
     expect(defer.reason).toBeUndefined();
   });
 });
@@ -408,19 +460,19 @@ describe("DecisionRecord — debug helpers", () => {
 
 describe("DecisionRecord.model — contextHash", () => {
   it("records the trusted-intent context fingerprint on the model gate", () => {
-    const record = DecisionRecord.model(
+    const record = DecisionRecord.model({
       base,
-      "anthropic/test",
-      2,
-      {
+      modelId: "anthropic/test",
+      strippedCount: 2,
+      reviewOutcome: {
         verdict: { kind: "allow" },
         latencyMs: 5,
         deferKind: undefined,
         riskLevel: "low",
         rawReply: undefined,
       },
-      "ab12cd",
-    );
+      contextHash: "ab12cd",
+    });
     expect(record.contextHash).toBe("ab12cd");
   });
 

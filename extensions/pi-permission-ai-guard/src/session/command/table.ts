@@ -4,6 +4,8 @@
  * traverse the one table — adding a verb is one entry, not a set of
  * hand-built touch points.
  */
+import type { AutocompleteItem } from "@earendil-works/pi-tui";
+
 import type { AiGuardUiContext } from "./ui-context.ts";
 
 /** The lower-to-upper boundary in a camelCase name (`maxRetries` → `max-Retries`). */
@@ -30,14 +32,9 @@ export interface CommandEntry {
   /** The settings-menu rows this entry contributes (none = not menu-reachable). */
   readonly menuRows?: () => MenuRow[];
   /** Second-token completion for the entry's argument grammar, if any. */
-  readonly completeArgument?: (prefix: string) => CompletionItem[];
+  readonly completeArgument?: (prefix: string) => AutocompleteItem[];
   /** Dispatch: the tokens that follow the entry's name. */
   readonly run: (args: readonly string[], ctx: AiGuardUiContext) => void | Promise<void>;
-}
-/** A completion suggestion — one row of the command's argument completion. */
-export interface CompletionItem {
-  readonly value: string;
-  readonly label: string;
 }
 /** One option in a setting's picker: an enum value, or the reset action. */
 export type SettingOption = {

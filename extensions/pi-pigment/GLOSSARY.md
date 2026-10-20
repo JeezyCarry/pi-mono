@@ -124,6 +124,10 @@ The diff-color override inputs — per side a `text` (line color) and a `tint` (
 **Enforcement boundary**:
 Colors pi-pigment supplies are contrast-enforced; colors the user sets render verbatim.
 
+**AA policy**:
+The generation-time pairing table in `aa-policy.ts`: each enforced token's pi surfaces, and its tier — `body` (4.5, pi's own runtime gate), `secondary` (a 3:1 floor, with the author's emphasis step kept above it), `indicator` (3:1, non-text). The converter supplies the theme's resolved surfaces and reports what the policy flags.
+_Avoid_: AA check (that is the render-time enforcement)
+
 ### Rendering pipeline
 
 **Grep block merge**:

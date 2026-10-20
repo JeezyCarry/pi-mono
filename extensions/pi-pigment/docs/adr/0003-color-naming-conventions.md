@@ -57,6 +57,8 @@ The passthrough is **always tint semantics** (its values come from VS Code's tin
 
 Residual fidelity notes, accepted deliberately: authors whose line:word ratio differs from 2:1 (catppuccin's 4:3) get our ladder anchored at their word value — family consistency wins; the diff **foreground** stays pi's `toolDiffAdded`/`toolDiffRemoved` (VS Code defines no diff fg, and deriving fg from a tint hue is cleverness without user intent).
 
+> **ADR 0006 supersession (diff foreground)**: the runtime model behind the residual note — the diff foreground read from the pi theme's `toolDiff*` slots while the tint drove backgrounds only — was replaced by the generation-time conversion, where each theme's `diffEditor.*TextBackground` tint is projected onto the registered pi theme's `toolDiff*` slots. The projection drops the tint's alpha and keeps its RGB, and applies only where the theme declares no explicit diff text. The note's "cleverness without user intent" objection to that derivation was overruled by ADR 0006's decision.
+
 **Validation.** The config schema widens hex validation **only for root keys** (`isRootHex`, the single home in palette.ts: `text` takes the opaque forms `#rrggbb`/`#rgb`, `tint` the alpha-carrying forms `#rrggbbaa`/`#rgba`; parsing and shorthand expansion are TinyColor's, through `parseHexForm`) — the semantic `colors` keys keep the opaque 6-digit form (`isOpaqueHex6`; a translucent syntax color is meaningless). Theme files' `diff` keys validate through the same slot predicate: unknown keys produce an issue. The polarity-contradiction warning judges the **composited** word-level color (not the raw tint), so translucent roots cannot produce false warnings.
 
 ### Internal layer — one grammar (DiffPalette)

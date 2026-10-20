@@ -245,8 +245,9 @@ export async function expectVerdict(
 /**
  * Default registry with model + auth resolved.
  *
- * @param overrides - Optional `find`/`getApiKeyAndHeaders` overrides for
- *   failure-path fixtures (unresolved model, auth errors, throws).
+ * @param overrides - Optional `find`/`getApiKeyAndHeaders`/`classify`/
+ *   `findOfType` overrides for failure-path fixtures (unresolved model,
+ *   auth errors, throws, catalog misses).
  * @returns A model registry stub.
  */
 export const defaultRegistry = (
@@ -262,6 +263,10 @@ export const defaultRegistry = (
   streamSimple: () => {
     throw new Error("unreachable in unit tests");
   },
+  classify: () => {
+    throw new Error("unreachable in unit tests");
+  },
+  findOfType: () => undefined,
   find: () => fakeModel,
   getApiKeyAndHeaders: async () => ({ ok: true as const, apiKey: "k" }),
   ...overrides,

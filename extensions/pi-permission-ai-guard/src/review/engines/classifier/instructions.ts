@@ -1,8 +1,7 @@
-import type { JsonValue } from "@typesafe-ai/sdk";
+import type { JsonValue } from "@earendil-works/pi-ai";
 
 import type { ClassifierQuestionId } from "#src/config/config-schema.ts";
 
-/** An instruction overlay value: string, JSON object, or array (SDK EntryType minus null). */
 type ClassifierInstructionValue = string | { [key: string]: JsonValue } | JsonValue[];
 
 /**
@@ -21,7 +20,10 @@ export type ClassifierOverlay = {
   questions?: Partial<Record<ClassifierQuestionId, ClassifierInstructionValue>>;
 };
 
-/** A question's instructions as the SDK takes them: text alone, or text plus structured context. */
+/**
+ * A question's instructions as the overlay carries them: text alone, or text plus structured
+ * context.
+ */
 export type ClassifierQuestionEntry =
   | string
   | { question: string; context: ClassifierInstructionValue };

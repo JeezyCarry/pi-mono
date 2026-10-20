@@ -1,11 +1,21 @@
-import type { ReviewOutcome, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
+import type { ClassifierAnswer } from "@earendil-works/pi-ai";
+
+import { MODEL_DEFER_KIND } from "#src/model/machinery-kinds.ts";
+import type { ReviewOutcome, RiskLevel } from "#src/model/model-verdict.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
+import {
+  classifierCostlyReason,
+  classifierDangerCriteria,
+  classifierDangerNote,
+  classifierIntentGapReason,
+  classifierUncertainReason,
+} from "#src/review/verdict-copy.ts";
 import { underscoresToWords } from "#src/utils.ts";
 
 import { DANGER_NONE, RISK_RUBRIC } from "./questions.ts";
 
 /**
- * The built-in answers as 0–1 probabilities/confidences: `noul` arrives
+ * The built-in answers as 0–1 probabilities/confidences: `bool` arrives
  * as a probability already, the 0–4 `score` is normalized by
  * {@link projectClassifierAnswers}, so every answer speaks one scale.
  */
@@ -23,17 +33,8 @@ export interface ClassifierThresholds {
   confidenceThreshold: number;
 }
 
-/** One raw SDK answer (the per-question shape the SDK returns). */
-interface TypesafeRawAnswer {
-  type: string;
-  noul?: number;
-  choice?: string;
-  confidence?: number;
-  score?: number;
-}
-
 /**
- * Thrown when a System One response is missing a required reading.
+ * Thrown when a classifier response is missing a required reading.
  * The adapter's catch routes it to a machinery defer (never allow) —
  * a reviewer that did not answer is broken, not uncertain.
  */
@@ -45,37 +46,35 @@ export class IncompleteClassifierResponseError extends Error {
 }
 
 /**
- * Project the SDK's typed answers into {@link ClassifierAnswers} — the single
+ * Project pi-ai's typed answers into {@link ClassifierAnswers} — the single
  * 0–4 → 0–1 scale-conversion point.
  *
  * Readings are required: `danger_category` / `intent_match` / `risk` must
- * be present with their reading fields (choice / noul / score). A missing
+ * be present with their reading fields (choice / bool / score). A missing
  * reading throws {@link IncompleteClassifierResponseError} — "never answered"
  * is a malformed response, not a zero reading. Confidence is optional:
  * missing confidence reads as 0 (uncertain), the model's own defer path.
  *
- * @param raw - The SDK's typed answers by question id.
+ * @param raw - Pi-ai's typed answers by question id.
  * @returns The calibrated 0–1 answers.
  */
-export function projectClassifierAnswers(
-  raw: Record<string, TypesafeRawAnswer>,
-): ClassifierAnswers {
+export function projectClassifierAnswers(raw: Record<string, ClassifierAnswer>): ClassifierAnswers {
   const danger = raw.danger_category;
-  if (danger?.choice === undefined) {
+  if (danger?.type !== "choice" || danger.choice === undefined) {
     throw new IncompleteClassifierResponseError("danger_category.choice");
   }
   const intent = raw.intent_match;
-  if (intent?.noul === undefined) {
-    throw new IncompleteClassifierResponseError("intent_match.noul");
+  if (intent?.type !== "bool" || intent.probability === undefined) {
+    throw new IncompleteClassifierResponseError("intent_match.probability");
   }
   const risk = raw.risk;
-  if (risk?.score === undefined) {
+  if (risk?.type !== "score" || risk.score === undefined) {
     throw new IncompleteClassifierResponseError("risk.score");
   }
   return {
     dangerCategory: danger.choice,
     dangerConfidence: danger.confidence ?? 0,
-    intentMatch: intent.noul,
+    intentMatch: intent.probability,
     // The score is the probability-weighted level index, so its range is the
     // rubric's own level count minus one (TypeSafe requires at least two
     // levels). Derive the divisor rather than hard-coding it: a hard-coded 4
@@ -86,8 +85,10 @@ export function projectClassifierAnswers(
 }
 
 /**
- * Danger category → audit risk tier. Every DENY-Always deny is critical;
+ * Danger category → audit risk tier. Every hard deny reads critical;
  * unlisted categories fall back to high (an unknown danger is never soft).
+ * Confirm-defers carry the tier too: the label grades the model's reading,
+ * not the verdict the link reached.
  */
 const DANGER_TIER: Readonly<Record<string, RiskLevel>> = {
   secrets_credentials: "critical",
@@ -119,12 +120,9 @@ const DANGER_TIER: Readonly<Record<string, RiskLevel>> = {
  * Anchor k lands in band k, so the top band holds the last two anchors — four
  * bands and five anchors cannot line up one-to-one.
  *
- * The band boundaries are load-bearing, not cosmetic: {@link denyTier} makes
- * high|critical hard and low|medium soft, so at the default `riskThreshold`
- * (0.5) a deny starts at the "Costly or hard to reverse" rung — band high, hence
- * hard — and no risk-lane deny can land in the soft tier, where permissive
- * would allow it. Lowering the threshold below 0.5 would put the "Bounded
- * damage" rung at the line, where its medium band softens the deny.
+ * The band boundaries are load-bearing: {@link denyTier} makes high|critical
+ * hard and low|medium soft, so at the default 0.5 line no risk-lane deny can
+ * land in the soft tier, where permissive would allow it.
  *
  * @param riskScore - The normalized 0–1 risk score.
  * @returns The audit tier.
@@ -137,41 +135,32 @@ export function riskLevelFromScore(riskScore: number): RiskLevel {
 }
 
 /**
- * The reviewer's directional inclination on an unresolved verdict: which
- * way it would decide if forced. Only the danger direction counts —
- * a risk score at or above the deny line leans deny (evidence of danger
- * never leans allow); a pure intent gap with trusted readings leans
- * allow (the screen is clean, only the authorization link is unclear);
- * anything else is neutral (an untrusted reading has no direction).
- * Never surfaced to the human (anti-anchoring invariant).
- *
- * @param answers - The calibrated answers.
- * @param thresholds - The intent/risk/confidence thresholds.
- * @param confident - Whether both confidences clear the floor (false on
- *   the low-confidence defer branch — an untrusted reading leans nothing).
- * @returns The lean, or undefined for neutral.
+ * Which danger row a hit lands on: `confirm` (confident hit the anchor
+ * covers — the operator rules on it), `hard` (confident hit nobody asked
+ * for — terminal), or `unsure` (the model could not establish the hit —
+ * the operator settles it). Classify never allows a danger hit: a
+ * confirmation is settled by a human.
  */
-function deriveLean(
-  answers: ClassifierAnswers,
-  thresholds: ClassifierThresholds,
-  confident: boolean,
-): VerdictLean | undefined {
-  if (answers.riskScore >= thresholds.riskThreshold) return "deny";
-  if (confident && answers.intentMatch < thresholds.intentThreshold) return "allow";
-  return undefined;
-}
+type DangerRow = "confirm" | "hard" | "unsure";
 
 /**
- * Synthesize a {@link ReviewOutcome} from calibrated answers, top-down:
- * danger hit → deny (before the confidence check — a danger hit must stay
- * decisive, otherwise it would project to a neutral defer the permissive
- * mode auto-allows); below-threshold confidence → defer;
- * intent + risk below the deny line → allow;
- * otherwise the DENY-Unless lane — a risk score at or above the deny line
- * denies, labeled by the fixed quartile bands ({@link riskLevelFromScore}).
- * The tier follows the label through denyTier: at the default threshold
- * (0.5) every risk-lane deny reads high/critical and blocks in every mode;
- * a lower threshold reopens a soften-able low/medium band.
+ * Synthesize a {@link ReviewOutcome} from calibrated answers: a danger hit
+ * nobody asked for → hard deny; an authorized or unsure hit → confirm-defer
+ * (deny lean, so `defer-danger` asks in default/lenient, denies in strict,
+ * and allows in permissive); low
+ * confidence → defer; intent plus risk below the deny line → allow; risk at
+ * or above the line → deny when unauthorized, confirm-defer when authorized.
+ * The tier is a fixed audit label ({@link riskLevelFromScore}), so it never
+ * moves with `riskThreshold` — at the default 0.5 every risk-lane deny reads
+ * high/critical and blocks in every mode. The lean is the reviewer's
+ * directional inclination on an unresolved verdict (which way it would decide
+ * if forced); it is never surfaced to the human (anti-anchoring invariant).
+ *
+ * Every reading is compared against its threshold exactly once up front,
+ * named for the decision it drives (readings are assumed finite per the wire
+ * contract — {@link projectClassifierAnswers} validates presence, not
+ * finiteness, so a non-finite reading is outside the contract and its
+ * behavior is not guaranteed).
  *
  * @param answers - The calibrated answers.
  * @param thresholds - The intent/risk/confidence thresholds.
@@ -183,54 +172,81 @@ export function synthesizeClassifierVerdict(
   thresholds: ClassifierThresholds,
   latencyMs: number,
 ): ReviewOutcome {
+  const authorized = answers.intentMatch >= thresholds.intentThreshold;
+  const overRiskLine = answers.riskScore >= thresholds.riskThreshold;
+  const dangerTrusted = answers.dangerConfidence >= thresholds.confidenceThreshold;
+
   if (answers.dangerCategory !== DANGER_NONE) {
-    return {
-      verdict: {
-        kind: "deny",
-        reason: `matched a safety rule: ${underscoresToWords(answers.dangerCategory)}`,
-      },
-      latencyMs,
-      riskLevel: DANGER_TIER[answers.dangerCategory] ?? "high",
-    };
-  }
-  const minConfidence = Math.min(answers.dangerConfidence, answers.riskConfidence);
-  if (minConfidence < thresholds.confidenceThreshold) {
+    const criteria = classifierDangerCriteria(underscoresToWords(answers.dangerCategory));
+    const riskLevel = DANGER_TIER[answers.dangerCategory] ?? "high";
+    const row: DangerRow = !dangerTrusted ? "unsure" : authorized ? "confirm" : "hard";
+    if (row === "hard") {
+      return { verdict: { kind: "deny", reason: criteria }, latencyMs, riskLevel };
+    }
     return {
       verdict: { kind: "defer" },
-      deferKind: "model-defer",
-      // The ternary names the reading that fell short; the ask is the same either
-      // way, because what the lanes share is the shape, not the words.
-      deferReason:
-        answers.dangerConfidence <= answers.riskConfidence
-          ? "could not tell whether this is dangerous (is it safe to run?)"
-          : "could not judge how much damage this could do (is it safe to run?)",
-      lean: deriveLean(answers, thresholds, false),
+      deferKind: MODEL_DEFER_KIND,
+      deferReason: `${criteria} (${classifierDangerNote(dangerTrusted)})`,
+      lean: "deny",
       latencyMs,
+      riskLevel,
+    };
+  }
+  // Every exit below carries the label: the log reader grades risk against
+  // the model's reading, not the verdict the link reached.
+  const riskLevel = riskLevelFromScore(answers.riskScore);
+
+  // The danger rows grade only the danger reading; the intent/risk lanes
+  // need both readings trusted.
+  const readingsTrusted = dangerTrusted && answers.riskConfidence >= thresholds.confidenceThreshold;
+
+  if (!readingsTrusted) {
+    return {
+      verdict: { kind: "defer" },
+      deferKind: MODEL_DEFER_KIND,
+      // The flag names the reading that fell short; the ask is one shape.
+      deferReason: classifierUncertainReason(answers.dangerConfidence <= answers.riskConfidence),
+      // An untrusted reading leans nothing — except evidence of danger,
+      // which never leans allow.
+      lean: overRiskLine ? "deny" : undefined,
+      latencyMs,
+      riskLevel,
     };
   }
   // Allow needs both: the anchor authorizes it AND risk stays below the
   // deny line.
-  if (
-    answers.intentMatch >= thresholds.intentThreshold &&
-    answers.riskScore < thresholds.riskThreshold
-  ) {
-    return { verdict: { kind: "allow" }, latencyMs };
+  if (authorized && !overRiskLine) {
+    return { verdict: { kind: "allow" }, latencyMs, riskLevel };
   }
-  if (answers.riskScore >= thresholds.riskThreshold) {
+  if (overRiskLine) {
+    // Authorized but costly: the anchor's own request is the reason this is
+    // not the generic deny — the operator confirms the price. Unauthorized
+    // stays a generic deny (no category to name).
+    if (authorized) {
+      return {
+        verdict: { kind: "defer" },
+        deferKind: MODEL_DEFER_KIND,
+        deferReason: classifierCostlyReason(),
+        lean: "deny",
+        latencyMs,
+        riskLevel,
+      };
+    }
     return {
       verdict: { kind: "deny", reason: GENERIC_DENY_REASON },
       latencyMs,
-      riskLevel: riskLevelFromScore(answers.riskScore),
+      riskLevel,
     };
   }
-  // Only intent can still fall short here (risk at or above the line already denied above).
+  // Only intent can still fall short here: this exit is trusted, risk is
+  // below the line, and the allow gate above already failed — so the lean
+  // is unconditionally allow.
   return {
     verdict: { kind: "defer" },
-    deferKind: "model-defer",
-    // Deliberately not byte-equal to the chat lane's example: a lane-spanning
-    // constant is how one content-free line reached the operator from both engines.
-    deferReason: "could not tie this action to your request (did you ask for it?)",
-    lean: deriveLean(answers, thresholds, true),
+    deferKind: MODEL_DEFER_KIND,
+    deferReason: classifierIntentGapReason(),
+    lean: "allow",
     latencyMs,
+    riskLevel,
   };
 }

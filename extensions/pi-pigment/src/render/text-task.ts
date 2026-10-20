@@ -39,8 +39,13 @@ export interface PreviewTask {
    * used to prevent, folded into the protocol's single home).
    */
   identity: string;
-  /** Text shown synchronously while the async render is in flight. */
-  placeholder: string;
+  /**
+   * Text shown synchronously while the async render is in flight. A
+   * function form receives the host's last committed width (undefined
+   * before the first commit) and must cut at it — a re-armed frame then
+   * re-cuts nothing, only its live cell changes.
+   */
+  placeholder: string | ((lastWidth: number | undefined) => string);
   /** Text shown when the async render fails. */
   fallback: string;
   /** Asks the TUI to redraw this component. */
@@ -93,6 +98,13 @@ export interface PreviewTextHost extends Component {
   /** The scheduled preview task driving this component. */
   previewTask?: PreviewTask;
   /**
+   * The width the last preview render committed at — the protocol's own
+   * memory, written on commit and handed to a function placeholder so a
+   * re-armed frame cuts where the screen already shows. Cleared with the
+   * rest of the protocol state.
+   */
+  previewLastWidth?: number;
+  /**
    * The attached task's width-neutral identity — the attach guard's
    * stamp (same inputs → no placeholder write, no redraw, no restart).
    * Declared and consumed here (the protocol's own compare; the old
@@ -138,6 +150,7 @@ export function clearPreviewTask(text: PreviewTextHost): void {
   text.previewIdentity = undefined;
   text.previewRenderedKey = undefined;
   text.previewRender = undefined;
+  text.previewLastWidth = undefined;
 }
 
 /**
@@ -159,7 +172,11 @@ export function attachPreviewTask(text: PreviewTextHost, task: PreviewTask): voi
   text.previewIdentity = task.identity;
   text.previewRenderedKey = undefined;
   text.previewRender = undefined;
-  text.setText(task.placeholder);
+  text.setText(
+    typeof task.placeholder === "function"
+      ? task.placeholder(text.previewLastWidth)
+      : task.placeholder,
+  );
 }
 
 /**
@@ -168,7 +185,11 @@ export function attachPreviewTask(text: PreviewTextHost, task: PreviewTask): voi
  * - `{ identity }` — the precomputed form: every renderer composes its key through a NAMED builder
  *   (outputTaskKey for grep/find/ls, errorFrameKey / diffPreviewKey / newFileKey / headerLineKey
  *   for the diff-class previews) and hands over the string — the stamp lists and their sentinels
- *   live in those builders, never hand-copied at a call site;
+ *   live in those builders, never hand-copied at a call site. Product code never touches
+ *   `definePreviewTask` directly: every preview kind enters through its named attach helper
+ *   (setDiffPreviewTask, setNewFilePreviewTask, assembleOutputBody, renderHeaderLine, the factory's
+ *   error frame) — the builder and the render closure then stay authored side by side, so what a
+ *   frame depends on lands next to the render that reads it;
  * - `{ prefix, stamps }` — the derived form: `taskKeyOf` joins them into the identity. The low-level
  *   form the builders themselves land on, kept here for ad-hoc keys (tests); a call site listing
  *   raw stamps must justify why no named builder covers it.
@@ -194,8 +215,12 @@ export type DefinePreviewTaskSpec = PreviewIdentity & {
    *   no width-dependent layout).
    */
   widthAware: boolean;
-  /** Text shown synchronously while the async render is in flight. */
-  placeholder: string;
+  /**
+   * Text shown synchronously while the async render is in flight; the
+   * function form receives the host's last committed width (see
+   * PreviewTask.placeholder).
+   */
+  placeholder: string | ((lastWidth: number | undefined) => string);
   /** Text shown when the async render fails. */
   fallback: string;
   /** Asks the TUI to redraw this component. */
@@ -495,6 +520,10 @@ async function drainPreview(text: PreviewTextHost): Promise<void> {
     }
     queue.inFlight = false;
     if (text.previewRenderedKey === key) {
+      // The commit records its width: a later re-armed placeholder must
+      // cut exactly where the screen already is, or a frame flip shifts
+      // the middle-cut.
+      text.previewLastWidth = width;
       text.setText(rendered);
       task.invalidate();
     }

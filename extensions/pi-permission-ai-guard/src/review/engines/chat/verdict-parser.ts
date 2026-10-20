@@ -16,6 +16,7 @@
 
 import { parseJsonWithRepair } from "@earendil-works/pi-ai";
 
+import { MODEL_DEFER_KIND } from "#src/model/machinery-kinds.ts";
 import type {
   ReviewOutcome,
   RiskLevel,
@@ -285,7 +286,7 @@ export function parseVerdictObject(
   if (verdict === "defer") {
     return {
       verdict: { kind: "defer" },
-      deferKind: "model-defer",
+      deferKind: MODEL_DEFER_KIND,
       deferReason: normalizeReason(args.reason),
       lean: parseLean(args.lean),
       latencyMs,

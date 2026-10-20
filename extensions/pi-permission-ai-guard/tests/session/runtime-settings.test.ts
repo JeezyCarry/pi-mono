@@ -16,6 +16,7 @@ import type { SessionOverrides } from "#src/config/session-overrides.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import type { BreakerTier } from "#src/review/circuit-breaker.ts";
 import type { DenyRecord } from "#src/review/review-pipeline.ts";
+import type { DialogTui } from "#src/session/record-detail.ts";
 import {
   type EnumSettingSpec,
   type RuntimeSettings,
@@ -138,7 +139,7 @@ function buildDialog(
   matches: (data: string, action: string) => boolean = () => false,
 ): { render(width: number): string[] } {
   const factory = custom.mock.calls[0]![0] as (
-    tui: { requestRender(): void },
+    tui: DialogTui,
     theme: {
       fg(kind: string, text: string): string;
       bg(kind: string, text: string): string;
@@ -653,6 +654,24 @@ describe("RuntimeSettings — save to config layer actions", () => {
     await settings.command.handler("save-config global", ctx);
 
     expectNotified(notify, { level: "error", contains: ["not valid JSONC"] });
+  });
+
+  it("names a newly created file without nested parens", async () => {
+    const saveConfig = vi.fn<SaveConfigFn>(() => ({
+      path: "/cfg.json",
+      created: true,
+      changed: true,
+    }));
+    const { settings, notify } = makeSettings({}, { saveConfig });
+    const ctx = makeUiCtx();
+
+    await settings.command.handler("save-config global", ctx);
+
+    // Single paren pair: the created marker rides the path tail, never its own parens.
+    expectNotified(notify, {
+      level: "info",
+      contains: ["saved to global config (cfg.json, new file)"],
+    });
   });
 
   it("a no-override session saves the config's own value — no dead key shadows", async () => {

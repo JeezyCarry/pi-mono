@@ -1,6 +1,6 @@
 {
   "name": "pi-permission-ai-guard",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Token-optimized LLM permission reviewer — a pi-permission-system Authorizer chain link",
   "keywords": [
     "access-control",
@@ -46,7 +46,6 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@typesafe-ai/sdk": "^0.6.0",
     "jsonc-parser": "^3.3.1",
     "zod": "^4.6.5"
   },
@@ -62,10 +61,10 @@
     "vitest": "catalog:"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.86.0",
-    "@earendil-works/pi-coding-agent": ">=0.86.0",
-    "@earendil-works/pi-tui": ">=0.86.0",
-    "@gotgenes/pi-permission-system": ">=27.1.1 <41.0.0"
+    "@earendil-works/pi-ai": ">=1.0.0",
+    "@earendil-works/pi-coding-agent": ">=1.0.0",
+    "@earendil-works/pi-tui": ">=1.0.0",
+    "@gotgenes/pi-permission-system": ">=40.0.0 <41.0.0"
   },
   "engines": {
     "node": ">=22"

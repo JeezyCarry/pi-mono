@@ -73,6 +73,10 @@ function makeSeed(overrides: Partial<SessionSeed> = {}): SessionSeed {
       streamSimple: () => {
         throw new Error("unreachable in unit tests");
       },
+      classify: () => {
+        throw new Error("unreachable in unit tests");
+      },
+      findOfType: () => undefined,
       // The failing arm of the auth union needs its `error`; supplying it
       // keeps the stub assignable without a cast.
       getApiKeyAndHeaders: async () => ({ ok: false, error: "no key in this unit test" }),
@@ -300,10 +304,10 @@ describe("SessionLifecycle — session identity + registration guard", () => {
     expect(mocks.registerAuthorizer).toHaveBeenCalledTimes(2);
   });
 
-  it("a host below the streamSimple floor fails safe with an upgrade notice", () => {
+  it("a host whose registry violates the peer contract fails safe with an upgrade notice", () => {
     const { lifecycle } = makeLifecycle();
     const notify = vi.fn<ExtensionUIContext["notify"]>();
-    // Simulate pi < 0.86: the registry facade has no `streamSimple` (the
+    // A registry that violates the peer contract: no `streamSimple` (the
     // chat lane's only correct call path). Registration must fail safe at
     // session start, never register a guard that would defer every ask.
     const registry = {
@@ -317,10 +321,36 @@ describe("SessionLifecycle — session identity + registration guard", () => {
       }),
     );
     expect(mocks.registerAuthorizer).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalledWith(
-      expect.stringContaining("registry.streamSimple missing"),
-      "error",
+    const [message, level] = notify.mock.calls[0]!;
+    expect(level).toBe("error");
+    expect(String(message)).toContain("registry.streamSimple missing");
+    expect(String(message)).toMatch(OPERATOR_COPY_SHAPE);
+  });
+
+  it("a registry missing the classifier methods fails safe with a named notice", () => {
+    const { lifecycle } = makeLifecycle();
+    const notify = vi.fn<ExtensionUIContext["notify"]>();
+    // `streamSimple` present, classifier methods absent: pool assembly binds
+    // the classifier surface directly, so the contract check names the first
+    // missing method (`classify` precedes `findOfType` in the check order).
+    const registry = {
+      find: () => undefined,
+      getApiKeyAndHeaders: async () => ({ ok: false as const, error: "no key" }),
+      streamSimple: () => {
+        throw new Error("unreachable in unit tests");
+      },
+    };
+    lifecycle.onSessionStart(
+      makeSeed({
+        registry: registry as unknown as SessionSeed["registry"],
+        ctx: makeCtx(notify),
+      }),
     );
+    expect(mocks.registerAuthorizer).not.toHaveBeenCalled();
+    const [message, level] = notify.mock.calls[0]!;
+    expect(level).toBe("error");
+    expect(String(message)).toContain("registry.classify missing");
+    expect(String(message)).toMatch(OPERATOR_COPY_SHAPE);
   });
 });
 

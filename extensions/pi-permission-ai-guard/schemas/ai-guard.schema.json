@@ -4,31 +4,8 @@
   "type": "object",
   "properties": {
     "provider": {
-      "anyOf": [
-        {
-          "type": "string",
-          "minLength": 1
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "const": "typesafe"
-            },
-            "baseUrl": {
-              "type": "string",
-              "minLength": 1
-            },
-            "apiKey": {
-              "type": "string",
-              "minLength": 1
-            }
-          },
-          "required": ["type"],
-          "additionalProperties": false,
-          "description": "Direct TypeSafe connection (classifier reviewer). Both baseUrl and apiKey are optional: unset values fall back to TYPESAFE_BASE_URL / TYPESAFE_API_KEY, then the SDK built-in default URL."
-        }
-      ]
+      "type": "string",
+      "minLength": 1
     },
     "model": {
       "type": "string",
@@ -38,11 +15,11 @@
       "type": "string",
       "enum": ["chat", "classifier"],
       "default": "chat",
-      "description": "Registry model type (string providers only): chat is a Pi chat model, classifier is a Pi built-in classifier via modelRegistry.classify. Rejected on direct typesafe connections."
+      "description": "Registry model type: chat is a Pi chat model, classifier is a Pi built-in classifier via modelRegistry.classify."
     },
     "classifier": {
       "type": "object",
-      "description": "Classifier verdict thresholds, read on both classifier backends (direct and registry) — pure policy, no transport knobs.",
+      "description": "Classifier verdict thresholds — pure policy, no transport knobs.",
       "properties": {
         "intentThreshold": {
           "type": "number",
@@ -64,123 +41,44 @@
           "maximum": 1,
           "default": 0.5,
           "description": "Minimum answer confidence; below it the verdict defers."
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "maximum": 300000,
-          "description": "Accepted for backward compatibility but ignored — set the top-level timeoutMs instead."
         }
       },
       "additionalProperties": false
     },
-    "typesafe": {
-      "type": "object",
-      "description": "Deprecated alias of `classifier`; remove it. A file writing both keys is rejected. Thresholds still apply; `timeoutMs` is ignored.",
-      "properties": {
-        "intentThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Intent probability at or above which the anchor counts as authorizing the action."
-        },
-        "riskThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Risk score at or above which the action denies; the tier follows the fixed quartile bands. Raising it widens what auto-allows in every mode."
-        },
-        "confidenceThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Minimum answer confidence; below it the verdict defers."
-        },
-        "timeoutMs": {
-          "type": "integer",
-          "exclusiveMinimum": 0,
-          "maximum": 300000,
-          "description": "Accepted for backward compatibility but ignored — set the top-level timeoutMs instead."
-        }
-      },
-      "additionalProperties": false,
-      "deprecated": true
-    },
     "fallbacks": {
       "type": "array",
       "maxItems": 5,
-      "description": "Ordered backup reviewers in any lane (defaults to none). Chat-model entries use Pi registry provider/model ids; System One entries carry their own URL, key and model.",
+      "description": "Ordered backup reviewers (defaults to none). Entries use Pi registry provider/model ids; a classifier entry runs through modelRegistry.classify.",
       "items": {
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "provider": {
-                "type": "string",
-                "minLength": 1
-              },
-              "model": {
-                "type": "string",
-                "minLength": 1
-              },
-              "modelType": {
-                "type": "string",
-                "enum": ["chat", "classifier"],
-                "default": "chat"
-              },
-              "timeoutMs": {
-                "type": "integer",
-                "exclusiveMinimum": 0,
-                "maximum": 300000
-              },
-              "temperature": {
-                "type": "number",
-                "minimum": 0,
-                "maximum": 2,
-                "description": "Overrides the top-level temperature for this entry, which wins because a backup is a different model."
-              }
-            },
-            "required": ["provider", "model"],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "minLength": 1
           },
-          {
-            "type": "object",
-            "properties": {
-              "provider": {
-                "type": "object",
-                "properties": {
-                  "type": {
-                    "const": "typesafe"
-                  },
-                  "baseUrl": {
-                    "type": "string",
-                    "format": "uri"
-                  },
-                  "apiKey": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                },
-                "required": ["type", "baseUrl", "apiKey"],
-                "additionalProperties": false
-              },
-              "model": {
-                "type": "string",
-                "minLength": 1
-              },
-              "timeoutMs": {
-                "type": "integer",
-                "exclusiveMinimum": 0,
-                "maximum": 300000
-              }
-            },
-            "required": ["provider", "model"],
-            "additionalProperties": false
+          "model": {
+            "type": "string",
+            "minLength": 1
+          },
+          "modelType": {
+            "type": "string",
+            "enum": ["chat", "classifier"],
+            "default": "chat"
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 300000
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "description": "Overrides the top-level temperature for this entry, which wins because a backup is a different model."
           }
-        ]
+        },
+        "required": ["provider", "model"],
+        "additionalProperties": false
       }
     },
     "reasoning": {
@@ -205,7 +103,7 @@
       "type": "number",
       "minimum": 0,
       "maximum": 2,
-      "description": "Chat-lane sampling temperature. Unset leaves the field off the wire, so the provider default applies. 0 makes two reviews of one request agree; leave it unset for a model that rejects non-default sampling, such as an OpenAI reasoning model. Ignored in classifier mode."
+      "description": "Sampling temperature for both lanes. Unset leaves the field off the wire, so the provider default applies. 0 makes two reviews of one request agree; leave it unset for a model that rejects non-default sampling, such as an OpenAI reasoning model. Backends without a sampling knob ignore it (TypeSafe carries none)."
     },
     "mode": {
       "type": "string",

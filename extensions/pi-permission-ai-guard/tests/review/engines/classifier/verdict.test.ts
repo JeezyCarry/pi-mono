@@ -1,3 +1,4 @@
+import type { ClassifierAnswer } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 
 import { DANGER_NONE } from "#src/review/engines/classifier/questions.ts";
@@ -11,6 +12,14 @@ import type {
   ClassifierAnswers,
   ClassifierThresholds,
 } from "#src/review/engines/classifier/verdict.ts";
+import {
+  classifierCostlyReason,
+  classifierDangerCriteria,
+  classifierDangerNote,
+  classifierIntentGapReason,
+  classifierUncertainReason,
+} from "#src/review/verdict-copy.ts";
+import { denyTier } from "#src/review/verdict-rule.ts";
 
 const THRESHOLDS: ClassifierThresholds = {
   intentThreshold: 0.5,
@@ -42,32 +51,53 @@ describe("synthesizeClassifierVerdict", () => {
     expect(out.latencyMs).toBe(100);
   });
 
-  it("denies with the category reason on a confident danger hit", () => {
+  it("hard-denies an unauthorized confident danger hit, naming the category", () => {
+    // Matrix #3: nobody asked for it — terminal in every mode.
     const out = synthesizeClassifierVerdict(
-      confident({ dangerCategory: "credential_exfiltration" }),
+      confident({ dangerCategory: "credential_exfiltration", intentMatch: 0.2 }),
       THRESHOLDS,
       42,
     );
     expect(out.verdict).toEqual({
       kind: "deny",
-      reason: "matched a safety rule: credential exfiltration",
+      reason: "flagged credential exfiltration",
     });
     // Unknown categories fail safe to high.
     expect(out.riskLevel).toBe("high");
   });
 
-  it("denies a danger hit even when its confidence is below the floor", () => {
-    // A danger hit must never defer: a defer with deny-lean maps to allow
-    // in permissive mode (fail-open). Deny regardless of confidence.
+  it("confirms an authorized confident danger hit instead of denying it", () => {
+    // Matrix #2: the anchor names the action, so the operator rules on it —
+    // the classifier never allows a danger hit; a permissive allow comes from
+    // the mode's ladder, never the classifier's judgment.
+    const out = synthesizeClassifierVerdict(
+      confident({ dangerCategory: "credential_exfiltration" }),
+      THRESHOLDS,
+      42,
+    );
+    expect(out.verdict).toEqual({ kind: "defer" });
+    expect(out.deferKind).toBe("model-defer");
+    expect(out.lean).toBe("deny");
+    // The category leads, so the review log attributes the defer to its lane.
+    // Full literal: a nested inner paren around the ask must not come back.
+    expect(out.deferReason).toBe("flagged credential exfiltration (you requested this; proceed?)");
+    expect(out.riskLevel).toBe("high");
+  });
+
+  it("confirms a danger hit whose confidence is below the floor", () => {
+    // Matrix #1: the model could not establish the hit, so the operator
+    // settles it. The classifier holds no allow path on the danger rows; a
+    // permissive allow comes from the mode's ladder, never the classifier's
+    // judgment.
     const out = synthesizeClassifierVerdict(
       confident({ dangerCategory: "credential_exfiltration", dangerConfidence: 0.3 }),
       THRESHOLDS,
       7,
     );
-    expect(out.verdict).toEqual({
-      kind: "deny",
-      reason: "matched a safety rule: credential exfiltration",
-    });
+    expect(out.verdict).toEqual({ kind: "defer" });
+    expect(out.lean).toBe("deny");
+    // Full literal: the low-confidence note shares the single-paren shape.
+    expect(out.deferReason).toBe("flagged credential exfiltration (unsure this applies; proceed?)");
     expect(out.riskLevel).toBe("high");
   });
 
@@ -76,6 +106,50 @@ describe("synthesizeClassifierVerdict", () => {
     expect(out.verdict).toEqual({ kind: "defer" });
     expect(out.deferKind).toBe("model-defer");
     expect(out.deferReason).toMatch(DEFER_REASON_SHAPE);
+  });
+
+  it("renders every line from verdict-copy, never inline", () => {
+    // The synthesis decides the shape; the words live in verdict-copy.
+    // An inlined rewording breaks here, not in front of the operator.
+    const danger = synthesizeClassifierVerdict(
+      confident({
+        dangerCategory: "secrets_credentials",
+        dangerConfidence: 0.9,
+        intentMatch: 0.1,
+      }),
+      THRESHOLDS,
+      7,
+    );
+    expect(danger.verdict).toEqual({
+      kind: "deny",
+      reason: classifierDangerCriteria("secrets credentials"),
+    });
+    const confirm = synthesizeClassifierVerdict(
+      confident({
+        dangerCategory: "secrets_credentials",
+        dangerConfidence: 0.9,
+        intentMatch: 0.9,
+      }),
+      THRESHOLDS,
+      7,
+    );
+    expect(confirm.deferReason).toBe(
+      `${classifierDangerCriteria("secrets credentials")} (${classifierDangerNote(true)})`,
+    );
+    const unsure = synthesizeClassifierVerdict(confident({ dangerConfidence: 0.3 }), THRESHOLDS, 7);
+    expect(unsure.deferReason).toBe(classifierUncertainReason(true));
+    const costly = synthesizeClassifierVerdict(
+      confident({ intentMatch: 0.9, riskScore: 0.8 }),
+      THRESHOLDS,
+      7,
+    );
+    expect(costly.deferReason).toBe(classifierCostlyReason());
+    const gap = synthesizeClassifierVerdict(
+      confident({ intentMatch: 0.1, riskScore: 0.1 }),
+      THRESHOLDS,
+      7,
+    );
+    expect(gap.deferReason).toBe(classifierIntentGapReason());
   });
 
   it("names the reading that fell short, not a fixed line", () => {
@@ -96,15 +170,17 @@ describe("synthesizeClassifierVerdict", () => {
     expect(riskShort.deferReason).toMatch(DEFER_REASON_SHAPE);
   });
 
-  it("denies a confident danger hit regardless of check order", () => {
+  it("keeps the hard deny when nothing authorizes the danger", () => {
+    // The danger rows run before the intent/risk gate: a confident hit with
+    // no authorization never reaches the DENY-Unless lane.
     const out = synthesizeClassifierVerdict(
-      confident({ dangerCategory: "system_tampering", dangerConfidence: 0.99 }),
+      confident({ dangerCategory: "system_tampering", dangerConfidence: 0.99, intentMatch: 0.1 }),
       THRESHOLDS,
       7,
     );
     expect(out.verdict).toEqual({
       kind: "deny",
-      reason: "matched a safety rule: system tampering",
+      reason: "flagged system tampering",
     });
   });
 
@@ -137,13 +213,21 @@ describe("synthesizeClassifierVerdict", () => {
     expect(critical.riskLevel).toBe("critical");
   });
 
-  it("denies at the risk bar even when intent is established", () => {
-    // The risk half of the allow gate: high intent must not cross the deny line.
-    const out = synthesizeClassifierVerdict(confident({ riskScore: 0.6 }), THRESHOLDS, 7);
-    expect(out.verdict.kind).toBe("deny");
+  it("confirms at the risk bar when intent is established, denies when it is not", () => {
+    // Matrix #5: the risk half is intent-aware — an authorized costly action
+    // is a confirmation, an unauthorized one stays the generic deny.
+    const authorized = synthesizeClassifierVerdict(confident({ riskScore: 0.6 }), THRESHOLDS, 7);
+    expect(authorized.verdict).toEqual({ kind: "defer" });
+    expect(authorized.lean).toBe("deny");
+    const unauthorized = synthesizeClassifierVerdict(
+      confident({ riskScore: 0.6, intentMatch: 0.2 }),
+      THRESHOLDS,
+      7,
+    );
+    expect(unauthorized.verdict.kind).toBe("deny");
   });
 
-  it("cuts the risk bar at 0.5: 0.4 allows, 0.5 denies", () => {
+  it("cuts the risk bar at 0.5: 0.4 allows, 0.5 confirms when asked and denies when not", () => {
     expect(
       synthesizeClassifierVerdict(confident({ riskScore: 0.4 }), THRESHOLDS, 7).verdict,
     ).toEqual({
@@ -151,7 +235,26 @@ describe("synthesizeClassifierVerdict", () => {
     });
     expect(
       synthesizeClassifierVerdict(confident({ riskScore: 0.5 }), THRESHOLDS, 7).verdict.kind,
+    ).toBe("defer");
+    expect(
+      synthesizeClassifierVerdict(confident({ riskScore: 0.5, intentMatch: 0.2 }), THRESHOLDS, 7)
+        .verdict.kind,
     ).toBe("deny");
+  });
+
+  it("keeps every default-line risk deny inside the hard tier", () => {
+    // riskLevelFromScore and denyTier jointly hold this: at the default 0.5
+    // line a risk-lane deny always reads high/critical, so it blocks in
+    // every mode. Either side moving alone breaks it — this fails first.
+    for (const riskScore of [0.5, 0.6, 0.74]) {
+      const out = synthesizeClassifierVerdict(
+        confident({ riskScore, intentMatch: 0.2 }),
+        THRESHOLDS,
+        7,
+      );
+      expect(out.verdict.kind).toBe("deny");
+      expect(denyTier(out.riskLevel)).toBe("hard");
+    }
   });
 
   it("follows a raised risk line: 0.6 allows under a 0.7 line", () => {
@@ -241,8 +344,8 @@ describe("synthesizeClassifierVerdict", () => {
 describe("projectClassifierAnswers", () => {
   it("normalizes the 0–4 risk score to the 0–1 verdict scale", () => {
     const answers = projectClassifierAnswers({
-      danger_category: { type: "choice", choice: "none", confidence: 0.9 },
-      intent_match: { type: "noul", noul: 0.2 },
+      danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+      intent_match: { type: "bool", probability: 0.2 },
       risk: { type: "score", score: 3, confidence: 0.9 },
     });
     expect(answers.riskScore).toBe(0.75);
@@ -267,24 +370,24 @@ describe("projectClassifierAnswers", () => {
     expect(() => projectClassifierAnswers({})).toThrow(IncompleteClassifierResponseError);
     expect(() =>
       projectClassifierAnswers({
-        danger_category: { type: "choice", choice: "none", confidence: 0.9 },
-        intent_match: { type: "noul", noul: 0.2 },
+        danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+        intent_match: { type: "bool", probability: 0.2 },
       }),
     ).toThrow(IncompleteClassifierResponseError);
     expect(() =>
       projectClassifierAnswers({
-        danger_category: { type: "choice", choice: "none", confidence: 0.9 },
-        intent_match: { type: "noul", noul: 0.2 },
-        risk: { type: "score", confidence: 0.9 },
+        danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+        intent_match: { type: "bool", probability: 0.2 },
+        risk: { type: "score", confidence: 0.9 } as unknown as ClassifierAnswer,
       }),
     ).toThrow(IncompleteClassifierResponseError);
   });
 
   it("treats missing confidence as zero (uncertain), not malformed", () => {
     const answers = projectClassifierAnswers({
-      danger_category: { type: "choice", choice: "none" },
-      intent_match: { type: "noul", noul: 0.9 },
-      risk: { type: "score", score: 1 },
+      danger_category: { type: "choice", choice: "none" } as unknown as ClassifierAnswer,
+      intent_match: { type: "bool", probability: 0.9 },
+      risk: { type: "score", score: 1 } as unknown as ClassifierAnswer,
     });
     expect(answers.dangerConfidence).toBe(0);
     expect(answers.riskConfidence).toBe(0);

@@ -20,6 +20,8 @@ import {
   PI_REQUIRED_TOKENS,
   type PiThemeJson,
 } from "#src/theme/pi-theme-converter.ts";
+import type { MaterializedTheme } from "#src/theme/syntax-theme.ts";
+import { loadBundledThemeByName } from "#src/theme/theme-file.ts";
 
 function channelLum(c: number): number {
   return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
@@ -38,19 +40,32 @@ function contrast(a: string, b: string): number {
   return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
 }
 
+/**
+ * The conversion issues that are actually problems. A style-zone note says the
+ * slot reads but is not AA, and the policy keeps those colors as authored —
+ * informational, not a defect.
+ *
+ * @param issues - The conversion issues.
+ * @returns The subset that is not a style-zone note.
+ */
+function problems(issues: ReadonlyArray<{ message: string }>): ReadonlyArray<{ message: string }> {
+  return issues.filter((issue) => !issue.message.includes("readable, not AA"));
+}
+
 describe("convertToPiTheme: solarized-light golden values", () => {
   it("paints tool frames by status: pending transparent, success green-tinted", async () => {
     const theme = (await loadBundledTheme("solarized-light"))!;
     const { doc, issues } = convertToPiTheme(theme, "pigment-solarized-light");
-    expect(issues).toEqual([]);
+    expect(problems(issues)).toEqual([]);
     expect(doc).toBeDefined();
     // editor.background #FDF6E3 → the canvas; pending stays pure canvas
     // (transparent — no status hint while a call streams); success takes
     // the polarity's green at the error tint's ratio (25% light).
     expect(doc!.colors.toolPendingBg).toBe("#fdf6e3");
     expect(doc!.colors.toolSuccessBg).toBe("#c4d8b8");
-    // The theme's own fg lands verbatim (identity, not enforced).
-    expect(doc!.colors.text).toBe("#657b83");
+    // solarized-light's declared fg (#657b83) is sub-AA on its canvas, so
+    // the sweep darkens it — hue and saturation kept — until it reads.
+    expect(doc!.colors.text).toBe("#4a5a5f");
   });
 
   it("background slots tint the canvas (not the foreground — the gray-on-gray guard)", async () => {
@@ -65,9 +80,10 @@ describe("convertToPiTheme: solarized-light golden values", () => {
     // verbatim over the computed tint (the mapping, not the 12% formula;
     // the fallback formula is pinned by the plain-fixture test below).
     expect(colors.selectedBg).toBe("#eee8d5"); // solarized's declared selection
-    // And the fg ladder runs the OTHER way: muted = 70% fg + 30% canvas
-    // (exact value — the ladder's direction is pinned by the number).
-    expect(colors.muted).toBe("#93a0a0");
+    // The fg ladder is enforced level by level: muted starts at 70% fg +
+    // 30% canvas, and the policy lifts it only to the readability floor —
+    // solarized's muted sits above it and keeps its own step.
+    expect(colors.muted).toBe("#677575");
   });
 
   it("tints the error box by polarity — visible on light canvases, subtle on dark", async () => {
@@ -99,7 +115,7 @@ describe("convertToPiTheme: solarized-light golden values", () => {
       "toolDiffRemoved",
       "toolDiffContext",
     ]) {
-      expect(contrast(colors[slot], colors.toolPendingBg)).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(colors[slot], colors.toolPendingBg)).toBeGreaterThanOrEqual(3);
     }
   });
 
@@ -113,7 +129,7 @@ describe("convertToPiTheme: solarized-light golden values", () => {
     expect(issues[0]!.message).toContain("editor.background");
   });
 
-  it("enforceAa: false keeps the chosen colors verbatim (the user channel)", () => {
+  it("enforceAa: false returns the chosen colors unenforced (test escape hatch)", () => {
     const theme = {
       name: "flat",
       type: "dark" as const,
@@ -127,6 +143,124 @@ describe("convertToPiTheme: solarized-light golden values", () => {
     // The default keeps the sweep (the bundled ship path).
     const on = convertToPiTheme(theme, "pigment-flat").doc!;
     expect(on.colors.syntaxComment).not.toBe("#2a2a2a");
+  });
+});
+
+describe("convertToPiTheme: the AA policy", () => {
+  it("lifts a sub-AA declared fg, and the ladder with it, over its own painted surfaces", () => {
+    const theme = {
+      name: "dim",
+      type: "dark" as const,
+      colors: { "editor.background": "#101010", "editor.foreground": "#3a3a3a" },
+      tokenColors: [],
+    };
+    const { doc } = convertToPiTheme(theme, "pigment-dim");
+    const { colors } = doc!;
+    // The body roles paint over the selection row too.
+    const bodySurfaces = [
+      "toolPendingBg",
+      "userMessageBg",
+      "customMessageBg",
+      "toolSuccessBg",
+      "toolErrorBg",
+      "selectedBg",
+    ].map((token) => colors[token]!);
+    // `text` and the slots that carry its value are body text, which pi gates
+    // at 4.5 itself; `muted`/`dim` are secondary labels, held to the floor.
+    for (const slot of [
+      "text",
+      "toolTitle",
+      "toolOutput",
+      "mdCodeBlock",
+      "userMessageText",
+      "customMessageText",
+    ]) {
+      for (const bg of bodySurfaces) {
+        expect(contrast(colors[slot]!, bg), `${slot} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    for (const slot of ["muted", "dim"]) {
+      for (const bg of bodySurfaces) {
+        expect(contrast(colors[slot]!, bg), `${slot} on ${bg}`).toBeGreaterThanOrEqual(3);
+      }
+    }
+    // `thinkingText` paints on the canvas alone (the thinking body), and is
+    // measured against it alone.
+    expect(contrast(colors.thinkingText!, colors.toolPendingBg!)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("keeps a code color off the selection row — code is not painted there", () => {
+    const theme = {
+      name: "mid-selection",
+      type: "dark" as const,
+      colors: {
+        "editor.background": "#101010",
+        "editor.foreground": "#e6e6e6",
+        // A mid-grey selection row: the body text cannot clear it in either
+        // direction, and it must not drag the code colors along.
+        "editor.selectionBackground": "#808080",
+      },
+      tokenColors: [{ scope: "comment", settings: { foreground: "#7f9f6f" } }],
+    };
+    const { doc, issues } = convertToPiTheme(theme, "pigment-mid-selection");
+    // Code never paints on the selection row, so it keeps its color and is
+    // never reported against it...
+    expect(doc!.colors.syntaxComment).toBe("#7f9f6f");
+    expect(issues.some((issue) => issue.message.includes("syntaxComment"))).toBe(false);
+    // ...while the body text, which does paint there, is the one conflicted.
+    expect(
+      issues.some(
+        (issue) => issue.message.includes(" text ") && issue.message.includes("selectedBg"),
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves an already-passing fg byte-identical", () => {
+    const theme = {
+      name: "bright",
+      type: "dark" as const,
+      colors: { "editor.background": "#101010", "editor.foreground": "#e6e6e6" },
+      tokenColors: [],
+    };
+    const { doc } = convertToPiTheme(theme, "pigment-bright");
+    expect(doc!.colors.text).toBe("#e6e6e6");
+  });
+
+  it("returns the original color, and reports the failing pairing, when no lightness can clear the target", () => {
+    // Mixed-polarity surfaces: the canvas needs light text, the selection row
+    // needs dark text, so no single color clears both. A single background is
+    // always satisfiable by one of the two extremes.
+    const theme = {
+      name: "mixed",
+      type: "dark" as const,
+      colors: {
+        "editor.background": "#707070",
+        "editor.foreground": "#909090",
+        "editor.selectionBackground": "#808080",
+      },
+      tokenColors: [],
+    };
+    const { doc, issues } = convertToPiTheme(theme, "pigment-mixed");
+    // The source color is kept — never forced to an unreadable extreme.
+    expect(doc!.colors.text).toBe("#909090");
+    const conflict = issues.find(
+      (issue) => issue.message.includes(" text ") && issue.message.includes("toolPendingBg"),
+    );
+    expect(conflict?.message).toContain("cannot reach 4.5:1");
+    expect(conflict?.message).toContain(":1) — kept unchanged.");
+  });
+
+  it("reaches the opposite polarity when the preferred direction cannot clear", () => {
+    // A mid-grey canvas: the dark-theme default (lighter) cannot clear it
+    // while black can — the fallback direction is the honest answer.
+    const theme = {
+      name: "opposite",
+      type: "dark" as const,
+      colors: { "editor.background": "#9a9a9a", "editor.foreground": "#f0f0f0" },
+      tokenColors: [],
+    };
+    const { doc } = convertToPiTheme(theme, "pigment-opposite");
+    expect(contrast(doc!.colors.text, "#9a9a9a")).toBeGreaterThanOrEqual(4.5);
   });
 });
 
@@ -159,13 +293,14 @@ describe("convertToPiTheme: theme-declared selection/find colors", () => {
     tokenColors: [],
   };
 
-  it("adopts the theme's own selection/find colors verbatim (not enforced)", () => {
-    // The default enforceAa: true path still keeps author colors verbatim
-    // — the sweep targets OUR choices, never colors a theme declares.
+  it("keeps the declared backgrounds, and enforces the text painted over them", () => {
+    // A background is not a foreground: the declared selection/find
+    // surfaces land verbatim. The text on the search surface is held to the
+    // readability floor, so the author's #e06c75 is lifted until it reads.
     const { doc } = convertToPiTheme(themed, "pigment-mapped");
     expect(doc!.colors.selectedBg).toBe("#3e4451");
     expect(doc!.colors.searchMatchBg).toBe("#515c6a");
-    expect(doc!.colors.searchMatchText).toBe("#e06c75");
+    expect(doc!.colors.searchMatchText).toBe("#e9969c");
   });
 
   it("falls back to the computed tints when the keys are absent or malformed", () => {
@@ -197,8 +332,9 @@ describe("convertToPiTheme: theme-declared selection/find colors", () => {
     // Malformed values fall back silently (the fg ?? neutralFg precedent).
     expect(malformed.colors.selectedBg).toBe("#383c45");
     expect(malformed.colors.searchMatchBg).toBe("#424750");
-    // The valid foreground survives alongside.
-    expect(malformed.colors.searchMatchText).toBe("#e06c75");
+    // The valid foreground survives alongside — lifted over the fallback
+    // search surface it now paints on.
+    expect(malformed.colors.searchMatchText).toBe("#e16f78");
   });
 });
 
@@ -276,11 +412,12 @@ describe("convertToPiTheme: token set and structure", () => {
     }
   });
 
-  it("carries the pi schema URL and the registered name", async () => {
+  it("carries the pi schema URL, the registered name, and the declared appearance", async () => {
     const theme = (await loadBundledTheme("nord"))!;
     const { doc } = convertToPiTheme(theme, "pigment-nord");
-    expect(doc!.$schema).toContain("theme-schema.json");
+    expect(doc!.$schema).toBe("https://pi.dev/schemas/theme.schema.json");
     expect(doc!.name).toBe("pigment-nord");
+    expect(doc!.appearance).toBe(theme.type);
   });
 });
 
@@ -295,6 +432,7 @@ describe("the generated themes/ directory (golden assets)", () => {
         await readFile(join(import.meta.dirname, "..", "..", "themes", file), "utf-8"),
       );
       expect(doc.name).toBe(file.replace(/\.json$/, ""));
+      expect(doc.appearance).toMatch(/^(light|dark)$/);
       expect(Object.keys(doc.colors).toSorted()).toEqual(
         [...PI_REQUIRED_TOKENS, ...PI_OPTIONAL_TOKENS].toSorted(),
       );
@@ -305,9 +443,13 @@ describe("the generated themes/ directory (golden assets)", () => {
   it("is reproducible: in-test regeneration matches the committed bytes", async () => {
     const names = [...themeNames].toSorted();
     for (const name of names) {
-      const theme = await loadBundledTheme(name);
-      expect(theme).toBeDefined();
-      const { doc } = convertToPiTheme(theme!, `pigment-${name}`);
+      // The generator's own input: the bundled-theme file (diff roots
+      // included) through the shared projection — not a bare theme.
+      const bundled = await loadBundledThemeByName(name);
+      expect(bundled).toBeDefined();
+      const { doc } = convertToPiTheme(bundled!.theme, `pigment-${name}`, {
+        diff: bundled!.diffRoots,
+      });
       const file = join(import.meta.dirname, "..", "..", "themes", `pigment-${name}.json`);
       // Byte-level: the RAW file text must equal the generator's exact
       // form (2-space indent + trailing newline) — re-stringifying both
@@ -316,5 +458,227 @@ describe("the generated themes/ directory (golden assets)", () => {
       // this test once already).
       expect(await readFile(file, "utf-8")).toBe(`${JSON.stringify(doc, null, "  ")}\n`);
     }
+  });
+});
+
+/**
+ * A minimal theme for the source-precedence tests.
+ *
+ * @param overrides - The slots to override.
+ * @returns The fixture theme.
+ */
+function fixtureTheme(overrides: {
+  type?: "light" | "dark";
+  colors?: Record<string, string>;
+  tokenColors?: MaterializedTheme["tokenColors"];
+}): MaterializedTheme {
+  return {
+    name: "fixture",
+    type: overrides.type ?? "dark",
+    colors: {
+      "editor.background": "#101010",
+      "editor.foreground": "#d0d0d0",
+      ...overrides.colors,
+    },
+    tokenColors: overrides.tokenColors ?? [],
+  };
+}
+
+/**
+ * A fixture declaring both a tint and a marker scope on each side.
+ *
+ * @returns The fixture theme.
+ */
+function tintedFixture(): MaterializedTheme {
+  return fixtureTheme({
+    colors: {
+      "diffEditor.insertedTextBackground": "#0000ff80",
+      "diffEditor.removedTextBackground": "#00ffff80",
+    },
+    tokenColors: [
+      { scope: "markup.inserted", settings: { foreground: "#00ff00" } },
+      { scope: "markup.deleted", settings: { foreground: "#ff0000" } },
+    ],
+  });
+}
+
+describe("convertToPiTheme: diff-root source precedence", () => {
+  it("prefers the explicit diff text over a declared tint and a marker scope", () => {
+    const { doc } = convertToPiTheme(tintedFixture(), "pigment-fixture", {
+      enforceAa: false,
+      diff: {
+        added: { text: "#123456", tint: "#0000ff80" },
+        removed: { text: "#654321", tint: "#00ffff80" },
+      },
+    });
+    expect(doc!.colors.toolDiffAdded).toBe("#123456");
+    expect(doc!.colors.toolDiffRemoved).toBe("#654321");
+  });
+
+  it("projects a declared tint's RGB (alpha dropped) over the marker", () => {
+    const { doc } = convertToPiTheme(tintedFixture(), "pigment-fixture", {
+      enforceAa: false,
+      diff: { added: { tint: "#0000ff80" }, removed: { tint: "#00ffff80" } },
+    });
+    expect(doc!.colors.toolDiffAdded).toBe("#0000ff");
+    expect(doc!.colors.toolDiffRemoved).toBe("#00ffff");
+  });
+
+  it("uses the marker scope with no tint declared, over the token hue guess", () => {
+    const theme = fixtureTheme({
+      tokenColors: [
+        { scope: "keyword", settings: { foreground: "#00cc44" } },
+        { scope: "string", settings: { foreground: "#ff2222" } },
+        { scope: "markup.inserted", settings: { foreground: "#33ff33" } },
+        { scope: "markup.deleted", settings: { foreground: "#ff3333" } },
+      ],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.toolDiffAdded).toBe("#33ff33");
+    expect(doc!.colors.toolDiffRemoved).toBe("#ff3333");
+  });
+
+  it("keeps a marker's broad scope (a dotted refinement must not hijack the side)", () => {
+    const theme = fixtureTheme({
+      tokenColors: [
+        { scope: "markup.inserted.diff", settings: { foreground: "#111111" } },
+        { scope: "markup.inserted", settings: { foreground: "#33ff33" } },
+      ],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.toolDiffAdded).toBe("#33ff33");
+  });
+
+  it("keeps the first rule on a same-width marker tie", () => {
+    const theme = fixtureTheme({
+      tokenColors: [
+        { scope: "markup.inserted", settings: { foreground: "#111111" } },
+        { scope: "markup.inserted", settings: { foreground: "#33ff33" } },
+      ],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.toolDiffAdded).toBe("#111111");
+  });
+
+  it("falls back to the token hue guess with neither tint nor marker", () => {
+    const theme = fixtureTheme({
+      tokenColors: [
+        { scope: "keyword", settings: { foreground: "#00cc44" } },
+        { scope: "string", settings: { foreground: "#ff2222" } },
+      ],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.toolDiffAdded).toBe("#00cc44");
+    expect(doc!.colors.toolDiffRemoved).toBe("#ff2222");
+  });
+
+  it("fills the missing side from the other source when only one tint is declared", () => {
+    const theme = fixtureTheme({
+      tokenColors: [{ scope: "markup.deleted", settings: { foreground: "#ff0000" } }],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", {
+      enforceAa: false,
+      diff: { added: { tint: "#00ff0080" } },
+    });
+    expect(doc!.colors.toolDiffAdded).toBe("#00ff00");
+    expect(doc!.colors.toolDiffRemoved).toBe("#ff0000");
+  });
+
+  it("falls back to the polarity state hue with no diff color anywhere", () => {
+    const theme = fixtureTheme({
+      tokenColors: [{ scope: "keyword", settings: { foreground: "#d0d0e0" } }],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.toolDiffAdded).toBe("#3fb950");
+    expect(doc!.colors.toolDiffRemoved).toBe("#f85149");
+  });
+
+  it("picks the light state hue on a light canvas", () => {
+    const theme = fixtureTheme({
+      type: "light",
+      colors: { "editor.background": "#fafafa" },
+      tokenColors: [{ scope: "keyword", settings: { foreground: "#333333" } }],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.toolDiffAdded).toBe("#1a7f37");
+    expect(doc!.colors.toolDiffRemoved).toBe("#c62828");
+  });
+});
+
+describe("convertToPiTheme: accent source", () => {
+  it("takes the declared link color, ignoring a vivid invalid token", () => {
+    const theme = fixtureTheme({
+      colors: { "textLink.foreground": "#3f7fd0" },
+      tokenColors: [{ scope: "invalid.illegal", settings: { foreground: "#ff00ff" } }],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.accent).toBe("#3f7fd0");
+  });
+
+  it("falls back to the most saturated token with no link color", () => {
+    const theme = fixtureTheme({
+      tokenColors: [
+        { scope: "keyword", settings: { foreground: "#d0d0e0" } },
+        { scope: "string", settings: { foreground: "#ff3040" } },
+      ],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.accent).toBe("#ff3040");
+  });
+
+  it("ignores an unparseable link value and keeps the heuristic", () => {
+    const theme = fixtureTheme({
+      colors: { "textLink.foreground": "" },
+      tokenColors: [{ scope: "string", settings: { foreground: "#ff3040" } }],
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.accent).toBe("#ff3040");
+  });
+});
+
+describe("convertToPiTheme: state colors prefer the theme's own declaration", () => {
+  it("takes a declared editorError/editorWarning over the polarity hue", () => {
+    const theme = fixtureTheme({
+      colors: { "editorError.foreground": "#ff5555", "editorWarning.foreground": "#8be9fd" },
+    });
+    const { doc } = convertToPiTheme(theme, "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.error).toBe("#ff5555");
+    expect(doc!.colors.warning).toBe("#8be9fd");
+    // The warning-derived chrome follows the chosen root, not the constant.
+    expect(doc!.colors.bashMode).toBe("#8be9fd");
+  });
+
+  it("keeps the polarity hue when the theme declares none", () => {
+    const { doc } = convertToPiTheme(fixtureTheme({}), "pigment-fixture", { enforceAa: false });
+    expect(doc!.colors.error).toBe("#f85149");
+    expect(doc!.colors.warning).toBe("#d29922");
+  });
+});
+
+/**
+ * The selectedBg a fixture declaring the given selection color produces.
+ *
+ * @param value - The `editor.selectionBackground` declaration.
+ * @returns The generated selectedBg.
+ */
+function fixtureSelectedBg(value: string): string {
+  return convertToPiTheme(
+    fixtureTheme({ colors: { "editor.selectionBackground": value } }),
+    "pigment-fixture",
+    { enforceAa: false },
+  ).doc!.colors.selectedBg;
+}
+
+describe("convertToPiTheme: declared backgrounds composite over the canvas", () => {
+  it("honours the alpha: opaque as-is, alpha 0 the canvas, mid between", () => {
+    expect(fixtureSelectedBg("#ffffff")).toBe("#ffffff");
+    expect(fixtureSelectedBg("#ffffff00")).toBe("#101010");
+    expect(fixtureSelectedBg("#ffffff80")).toBe("#888888");
+  });
+
+  it("falls back to the computed tint for an unusable declaration", () => {
+    const none = convertToPiTheme(fixtureTheme({}), "pigment-fixture", { enforceAa: false }).doc!
+      .colors.selectedBg;
+    expect(fixtureSelectedBg("not-a-color")).toBe(none);
   });
 });

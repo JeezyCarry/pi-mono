@@ -147,11 +147,6 @@ export function createFindRenderer(
       const derive = outputMemoOf(ctx.state);
       const derived = derive(result);
       const { entries: all } = derived;
-      // The glob anchor rides the styled closure (settled per the SDK
-      // contract — no key stamp needed).
-      const callArgs = argsOf<FindToolInput>(ctx.args);
-      const anchor = globAnchor(callArgs.pattern ?? "");
-      const emphasisSpec = accentEmphasis(theme);
       return assembleOutputBody({
         text,
         prefix: "f",
@@ -167,6 +162,11 @@ export function createFindRenderer(
         renderStyled: {
           widthAware: false,
           render: (lines, tail, hidden) => {
+            // The glob anchor rides the styled closure (settled per the
+            // SDK contract — no key stamp needed): it runs only on the
+            // frames that actually re-render, never on shortcut hits.
+            const anchor = globAnchor(argsOf<FindToolInput>(ctx.args).pattern ?? "");
+            const emphasisSpec = accentEmphasis(theme);
             // Every shown line is a path or the SDK's empty-result sentinel
             // — the limit notice was lifted into the footer (DerivedOutput).
             const styled = lines.map((line) => {

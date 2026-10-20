@@ -16,6 +16,7 @@ import {
   modelReply,
   sanitizeRawReply,
   shortCircuit,
+  type DecisionRecordEntry,
 } from "#src/audit/decision-record.ts";
 import {
   CACHE_LOOKUP_EVENT,
@@ -29,18 +30,15 @@ import { effectiveOverride, type SessionOverrides } from "#src/config/session-ov
 import { PRE_CALL_MACHINERY_KINDS } from "#src/model/machinery-kinds.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import { openAsk } from "#src/review/request/ask.ts";
-import {
-  reviewRequestCacheMaterial,
-  type ReviewRequestContext,
-} from "#src/review/request/review-request.ts";
+import { cacheIdentity, type ReviewRequestContext } from "#src/review/request/review-request.ts";
 import {
   type SessionManagerLike,
   stripTranscript,
 } from "#src/review/request/transcript-stripper.ts";
-import { bestEffort, errorMessage, normalizeAndRedactText, shortHash } from "#src/utils.ts";
+import { bestEffort, errorMessage, normalizeAndRedactText } from "#src/utils.ts";
 
 import { accountModelOutcome, type CircuitBreaker, consumeTrip } from "./circuit-breaker.ts";
-import { releaseMachineryGate, releaseVerdictGate } from "./disposition.ts";
+import { createDisposition } from "./disposition.ts";
 import { isMachineryFailure, type ReviewerEngine } from "./reviewer-engine.ts";
 import type { VerdictCache } from "./verdict-cache.ts";
 import { withAgentInstruction } from "./verdict-copy.ts";
@@ -113,14 +111,28 @@ export interface ReviewPipelineDeps {
  * @returns The `authorize` function implementing the review pipeline.
  */
 export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["authorize"] {
-  // Once per pipeline instance: the fail-open notice (mode auto-approves
-  // what the reviewer didn't) fires on the first mapped allow, then stays
-  // silent — the operator asked for this mode, the notice guards against
-  // forgetting it's on.
-  const noticeState = { shown: false };
+  // The release seam, one per pipeline instance: it holds the
+  // once-per-pipeline fail-open notice state privately.
+  const disposition = createDisposition({
+    notify: deps.notify,
+    notifyApprovals: deps.config.notifyApprovals,
+  });
 
   const authorize: Authorizer["authorize"] = async (details, query, log) => {
     const { config } = deps;
+    // The single writer for decision records: the release seam returns the
+    // record, this closure emits it. Machinery + model gates name a
+    // reviewer-relevant judgment and ride the review stream; replays and
+    // pass-throughs ride debug (see the log-stream doctrine in
+    // decision-record.ts) — `record.gate` carries the choice, so no caller
+    // re-derives it.
+    const emitRecord = (record: DecisionRecordEntry): void => {
+      if (record.gate === "cache-hit" || record.gate === "policy-decided") {
+        log.debug(DECISION_EVENT, record);
+      } else {
+        log.review(DECISION_EVENT, record);
+      }
+    };
     // Session-scoped override (/ai-guard, ctrl+alt+g) wins over the config
     // default — the typed per-field accessor spells the rule once (see
     // effectiveOverride in session-overrides). Read per-call: the override
@@ -139,14 +151,14 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         );
         // The review failed to open — a machinery-lane gate (a permanent
         // property of the ask's shape, not a transient reviewer failure).
-        return releaseMachineryGate(
+        const released = disposition.releaseMachineryGate({
           mode,
-          PRE_CALL_MACHINERY_KINDS.noTarget,
-          DecisionRecord.noTarget(details.requestId, opened.surface),
-          deps.circuitBreaker,
-          log,
-          deps.notify,
-        );
+          kind: PRE_CALL_MACHINERY_KINDS.noTarget,
+          record: DecisionRecord.noTarget(details.requestId, opened.surface),
+          breaker: deps.circuitBreaker,
+        });
+        emitRecord(released.record);
+        return released.verdict;
       }
       // surface-unmatched is outside this link's jurisdiction, but staying
       // fully silent hides coverage gaps (misspelled surface, host-renamed
@@ -187,9 +199,9 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
           state: policyResult.state,
           origin: policyResult.origin,
           matchedPattern: policyResult.matchedPattern ?? null,
-          // `?? null` is the wide-peer-range guard: pi-permission-system < 40
-          // has no such field, and an absent fact must key the same as "typed
-          // text decided".
+          // `?? null` guards PPS 40's optional result field: `matchedSpelling`
+          // is absent whenever the typed text decided, and an absent fact must
+          // key the same as "typed text decided".
           matchedSpelling: policyResult.matchedSpelling ?? null,
         }),
       );
@@ -214,10 +226,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       // own — surface why (the breaker verdict bypasses the mode mapping
       // by design: specific config beats the general mode).
       if (verdict.kind === "defer") {
-        deps.notify(
-          `circuit breaker tripped (too many reviewer denials), deferring to you`,
-          "warning",
-        );
+        deps.notify(`breaker tripped after repeated denials; you decide`, "warning");
       }
       // The total tier is a persistent session-level state the operator
       // otherwise only discovers from mysteriously denied commands — name
@@ -232,7 +241,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         // notifyLevel gating this is deliberate: `warning` silences
         // per-request noise but a total trip stays visible at `error`.
         deps.notify(
-          `circuit breaker tripped (total tier reached), blocking all reviews until /ai-guard breaker reset or restart`,
+          `breaker tripped (total tier reached); reviews blocked until /ai-guard breaker reset or restart`,
           "error",
         );
       }
@@ -268,29 +277,21 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
           error: normalizeAndRedactText(errorMessage(e)),
         }),
       );
-      const record = DecisionRecord.transcriptError(base);
-      return releaseMachineryGate(
+      const released = disposition.releaseMachineryGate({
         mode,
-        PRE_CALL_MACHINERY_KINDS.transcriptError,
-        record,
-        deps.circuitBreaker,
-        log,
-        deps.notify,
-      );
+        kind: PRE_CALL_MACHINERY_KINDS.transcriptError,
+        record: DecisionRecord.transcriptError(base),
+        breaker: deps.circuitBreaker,
+      });
+      emitRecord(released.record);
+      return released.verdict;
     }
 
     // Cache lookup. The request snapshot contains the action context,
     // working directory, and policy-derived path boundary, so a verdict
-    // cannot cross those contexts.
-    const commandHash = shortHash(reviewRequestCacheMaterial(request));
-    // The context hash covers the trusted intent only — user messages are
-    // the authorization source the model honors, so a new user message
-    // must miss. Tool calls are deliberately excluded: agent retries of the
-    // same command between user turns would otherwise never hit (each
-    // intervening tool call changes the transcript). The residual risk — a
-    // verdict replayed into a prompt with different background tool calls —
-    // is accepted: tool calls are untrusted context, not authorization.
-    const contextHash = shortHash(transcript.trustedIntent.join("\0"));
+    // cannot cross those contexts; the identity doctrine lives with the
+    // builder (see cacheIdentity).
+    const { commandHash, contextHash } = cacheIdentity(request, transcript);
     const cc = config.cache;
     const lookup = deps.verdictCache.lookup(commandHash, contextHash, cc);
     if (lookup.hit) {
@@ -301,28 +302,21 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       // rides along so a cached deny maps identically to its fresh first
       // pass.
       const emitted = applyVerdictMode(mode, lookup.verdict, undefined, lookup.riskLevel);
-      const released = releaseVerdictGate(
-        {
-          mode,
-          noticeShown: noticeState.shown,
-          notify: deps.notify,
-          notifyApprovals: config.notifyApprovals,
-        },
-        DecisionRecord.cacheHit(base, lookup.verdict),
-        lookup.verdict,
+      const released = disposition.releaseVerdictGate({
+        mode,
+        record: DecisionRecord.cacheHit(base, lookup.verdict),
+        original: lookup.verdict,
         emitted,
-        lookup.riskLevel,
+        riskLevel: lookup.riskLevel,
         // Cached verdicts are allow/deny only — no defer context at all.
-        undefined,
+        defer: undefined,
         // A hit replays a verdict, it measures nothing — the tail says so.
-        { kind: "cached" },
-      );
-      if (released.markNoticeShown) noticeState.shown = true;
+        cost: { kind: "cached" },
+      });
       const { record, verdict } = released;
       // Replay gate: the verdict was already recorded at its model gate —
-      // debug stream only (see the log-stream doctrine in
-      // decision-record.ts).
-      log.debug(DECISION_EVENT, record);
+      // emitRecord routes it to the debug stream by record.gate.
+      emitRecord(record);
       // The release carries the returned verdict (a deny already has the
       // instruction appended exactly once per hit — the cache holds the
       // un-instructed original; each hit re-appends).
@@ -353,23 +347,18 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
             engineResult.modelId,
             normalizeAndRedactText(engineResult.detail ?? ""),
           );
-      return releaseMachineryGate(
+      const released = disposition.releaseMachineryGate({
         mode,
-        isModelUnresolved
+        kind: isModelUnresolved
           ? PRE_CALL_MACHINERY_KINDS.modelUnresolved
           : PRE_CALL_MACHINERY_KINDS.authFailed,
         record,
-        deps.circuitBreaker,
-        log,
-        deps.notify,
-      );
+        breaker: deps.circuitBreaker,
+      });
+      emitRecord(released.record);
+      return released.verdict;
     }
     const { outcome: reviewOutcome, modelId } = engineResult;
-    // The anchor the intent check judged against, for both engines and every
-    // outcome kind — the transcript is the single source, not each engine.
-    // Named anchorText (not authorizationAnchor): upstream's log redaction
-    // masks any key containing "authorization".
-    reviewOutcome.anchorText = transcript.trustedIntent.at(-1);
 
     // Raw replies are verbose AND unnecessary for clean verdicts (the
     // structured record + sentinel suffice) — only defer failures keep the
@@ -407,33 +396,28 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       deferInfo,
       reviewOutcome.riskLevel,
     );
-    const released = releaseVerdictGate(
-      {
-        mode,
-        noticeShown: noticeState.shown,
-        notify: deps.notify,
-        notifyApprovals: config.notifyApprovals,
-      },
-      DecisionRecord.model(
+    const released = disposition.releaseVerdictGate({
+      mode,
+      record: DecisionRecord.model({
         base,
         modelId,
-        transcript.strippedCount,
+        strippedCount: transcript.strippedCount,
         reviewOutcome,
         contextHash,
         deferReplySanitized,
-      ),
-      reviewOutcome.verdict,
+        anchorText: transcript.trustedIntent.at(-1),
+      }),
+      original: reviewOutcome.verdict,
       emitted,
-      reviewOutcome.riskLevel,
-      deferInfo,
+      riskLevel: reviewOutcome.riskLevel,
+      defer: deferInfo,
       // latencyMs already covers the review's total cost: the empty-reply
       // retry accumulates into it and the pool stamps the whole walk (failover
       // included), so the tail is the ask's wall-clock review cost.
-      { kind: "fresh", latencyMs: reviewOutcome.latencyMs },
-    );
-    if (released.markNoticeShown) noticeState.shown = true;
+      cost: { kind: "fresh", latencyMs: reviewOutcome.latencyMs },
+    });
     const { record, verdict } = released;
-    log.review(DECISION_EVENT, record);
+    emitRecord(record);
 
     // The denied panel's data: record what the MODEL denied (the review's
     // own judgment — mapping artifacts and machinery denials are absent by
@@ -459,7 +443,12 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // and a machinery denial (the reviewer never produced a verdict) earns
     // a recoverable-tier credit — the doctrine lives beside the breaker
     // (see accountModelOutcome in circuit-breaker).
-    accountModelOutcome(deps.circuitBreaker, reviewOutcome.verdict.kind, emitted);
+    accountModelOutcome(
+      deps.circuitBreaker,
+      reviewOutcome.verdict.kind,
+      emitted,
+      reviewOutcome.deferKind,
+    );
     if (reviewOutcome.verdict.kind !== "defer" && engineResult.cacheable !== false) {
       deps.verdictCache.store(
         commandHash,
@@ -493,7 +482,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       // crashed.
       bestEffort(() =>
         deps.notify(
-          `reviewer crashed, deferring to you (${message})`,
+          `automatic review failed, asking you to decide; ${message}`,
           // Error-grade, like the breaker's total trip: the review
           // function is DOWN and recovery needs the operator's hand.
           "error",

@@ -1,7 +1,7 @@
 /**
  * Chat lane model call: ask the reviewer model to assess a permission
  * request. Chat-only by construction — the classifier lane reaches its
- * model through the System One SDK (`classifier/client.ts`), never
+ * model through Pi's classifier (`classifier/client.ts`), never
  * `ModelRegistry.complete`, so this call machinery lives with its lane
  * instead of the lane-neutral `model/` directory.
  *
@@ -31,7 +31,7 @@ import { MAX_PROVIDER_ERROR_CHARS, emitCallFailure } from "#src/audit/call-failu
 import type { AuditCorrelation } from "#src/audit/decision-record.ts";
 import { MODEL_REPLY_EVENT } from "#src/audit/events.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
-import type { ModelRegistryLike } from "#src/model/model-registry.ts";
+import type { ChatRegistryLike } from "#src/model/model-registry.ts";
 import type {
   AvailabilityReason,
   ModelCallDeferKind,
@@ -120,13 +120,13 @@ export interface ModelCallContext extends AuditCorrelation {
  * (`getProvider().streamSimple()`): pi-ai brands the provider input, so
  * that call breaks whenever upstream tightens it.
  *
- * `registry.streamSimple` requires pi >= 0.86 (the registry facade gained it
- * there); the peer dependency floor matches.
+ * `registry.streamSimple` is the chat lane's only correct call path; the
+ * peer floor (`pi >= 1.0`) matches.
  *
  * @param getRegistry - Function returning the model registry (or undefined if unavailable).
  * @returns A `ModelCallFn` that completes a model call via `registry.streamSimple`.
  */
-export function createModelCall(getRegistry: () => ModelRegistryLike | undefined): ModelCallFn {
+export function createModelCall(getRegistry: () => ChatRegistryLike | undefined): ModelCallFn {
   return async (model, context, options) => {
     const registry = getRegistry();
     if (!registry) {
@@ -146,22 +146,25 @@ export function createModelCall(getRegistry: () => ModelRegistryLike | undefined
  * @param ctx - The resolved model-call context.
  * @param systemPrompt - The system prompt for the call.
  * @param userPrompt - The user prompt for the call.
- * @param timeoutMs - Per-call timeout in milliseconds.
- * @param maxTokens - Maximum tokens for the model reply.
- * @param providerRetries - Pi-ai provider-layer retries for this call
- *   (attempt 1 passes 1; the empty-reply retry passes 0 — see reviewModel).
+ * @param budget - The call budget: timeout, token ceiling, provider retries.
  * @returns A `CallResult`: success with the reply, or failure with the classified defer reason.
  */
+/** The per-call budget: timeout, token ceiling, provider retries. */
+interface CallBudget {
+  timeoutMs: number;
+  maxTokens: number;
+  providerRetries: number;
+}
+
 async function executeCall(
   ctx: ModelCallContext,
   systemPrompt: string,
   userPrompt: string,
-  timeoutMs: number,
-  maxTokens: number,
-  providerRetries: number,
+  budget: CallBudget,
 ): Promise<CallResult> {
   // The Authorizer callback receives no ExtensionContext, so the agent's
   // ctx.signal can't be threaded here; this timeout is the only abort source.
+  const { timeoutMs, maxTokens, providerRetries } = budget;
   const signal = AbortSignal.timeout(timeoutMs);
   const startedAt = Date.now();
   try {
@@ -230,14 +233,11 @@ export async function reviewModel(
   // its classifier, backoff, and retry-after handling apply; the signal
   // spans them, so timeoutMs is the total budget). Up to 2 HTTP requests
   // live inside this one executeCall.
-  const result = await executeCall(
-    ctx,
-    systemPrompt,
-    userPrompt,
+  const result = await executeCall(ctx, systemPrompt, userPrompt, {
     timeoutMs,
-    ctx.maxTokens,
+    maxTokens: ctx.maxTokens,
     providerRetries,
-  );
+  });
   if (!result.ok) {
     // Provider errors do NOT re-fire here — pi-ai's retry budget is
     // already spent inside executeCall; this loop only owns the
@@ -257,18 +257,15 @@ export async function reviewModel(
   // has at least half a window to run in; its budget is the REMAINING
   // time (timeoutMs − elapsed), keeping timeoutMs a total-budget promise.
   const retryOnEmpty = async (): Promise<CallResult> =>
-    executeCall(
-      ctx,
-      systemPrompt,
-      userPrompt,
+    executeCall(ctx, systemPrompt, userPrompt, {
       // The retry's own budget: remaining window, min 1ms guard.
-      Math.max(1, timeoutMs - result.latencyMs),
-      ctx.maxTokens,
+      timeoutMs: Math.max(1, timeoutMs - result.latencyMs),
+      maxTokens: ctx.maxTokens,
       // No provider retry on the retry: this call IS the retry budget —
       // a provider error here fails straight to call-failed (deliberately
       // less robust than attempt 1, whose budget is spent).
-      0,
-    );
+      providerRetries: 0,
+    });
 
   // Parse the verdict from the model's text reply as JSON.
   let text = contentText(result.reply.content, "");
@@ -348,6 +345,7 @@ export async function reviewModel(
  */
 function buildEmptyReplyDiagnostic(result: CallResult & { ok: true }): ReviewOutcomeDiagnostic {
   return {
+    kind: "empty-reply",
     stopReason: result.reply.stopReason ?? null,
     rawStopReason: result.reply.rawStopReason ?? null,
     errorMessage: result.reply.errorMessage

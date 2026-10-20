@@ -52,3 +52,7 @@ Facts that follow from the matrix:
 - `lenient` asks on deny-leaned defers (an active alarm) and soft denies — its blurb is literal. The default↔lenient difference spans the defer rows (benign/neutral: ask vs pass) — the lean field is exactly what separates "ask me everything unresolved" from "the reviewer's benign inclination suffices".
 - `permissive` passes deny-leaned defers along with everything else short of hard denies — the audit's `lean` field says which way the reviewer leaned on each pass (diagnosability), it does not widen the mode's exposure.
 - The lean parse is tolerant (invalid → neutral); if a model never emits lean, every defer routes as neutral — the ladder degrades gracefully to lean-free behavior.
+
+## Update
+
+- 2026-10-11: the cut-line form this decision describes is now the implementation, not prose. Each `MODE_TABLE` row carries two cut lines (`acceptAtOrBelow` / `rejectAtOrAbove`) on a named `SUSPICION_ORDER` (allow < defer-benign < defer-neutral < defer-danger < soft-deny < hard-deny); band contiguity follows from that cut-line shape and is pinned by the contiguity test (the type does not force `accept < reject`). Machinery failures stay off the suspicion line as their own per-mode lane, so the `permissive` non-monotone cell is unchanged. No semantic change.

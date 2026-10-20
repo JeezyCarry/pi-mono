@@ -1,6 +1,6 @@
 /**
  * ReviewerPool: one ordered failover loop over heterogeneous reviewer
- * endpoints (chat registry models and classifier System One endpoints, in any
+ * endpoints (chat registry models and classifier registry models, in any
  * order). Per-lane adapters translate backend failures into the
  * three-state {@link AttemptResult}; the pool only pattern-matches the
  * three states — it never interprets a backend error itself.
@@ -62,38 +62,16 @@ export interface ChatPoolEndpoint {
   id: string;
 }
 
-/** A classifier endpoint's provider: explicit connection, env-backed when unset. */
-export interface ClassifierProvider {
-  type: "typesafe";
-  baseUrl?: string;
-  apiKey?: string;
+/** One classifier endpoint in the ordered failover list (pi's registry classifier). */
+export interface ClassifierPoolEndpoint {
+  lane: "classifier";
+  /** Pi's provider id; the model resolves through the model registry. */
+  provider: string;
+  model: string;
+  timeoutMs: number;
+  /** The endpoint's bare audit identity (Pi's provider id: `<provider>/<model>`). */
+  id: string;
 }
-
-/** One classifier endpoint in the ordered failover list. */
-export type ClassifierPoolEndpoint =
-  | {
-      lane: "classifier";
-      /** Explicit connection, env-backed when unset. */
-      backend: "direct";
-      provider: ClassifierProvider;
-      model: string;
-      timeoutMs: number;
-      /** The endpoint's bare audit identity (the SDK protocol prefix: `typesafe/<model>`). */
-      id: string;
-    }
-  | {
-      lane: "classifier";
-      /** Pi's built-in classifier, resolved through the model registry. */
-      backend: "registry";
-      provider: string;
-      model: string;
-      timeoutMs: number;
-      /** The endpoint's bare audit identity (Pi's provider id: `<provider>/<model>`). */
-      id: string;
-    };
-
-/** The registry classifier endpoint: pi resolves the model, so `provider` is a name. */
-export type ClassifierRegistryEndpoint = Extract<ClassifierPoolEndpoint, { backend: "registry" }>;
 
 /** One endpoint in the ordered failover list (pure data — lane dispatch is the adapter's). */
 export type PoolEndpoint = ChatPoolEndpoint | ClassifierPoolEndpoint;
@@ -205,31 +183,33 @@ export interface ReviewerPoolDeps {
   now?: () => number;
 }
 
+/** The walk clock: start stamp plus the time source latency is read from. */
+interface WalkClock {
+  startedAt: number;
+  now: () => number;
+}
+
 /**
- * Settle one walk outcome: the endpoint's audit identity gains its walk
- * position (the pool owns the numbering), a backup verdict never caches (the
- * primary gets another chance next ask), and a verdict's latency covers the
- * whole walk (failover cost stays visible).
+ * Settle a terminal walk record: stamp the endpoint identity and cover the
+ * walk latency.
  *
  * @param terminal - The terminal record (identity NOT yet stamped).
  * @param endpoint - The endpoint that produced it.
  * @param index - The endpoint's position.
- * @param startedAt - The walk start (wall-clock latency covers the walk).
- * @param now - The clock.
+ * @param clock - The walk clock.
  * @returns The settled record.
  */
 function settleWalk(
   terminal: EngineAttemptResult,
   endpoint: PoolEndpoint,
   index: number,
-  startedAt: number,
-  now: () => number,
+  clock: WalkClock,
 ): EngineAttemptResult {
   const identified = { ...terminal, modelId: withFallbackIndex(endpoint.id, index) };
   if (isMachinery(identified)) return identified;
   const settled = {
     ...identified,
-    outcome: { ...identified.outcome, latencyMs: now() - startedAt },
+    outcome: { ...identified.outcome, latencyMs: clock.now() - clock.startedAt },
   };
   return index > 0 ? { ...settled, cacheable: false } : settled;
 }
@@ -259,7 +239,7 @@ export function createReviewerPool(deps: ReviewerPoolDeps): ReviewerEngine {
         terminal: EngineAttemptResult,
         endpoint: PoolEndpoint,
         index: number,
-      ): EngineAttemptResult => settleWalk(terminal, endpoint, index, startedAt, now);
+      ): EngineAttemptResult => settleWalk(terminal, endpoint, index, { startedAt, now });
       let pendingHop: HopRecord | undefined;
       for (const [index, endpoint] of endpoints.entries()) {
         const remaining = deadline - now();

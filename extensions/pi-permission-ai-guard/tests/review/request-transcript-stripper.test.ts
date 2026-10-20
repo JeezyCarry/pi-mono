@@ -63,7 +63,48 @@ function strip(entries: unknown[], settings = opts) {
   );
 }
 
+/**
+ * A skill invocation as pi delivers it: one user message holding the skill
+ * file plus, optionally, the text the human typed after it.
+ *
+ * @param body - The skill file's content.
+ * @param userMessage - The human's own text, when there was any.
+ * @returns The session entry.
+ */
+function makeSkillMessage(body: string, userMessage?: string): unknown {
+  const block = `<skill name="grill-with-docs" location="/home/x/SKILL.md">\n${body}\n</skill>`;
+  return makeMessage("user", userMessage ? `${block}\n\n${userMessage}` : block);
+}
+
 describe("stripTranscript", () => {
+  it("keeps the human text of a skill message, tagged with the skill name", () => {
+    const { trustedIntent } = strip([
+      makeSkillMessage("# Skill body\nStep 1: do the thing.", "review my plan"),
+    ]);
+    expect(trustedIntent).toEqual(["[skill: grill-with-docs] review my plan"]);
+  });
+
+  it("drops a skill message with no human text, so the prior request stays the anchor", () => {
+    const { trustedIntent } = strip([
+      makeMessage("user", "fix the login bug"),
+      makeSkillMessage("# Skill body"),
+    ]);
+    expect(trustedIntent).toEqual(["fix the login bug"]);
+  });
+
+  it("does not spend a user-message slot on a skill body", () => {
+    const { trustedIntent } = strip(
+      [makeMessage("user", "older request"), makeSkillMessage("# Skill body")],
+      { ...opts, maxUserMessages: 1 },
+    );
+    expect(trustedIntent).toEqual(["older request"]);
+  });
+
+  it("leaves a human message that only mentions the wrapper unaffected", () => {
+    const text = 'explain how <skill name="x" location="y"> blocks are parsed';
+    expect(strip([makeMessage("user", text)]).trustedIntent).toEqual([text]);
+  });
+
   it("extracts user messages as trusted intent", () => {
     const entries = [
       makeMessage("user", "fix the bug"),

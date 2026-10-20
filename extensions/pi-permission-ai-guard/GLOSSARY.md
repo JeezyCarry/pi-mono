@@ -75,17 +75,17 @@ _Avoid_: calling a mode-ladder band a lane
 The review-outcome producer seam. One pooled supervisor walks an ordered, heterogeneous endpoint list through one per-lane adapter each.
 
 **TypeSafe vs Jev**:
-Two independent axes. **TypeSafe** is the transport/provider surface (SDK client, wire shapes, provider value, env fallbacks). **Jev** is the model strategy (question set, calibration, overlay, verdict synthesis).
+Two independent axes. **TypeSafe** is the transport/provider surface, now owned by Pi (the registered provider, its auth, its wire shape) — the extension ships no client of its own. **Jev** is the model strategy (question set, calibration, overlay, verdict synthesis).
 
 **Model call path**:
 The chat lane's route through `ModelRegistry.streamSimple` — the agent's own call path. Never the provider layer directly.
 _Avoid_: provider-layer calls
 
 **Pi version floor**:
-The runtime Pi version each lane needs — chat `≥ 0.86` (`streamSimple`), registry-classifier `≥ 0.99` (`classify`/`findOfType`, admission-gated). The source targets the 0.99 type surface for maintainers; Pi erases types at load, so a 0.86 host runs the chat lane unaffected.
+The runtime Pi version the extension needs — a single `≥ 1.0.0` floor: the source type-checks against the 1.0 surface, and every supported host's registry provides `streamSimple`, `classify`, and `findOfType`. Pi erases types at load, so a host below the floor is a runtime contract violation, caught at session start.
 
 **pi-permission-system floor**:
-The host extension this one links into: peer `≥ 27.1.1 < 41.0.0`. Its own `≥ 37` requires Pi `≥ 1.0.0`, enforced by its own peer range, so the effective floor is a pair and is independent of this extension's Pi floor. The source type-checks against the dev version (40.x) alone: a host below it simply lacks the newer ask facts, which every renderer guards on truthiness and the cache key normalizes to `null`. The ceiling is deliberate — upstream ships breaking majors roughly weekly.
+The host extension this one links into: peer `≥ 40.0.0 < 41.0.0`. Its own `≥ 37` requires Pi `≥ 1.0.0`, enforced by its own peer range, so the effective floor is a pair and is independent of this extension's Pi floor. The ceiling is deliberate — upstream ships breaking majors roughly weekly.
 
 **Lane fact inventory**:
 The cross-lane contract for ask facts (`tests/review/lane-facts.ts`): every `AskContext` / `PromptRequestFacts` field classified per lane as rendered (with its name and encoder) or excluded (with a reason). Exhaustive by construction, so a new upstream fact stops compilation until both lanes decide. It pins presence, not presentation — the lanes fork deliberately on some encodings (chat words vs classifier raw `commandContext`; chat-redacted vs verbatim cwd).

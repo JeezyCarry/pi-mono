@@ -344,6 +344,8 @@ function headerPathSegments(raw: string | null, theme: RenderTheme, cwd: string)
 interface ReadMasked {
   /** The masked, tab-expanded text (tail notices lifted). */
   masked: string;
+  /** The masked text split into lines (memoized — one split per result, not per frame). */
+  lines: string[];
   /** Whether the result carries an image block (note, not file text). */
   isImage: boolean;
   /** The lifted user-limit notice (`[N more lines…]`), or "" when none. */
@@ -395,7 +397,7 @@ interface ReadMaskedInput {
   memo: ReadRowMemo;
   /** The settled result. */
   result: AgentToolResult<unknown>;
-  /** The path:offset key. */
+  /** The path:offset:limit key (the limit shapes the notice lift). */
   key: string;
   /** The raw path arg (masking scope). */
   raw: string;
@@ -422,7 +424,12 @@ function deriveReadMasked(input: ReadMaskedInput): ReadMasked {
   const { memo, result, key, raw, cwd, limit } = input;
   const cached = memo.readDerive;
   if (cached && cached.result === result && cached.key === key) {
-    return { masked: cached.masked, isImage: cached.isImage, notice: cached.notice };
+    return {
+      masked: cached.masked,
+      lines: cached.lines,
+      isImage: cached.isImage,
+      notice: cached.notice,
+    };
   }
   const content = result.content ?? [];
   const isImage = content.some((block) => block.type === "image");
@@ -440,8 +447,9 @@ function deriveReadMasked(input: ReadMaskedInput): ReadMasked {
     truncated,
     limit,
   );
-  memo.readDerive = { result, key, masked: lifted.body, isImage, notice: lifted.notice };
-  return { masked: lifted.body, isImage, notice: lifted.notice };
+  const lines = linesOf(lifted.body);
+  memo.readDerive = { result, key, masked: lifted.body, lines, isImage, notice: lifted.notice };
+  return { masked: lifted.body, lines, isImage, notice: lifted.notice };
 }
 
 /**
@@ -484,31 +492,36 @@ type ReadResultDetails = { truncation?: TruncationResult };
 /**
  * The read derivation as a DerivedOutput: masked text + line views +
  * the identity hash. Folded and expanded differ only in the hash
- * namespace (fold: vs path:offset) — the shape is one.
+ * namespace (fold: vs path:offset) — the shape is one. No filtered
+ * `entries` view: outputTaskKey reads only output.length + hash, so
+ * the per-frame filter ran for nobody — the window slices `lines`.
  *
  * @param masked - The masked text.
- * @param lines - The content lines.
+ * @param lines - The content lines (the memo's split — no re-split here).
  * @param hash - The identity hash.
  * @returns The derived output.
  */
 function readDerived(masked: string, lines: string[], hash: string): DerivedOutput {
   return {
     output: masked,
+    isEmpty: masked === "",
     lines,
-    entries: lines.filter((line) => line !== ""),
+    entries: lines,
     notice: "",
     hash,
   };
 }
 
-/** The memoized masked derivation (isImage + notice ride along — a cache hit keeps both). */
+/** The memoized masked derivation (lines + isImage + notice ride along — a cache hit keeps all). */
 interface ReadDerivation {
   /** The result identity (a stable result costs one lookup per frame). */
   result: object;
-  /** The path:offset key. */
+  /** The path:offset:limit key. */
   key: string;
   /** The masked text (tail notices lifted). */
   masked: string;
+  /** The masked text split into lines. */
+  lines: string[];
   /** Whether the result carries an image block (note, not file text — no gutter). */
   isImage: boolean;
   /** The lifted user-limit notice ("" when none). */
@@ -517,9 +530,9 @@ interface ReadDerivation {
 
 /**
  * The read row-state memo: the seed memo plus the masked-derivation cell
- * (result identity + path:offset key — an unchanged frame reuses the
- * masked text instead of re-running surfaceSecrets per render; limit
- * rides the result identity, so it needs no key slot of its own).
+ * (result identity + path:offset:limit key — an unchanged frame reuses
+ * the masked text and its line split instead of re-running
+ * surfaceSecrets per render).
  */
 type ReadRowMemo = SeedTextMemo & {
   /** The memoized masked derivation. */
@@ -619,17 +632,17 @@ export function createReadRenderer(
       const memoState = ctx.state as ReadRowMemo;
       const {
         masked,
+        lines: contentLines,
         isImage: isImageResult,
         notice: moreLinesNotice,
       } = deriveReadMasked({
         memo: memoState,
         result,
-        key: `${toPosixPath(raw)}:${args?.offset ?? 0}`,
+        key: `${toPosixPath(raw)}:${args?.offset ?? 0}:${args?.limit ?? ""}`,
         raw,
         cwd: ctx.cwd,
         limit: args?.limit,
       });
-      const contentLines = linesOf(masked);
       // Folded shows the preview only: no seed, no notice, no Took.
       if (!options.expanded) {
         return assembleOutputBody({

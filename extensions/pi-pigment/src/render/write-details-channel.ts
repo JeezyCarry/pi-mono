@@ -11,9 +11,10 @@
  * scoped to `toolName === "write"`.
  *
  * Self-check, not blind trust: on `tool_result` the target file is
- * re-read and must byte-equal the content the call supplied. A mismatch
- * (a sibling write landed between our pre-read and the SDK's queued
- * write; another extension rewrote the arguments instead; the write was
+ * re-read and must byte-equal the content arg the result carries (the
+ * validated args execution actually received, so an in-place argument
+ * mutation is observed, not missed). A mismatch (a sibling write landed
+ * between our pre-read and the SDK's queued write; the write was
  * aborted) drops the details and the renderer falls back to the plain
  * line — a missing preview is always preferable to a lying one. This is
  * also why the channel cannot be a `tool_execution_end` listener: that
@@ -30,7 +31,12 @@
  * `registerWriteDetailsChannel` call owns its map.
  */
 
-import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ToolCallEvent,
+  ToolResultEvent,
+  WriteToolInput,
+} from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 
 import { createBoundedFifoMap } from "#src/core/bounded-map.ts";
@@ -40,14 +46,15 @@ import type { KitGetter } from "./kit.ts";
 import { readDecorativeText, resolveToolPath } from "./paths.ts";
 import { writeResultDetails } from "./write-details.ts";
 
-/** One in-flight write's pre-read: the old file state and the call's content. */
+/**
+ * One in-flight write's pre-read: the resolved path and the old file state.
+ * The content and display path are NOT stashed — the paired `tool_result`
+ * event's `input` carries the same validated args object execution saw, so
+ * reading them there needs no second copy.
+ */
 interface WriteStash {
-  /** The display path the call supplied (language detection + new-file key). */
-  filePath: string;
   /** The resolved absolute path (the pre-read and the post-write re-read). */
   resolvedPath: string;
-  /** The content the call supplied (what the write must have landed). */
-  content: string;
   /** The file's pre-write content, or null when it did not exist. */
   oldText: string | null;
 }
@@ -94,14 +101,9 @@ export function registerWriteDetailsChannel(pi: ExtensionAPI, getKit: KitGetter)
       // renderers (or reports no kit yet). FFF never claims write.
       const kit = kitToDecorate(pi, getKit(), "write");
       if (kit === undefined) return;
-      const input = event.input;
-      const filePath = input.path ?? "";
-      const content = typeof input.content === "string" ? input.content : "";
-      const resolvedPath = resolveToolPath(kit.cwd, filePath);
+      const resolvedPath = resolveToolPath(kit.cwd, event.input.path ?? "");
       stashes.set(event.toolCallId, {
-        filePath,
         resolvedPath,
-        content,
         oldText: readDecorativeText(resolvedPath) ?? null,
       });
     } catch {
@@ -115,11 +117,16 @@ export function registerWriteDetailsChannel(pi: ExtensionAPI, getKit: KitGetter)
     const stash = stashes.get(event.toolCallId);
     stashes.delete(event.toolCallId);
     if (stash === undefined || event.isError) return;
+    // The content arg the tool actually received (in-place mutations
+    // included — the result event's input IS the validated args object
+    // execution saw), plus the display path for language/new-file keying.
+    const input = event.input as Partial<WriteToolInput>;
+    const content = typeof input.content === "string" ? input.content : "";
     // The self-check: only claim a diff when what landed IS what the call
-    // supplied. A sibling write, a changed argument, or an aborted
-    // operation leaves the disk differing → no details → plain fallback.
+    // supplied. A sibling write or an aborted operation leaves the disk
+    // differing → no details → plain fallback.
     const landed = readDecorativeText(stash.resolvedPath);
-    if (landed === undefined || landed !== stash.content) return;
-    return { details: writeResultDetails(stash.oldText, stash.content, stash.filePath) };
+    if (landed === undefined || landed !== content) return;
+    return { details: writeResultDetails(stash.oldText, content, input.path ?? "") };
   });
 }

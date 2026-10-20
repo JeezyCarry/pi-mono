@@ -146,7 +146,7 @@ export function createGrepRenderer(
       // stable result costs one lookup per trigger frame.
       const derive = outputMemoOf(ctx.state);
       const derived = derive(result);
-      const { output, lines } = derived;
+      const { lines } = derived;
       // The pattern/flags ride the styled closure (the swap key's stamps
       // cover the content, scheme, footer, expand and streaming states —
       // the args are settled per the SDK contract, so they need no stamp).
@@ -161,7 +161,7 @@ export function createGrepRenderer(
         text,
         prefix: "g",
         lines,
-        isEmpty: !output.trim(),
+        isEmpty: derived.isEmpty,
         budget: COLLAPSED_LINES.grep,
         derived,
         view,

@@ -1,7 +1,8 @@
 /**
- * Classifier lane adapter: one System One attempt behind the pool's three-state
- * seam. Owns the SDK call, answer projection, verdict synthesis, and the
- * terminalize closure — the raw error never leaves this module.
+ * Classifier lane adapter: one registry classifier attempt behind the pool's
+ * three-state seam. Owns the classify call, answer projection, verdict
+ * synthesis, and the terminalize closure — the raw error never leaves this
+ * module.
  *
  * Availability table is shared with the chat lane (failover switches
  * backends; it is not same-backend retry): quota/payment limits, vanished
@@ -11,46 +12,46 @@
  */
 
 import { emitCallFailure } from "#src/audit/call-failure.ts";
-import type { DirectProviderConfig } from "#src/config/config-schema.ts";
+import { MODEL_ANSWERS_EVENT } from "#src/audit/events.ts";
+import type { AiGuardConfig } from "#src/config/config-schema.ts";
 import type { ReviewOutcome } from "#src/model/model-verdict.ts";
-import { classifyFailure, failoverReason } from "#src/review/failure-taxonomy.ts";
+import { classifyBackendError } from "#src/review/failure-taxonomy.ts";
 import type {
   AttemptResult,
   AttemptSpec,
   ClassifierPoolEndpoint,
-  ClassifierProvider,
-  ClassifierRegistryEndpoint,
   LaneAdapter,
   PoolEndpoint,
 } from "#src/review/pool.ts";
 import type { EngineCallContext, EngineReviewResult } from "#src/review/reviewer-engine.ts";
+import { errorClassName } from "#src/utils.ts";
 
-import { type ClassifierClientLike, buildClassifierRequest, createDirectClient } from "./client.ts";
-import { directKey } from "./endpoints.ts";
+import {
+  type ClassifierClientAccessor,
+  type ClassifierClientLike,
+  buildClassifierRequest,
+} from "./client.ts";
 import type { ClassifierOverlay } from "./instructions.ts";
 import { projectClassifierAnswers, synthesizeClassifierVerdict } from "./verdict.ts";
 
 export interface ClassifierAdapterDeps {
   /** The classifier-scoped config slice (thresholds + resolved instructions). */
   config: {
-    classifier: DirectProviderConfig["classifier"];
+    classifier: AiGuardConfig["classifier"];
     instructions: ClassifierOverlay;
+    /**
+     * Sampling temperature for the classifier call. `undefined` omits the
+     * field, so the backend default applies. TypeSafe ignores it (its
+     * protocol carries no sampling knob); backends that do apply it
+     * (llama-cpp scales the label softmax) read it from this slot.
+     */
+    temperature: number | undefined;
   };
   /**
-   * Client factory, memoized per provider identity (baseUrl + apiKey).
-   * Defaults to the real SDK constructor; tests inject fakes here.
-   * Production prebuilds every direct endpoint's client at registration
-   * so an unresolvable key/baseUrl fails fast, not per ask. Registry
-   * endpoints never reach this factory — use `registryClient` instead.
+   * Client seam for a classifier endpoint. Production passes the accessor
+   * prebuilt at registration, so per-ask resolution never throws here.
    */
-  createClient?: (provider: ClassifierProvider) => ClassifierClientLike;
-  /**
-   * Registry client factory for `backend: "registry"` endpoints: receives
-   * the resolved endpoint and returns a `ClassifierClientLike` facade over
-   * `modelRegistry.classify`. Production prebuilds one facade per registry
-   * endpoint at registration, so per-ask resolution never throws here.
-   */
-  registryClient?: (endpoint: ClassifierRegistryEndpoint) => ClassifierClientLike;
+  registryClient?: ClassifierClientAccessor;
   /** Injected clock (tests only). */
   now?: () => number;
 }
@@ -59,32 +60,16 @@ export interface ClassifierAdapterDeps {
  * Create the classifier lane adapter.
  *
  * @param deps - The classifier-scoped config slice and client factory.
- * @returns A `LaneAdapter` attempting one System One endpoint per call.
+ * @returns A `LaneAdapter` attempting one classifier endpoint per call.
  */
 export function createClassifierAdapter(deps: ClassifierAdapterDeps): LaneAdapter {
   const { config } = deps;
   const { classifier } = config;
   const now = deps.now ?? Date.now;
-  const createClient = deps.createClient ?? createDirectClient;
-  // One construction path: memoize per provider identity so shared
-  // credentials reuse a client and per-endpoint models stay distinct.
-  // Direct backends only — registry endpoints never reach createClient
-  // (the facade resolves them through the model registry instead).
-  const built = new Map<string, ClassifierClientLike>();
   const clientFor = (endpoint: ClassifierPoolEndpoint): ClassifierClientLike => {
-    if (endpoint.backend === "registry") {
-      const facade = deps.registryClient;
-      if (!facade)
-        throw new Error("classifier adapter received a registry endpoint without a facade");
-      return facade(endpoint);
-    }
-    const cacheKey = directKey(endpoint.provider);
-    let client = built.get(cacheKey);
-    if (!client) {
-      client = createClient(endpoint.provider);
-      built.set(cacheKey, client);
-    }
-    return client;
+    const facade = deps.registryClient;
+    if (!facade) throw new Error("classifier adapter received an endpoint without a facade");
+    return facade(endpoint);
   };
 
   return {
@@ -99,38 +84,61 @@ export function createClassifierAdapter(deps: ClassifierAdapterDeps): LaneAdapte
       const modelId = endpoint.id;
       const startedAt = now();
       try {
-        const response = await clientFor(endpoint).systemOne(
-          buildClassifierRequest(ctx.transcript, ctx.request, config.instructions, endpoint.model),
+        const response = await clientFor(endpoint).classify(
+          buildClassifierRequest(ctx.transcript, ctx.request, config.instructions),
           {
-            timeout: attemptTimeoutMs,
-            // SDK retries each get a fresh `timeout`, so only a signal bounds
-            // their sum: without it a single-endpoint walk (which keeps those
-            // retries) could outlive the budget the pool advertises.
+            timeoutMs: attemptTimeoutMs,
+            // Transport retries each get a fresh budget, so only a signal
+            // bounds their sum: without it a single-endpoint walk (which
+            // keeps those retries) could outlive the budget the pool
+            // advertises.
             signal: AbortSignal.timeout(walkRemainingMs),
             // With backups in the walk the pool's next hop is the retry:
-            // each SDK retry would spend the shared walk budget again.
-            ...(hasFailover ? { retry: { maxRetries: 0 } } : {}),
+            // each transport retry would spend the shared walk budget again.
+            ...(hasFailover ? { maxRetries: 0 } : {}),
+            // `undefined` stays absent: backends that ignore sampling keep
+            // their default, and no absent-key serialization is disturbed.
+            ...(config.temperature !== undefined ? { temperature: config.temperature } : {}),
           },
         );
+        // Emitted for every verdict, not just defers: a policy replay needs
+        // the answers that produced an allow or a deny too, and the audit
+        // record carries a sentinel for those.
+        ctx.log.debug(MODEL_ANSWERS_EVENT, {
+          requestId: ctx.requestId,
+          modelId,
+          answers: response.answers,
+        });
         const outcome: ReviewOutcome = synthesizeClassifierVerdict(
           projectClassifierAnswers(response.answers),
           classifier,
           now() - startedAt,
         );
+        // Usage rides the outcome into the structured audit record; the
+        // rawReply keeps it too, so a record reader never depends on one path.
+        if (response.usage !== undefined) outcome.usage = response.usage;
         outcome.rawReply = JSON.stringify({ answers: response.answers, usage: response.usage });
         return { kind: "answered", result: { outcome, modelId } };
       } catch (error) {
-        const reason = failoverReason(error);
-        const deferKind = classifyFailure(error);
+        const { reason, deferKind } = classifyBackendError(error);
+        const diagnostic = errorClassName(error);
         // Recorded where the failure is observed, not where the walk ends: a
         // retryable failure that a backup supersedes never reaches `finalize`,
-        // and the chat lane's own catch records that attempt too.
+        // and the chat lane's own catch records that attempt too. The class
+        // name (never the message: URLs and keys hide in bodies) is the one
+        // question the review log must answer on its own — "was the guard
+        // broken?" — without paging the debug stream.
         emitCallFailure(ctx, deferKind, error);
         // One terminal-defer builder serves both exits: `finalize` runs on
         // exhaustion (backup verdicts stay uncached like the chat lane),
         // the terminal path ships immediately (primary keeps its default).
         const terminalDefer = (): EngineReviewResult => ({
-          outcome: { verdict: { kind: "defer" }, deferKind, latencyMs: now() - startedAt },
+          outcome: {
+            verdict: { kind: "defer" },
+            deferKind,
+            latencyMs: now() - startedAt,
+            diagnostic: { kind: "call-error", errorClass: diagnostic },
+          },
           modelId,
         });
         if (reason) {

@@ -122,7 +122,7 @@ describe("withAgentInstruction", () => {
     expect(reason).toContain("unsafe");
     // The identity framing and the behavioral instruction are the contract.
     expect(reason).toContain("not the user");
-    expect(reason).toContain("Do not rephrase");
+    expect(reason).toContain("Do not retry or work around it");
     expect(reason).toMatch(OPERATOR_COPY_SHAPE);
   });
 

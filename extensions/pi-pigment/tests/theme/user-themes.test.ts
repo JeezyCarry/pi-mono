@@ -32,6 +32,18 @@ const agentDir = "/agent";
 const projectThemes = (): string => join(cwd, ".pi", "extensions", "pigment", "themes");
 const globalThemes = (): string => join(agentDir, "extensions", "pigment", "themes");
 
+/**
+ * The conversion issues that are actually problems. A style-zone note says the
+ * slot reads but is not AA, and the policy keeps those colors as authored —
+ * informational, not a defect.
+ *
+ * @param issues - The conversion issues.
+ * @returns The subset that is not a style-zone note.
+ */
+function problems(issues: ReadonlyArray<{ message: string }>): ReadonlyArray<{ message: string }> {
+  return issues.filter((issue) => !issue.message.includes("readable, not AA"));
+}
+
 /** A minimal valid dark theme source. */
 const DARK_SOURCE = JSON.stringify({
   type: "dark",
@@ -80,7 +92,7 @@ describe("the manual conversion channel", () => {
   it("converts a source into a pigment-*.json output NEXT TO it", () => {
     writeFile(join(projectThemes(), "mine.json"), DARK_SOURCE);
     const { results, issues } = convertThemes({ cwd, agentDir }, ["mine"]);
-    expect(issues).toEqual([]);
+    expect(problems(issues)).toEqual([]);
     expect(results).toEqual([{ ok: true, stem: "mine" }]);
     const out = join(projectThemes(), outputFileName("mine"));
     expect(existsSync(out)).toBe(true);
@@ -243,14 +255,13 @@ describe("the manual conversion channel", () => {
     expect(listConvertCandidates({ cwd, agentDir })).toEqual([]);
   });
 
-  it("user conversion skips the AA sweep — author colors land verbatim", () => {
+  it("runs the same AA policy as the bundled ship path", () => {
     writeFile(
       join(projectThemes(), "low-contrast.json"),
       JSON.stringify({
         type: "dark",
-        // #2a2a2a comments on a #282c34 canvas are nearly invisible — the
-        // bundled ship's sweep would nudge them readable; the USER channel
-        // keeps them exactly (the enforcement boundary: user set = verbatim).
+        // #2a2a2a comments on a #282c34 canvas are nearly invisible; a
+        // Generated theme is enforced like any other, so they are lifted.
         tokenColors: [{ scope: "comment", settings: { foreground: "#2a2a2a" } }],
         colors: { "editor.background": "#282c34" },
         diff: { added: { text: "#9bf7b0" }, removed: { text: "#f7a45c" } },
@@ -260,9 +271,9 @@ describe("the manual conversion channel", () => {
     const doc = JSON.parse(
       readFileSync(join(projectThemes(), "pigment-low-contrast.json"), "utf-8"),
     ) as PiThemeJson;
-    expect(doc.colors.syntaxComment).toBe("#2a2a2a");
-    // The diff roots ride the same verbatim boundary (the converter's
-    // single enforce closure covers them — pinned separately here).
+    expect(doc.colors.syntaxComment).toBe("#808080");
+    // The author's diff values are the input, the emitted roots the enforced
+    // result; both already clear AA here, so they land byte-identical.
     expect(doc.colors.toolDiffAdded).toBe("#9bf7b0");
     expect(doc.colors.toolDiffRemoved).toBe("#f7a45c");
   });
@@ -271,7 +282,7 @@ describe("the manual conversion channel", () => {
     writeFile(join(projectThemes(), "plist-theme.tmTheme"), TM_THEME_PLIST);
     expect(listConvertCandidates({ cwd, agentDir })).toEqual(["plist-theme"]);
     const { results, issues } = convertThemes({ cwd, agentDir }, ["plist-theme"]);
-    expect(issues).toEqual([]);
+    expect(problems(issues)).toEqual([]);
     expect(results).toEqual([{ ok: true, stem: "plist-theme" }]);
     const doc = JSON.parse(
       readFileSync(join(projectThemes(), "pigment-plist-theme.json"), "utf-8"),
@@ -318,7 +329,7 @@ describe("the manual conversion channel", () => {
   it("a .tmTheme's selection/findHighlight keys map through to the pi slots", () => {
     writeFile(join(projectThemes(), "mapped.tmTheme"), TM_THEME_MAPPED_PLIST);
     const { results, issues } = convertThemes({ cwd, agentDir }, ["mapped"]);
-    expect(issues).toEqual([]);
+    expect(problems(issues)).toEqual([]);
     expect(results).toEqual([{ ok: true, stem: "mapped" }]);
     const doc = JSON.parse(
       readFileSync(join(projectThemes(), "pigment-mapped.json"), "utf-8"),
@@ -326,6 +337,91 @@ describe("the manual conversion channel", () => {
     expect(doc.colors.selectedBg).toBe("#49483e");
     expect(doc.colors.searchMatchBg).toBe("#ffe792");
     expect(doc.colors.searchMatchText).toBe("#000000");
+  });
+
+  /** A .tmTheme with diff-marker scopes (the converter's diff-source case). */
+  const TM_THEME_DIFF_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Diffy</string>
+	<key>settings</key>
+	<array>
+		<dict>
+			<key>settings</key>
+			<dict>
+				<key>background</key>
+				<string>#101010</string>
+				<key>foreground</key>
+				<string>#D0D0D0</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>markup.inserted</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#22CC44</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>scope</key>
+			<string>markup.deleted</string>
+			<key>settings</key>
+			<dict>
+				<key>foreground</key>
+				<string>#DD2233</string>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>`;
+
+  it("a .tmTheme's diff-marker scopes reach toolDiff* through the converter", () => {
+    writeFile(join(projectThemes(), "diffy.tmTheme"), TM_THEME_DIFF_PLIST);
+    const { results, issues } = convertThemes({ cwd, agentDir }, ["diffy"]);
+    expect(problems(issues)).toEqual([]);
+    expect(results).toEqual([{ ok: true, stem: "diffy" }]);
+    const doc = JSON.parse(
+      readFileSync(join(projectThemes(), "pigment-diffy.json"), "utf-8"),
+    ) as PiThemeJson;
+    expect(doc.colors.toolDiffAdded).toBe("#22cc44");
+    expect(doc.colors.toolDiffRemoved).toBe("#dd2233");
+  });
+
+  /** A .tmTheme whose selection is translucent (the alpha-composite case). */
+  const TM_THEME_ALPHA_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+	<key>name</key>
+	<string>Alpha</string>
+	<key>settings</key>
+	<array>
+		<dict>
+			<key>settings</key>
+			<dict>
+				<key>background</key>
+				<string>#101010</string>
+				<key>selection</key>
+				<string>#FFFFFF80</string>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>`;
+
+  it("a .tmTheme's translucent selection composites onto its canvas", () => {
+    writeFile(join(projectThemes(), "alpha.tmTheme"), TM_THEME_ALPHA_PLIST);
+    const { results, issues } = convertThemes({ cwd, agentDir }, ["alpha"]);
+    expect(results).toEqual([{ ok: true, stem: "alpha" }]);
+    const doc = JSON.parse(
+      readFileSync(join(projectThemes(), "pigment-alpha.json"), "utf-8"),
+    ) as PiThemeJson;
+    expect(doc.colors.selectedBg).toBe("#888888");
+    // A mid-gray selection is the composited result, and no text color can
+    // clear AA on it — reported, not hidden.
+    expect(issues.some((issue) => issue.message.includes("cannot reach 4.5:1"))).toBe(true);
   });
 
   it("a malformed .tmTheme is skipped with an issue, never a crash", () => {

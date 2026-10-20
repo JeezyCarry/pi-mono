@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { typesafeProvider } from "@earendil-works/pi-ai/providers/typesafe";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type {
   Authorizer,
@@ -22,7 +23,7 @@ import type {
   PromptPermissionDetails,
 } from "@gotgenes/pi-permission-system";
 
-import { DECISION_EVENT, MODEL_REPLY_EVENT } from "#src/audit/events.ts";
+import { DECISION_EVENT, MODEL_ANSWERS_EVENT, MODEL_REPLY_EVENT } from "#src/audit/events.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
 import type { ModelRegistryLike } from "#src/model/model-registry.ts";
 import { buildReviewerPool } from "#src/review/build-pool.ts";
@@ -57,6 +58,20 @@ export interface ModelSpec {
 }
 
 export function buildModel(args: ModelSpec): Model<any> {
+  if (args.provider === "typesafe") {
+    return {
+      id: args.modelId,
+      name: args.modelId,
+      api: "typesafe-system-one",
+      provider: args.provider,
+      baseUrl: args.baseUrl ?? "https://api.typesafe.ai/v1/",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 64_000,
+      maxTokens: 4096,
+    };
+  }
   const isAnthropic = args.provider === "anthropic";
   return {
     id: args.modelId,
@@ -74,7 +89,12 @@ export function buildModel(args: ModelSpec): Model<any> {
 }
 
 export function buildProvider(provider: ProviderName): AnyProvider {
-  return (provider === "openai" ? openaiProvider() : anthropicProvider()) as AnyProvider;
+  const table = {
+    openai: openaiProvider,
+    anthropic: anthropicProvider,
+    typesafe: typesafeProvider,
+  } as const;
+  return table[provider]() as AnyProvider;
 }
 
 // ── Session helpers ─────────────────────────────────────────────────
@@ -185,21 +205,26 @@ export function buildHarness(
   config: AiGuardConfig,
   model: Model<any> | null,
   apiKey: string,
-  providerInstance: AnyProvider | null, // null on the classifier path (no registry)
+  providerInstance: AnyProvider | null, // null on the chat path (no registry)
 ): {
   authorize: Authorizer["authorize"];
   log: AuthorizerLog & { events: LogEvent[] };
 } {
-  // Chat endpoints on the classifier path resolve to "no registry"; the
-  // classifier lane never touches it.
+  // Classifier endpoints on the chat path resolve to "no registry"; the
+  // chat lane never touches it.
   const nullRegistry: ModelRegistryLike = {
     find: () => undefined,
     getApiKeyAndHeaders: async () => ({ ok: false as const, error: "no registry" }),
     streamSimple: () => {
       throw new Error("no registry");
     },
+    classify: () => {
+      throw new Error("no registry");
+    },
+    findOfType: () => undefined,
   };
-  // A fake registry serving only chat endpoints (null on the pure-classifier path).
+  // A fake registry serving the one endpoint under test; both lanes
+  // delegate to the provider, standing in for the agent's registry.
   const poolEngine = (): ReviewerEngine => {
     const registry: ModelRegistryLike =
       model === null || providerInstance === null
@@ -207,13 +232,18 @@ export function buildHarness(
         : {
             find: () => model,
             getApiKeyAndHeaders: async () => ({ ok: true, apiKey }),
-            // Stand in for the agent's registry by delegating to the provider.
             streamSimple: (m, context, options) =>
               providerInstance.streamSimple(
                 m,
                 normalizeContext(context),
                 options as SimpleStreamOptions | undefined,
               ),
+            // The scripts bypass Pi's credential store and call the provider
+            // directly, so the CLI-supplied key rides along here. The
+            // extension runtime never does this: its key resolves inside Pi.
+            classify: (m, context, options) =>
+              providerInstance.classify!(m, context, { ...options, apiKey }),
+            findOfType: () => model as never,
           };
     return buildReviewerPool(config, {
       registry,
@@ -284,6 +314,8 @@ export interface DecisionFacts {
   latencyMs: number | undefined;
   attempts: number | undefined;
   rawReply: unknown;
+  /** The classifier's per-question answers; undefined on the chat lane. */
+  answers: unknown;
 }
 
 // Extract the analysis-relevant facts from a collected event list.
@@ -292,6 +324,9 @@ export function decisionFacts(events: LogEvent[]): DecisionFacts {
     | Record<string, unknown>
     | undefined;
   const reply = events.find((e) => e.event === MODEL_REPLY_EVENT)?.details as
+    | Record<string, unknown>
+    | undefined;
+  const answersEvent = events.find((e) => e.event === MODEL_ANSWERS_EVENT)?.details as
     | Record<string, unknown>
     | undefined;
   return {
@@ -304,5 +339,6 @@ export function decisionFacts(events: LogEvent[]): DecisionFacts {
     latencyMs: decision?.latencyMs as number | undefined,
     attempts: decision?.attempts as number | undefined,
     rawReply: reply?.rawReply ?? decision?.rawReply,
+    answers: answersEvent?.answers,
   };
 }

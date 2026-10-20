@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { buildAskContext } from "#src/review/request/ask.ts";
 import {
+  cacheIdentity,
   EXCLUDED_ASK_FIELDS,
   EXCLUDED_REQUEST_FACTS,
   reviewRequestCacheMaterial,
 } from "#src/review/request/review-request.ts";
+import { shortHash } from "#src/utils.ts";
 import { ev, makeDetails, payload } from "#test/fixtures.ts";
 
 describe("reviewRequestCacheMaterial", () => {
@@ -319,5 +321,30 @@ describe("cache-identity key set (single source pinned)", () => {
       "value",
       "workingDirectory",
     ]);
+  });
+});
+
+describe("cacheIdentity", () => {
+  const request = {
+    ask: buildAskContext(makeDetails({ value: "git status", command: "git status" }), "/p"),
+    target: "git",
+  };
+  const transcript = { trustedIntent: ["run git status"], toolCalls: [], strippedCount: 0 };
+
+  it("derives both hashes from the one material definition and the trusted intent", () => {
+    expect(cacheIdentity(request, transcript)).toEqual({
+      commandHash: shortHash(reviewRequestCacheMaterial(request)),
+      contextHash: shortHash("run git status"),
+    });
+  });
+
+  it("keys the context hash on the trusted intent only", () => {
+    const other = { ...transcript, trustedIntent: ["something else"] };
+    expect(cacheIdentity(request, other).contextHash).not.toBe(
+      cacheIdentity(request, transcript).contextHash,
+    );
+    expect(cacheIdentity(request, other).commandHash).toBe(
+      cacheIdentity(request, transcript).commandHash,
+    );
   });
 });

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { contentText, type TextContent } from "@earendil-works/pi-ai";
+
 /**
  * Shared prompt-sanitization, hashing, stringification, and record guards
  * used across modules.
@@ -92,8 +94,15 @@ const FORMAT_CHARACTERS = /[\u200B-\u200D\u2060\uFEFF\u202A-\u202E\u2066-\u2069]
  * (`user:p@ssw0rd@host`) is swallowed whole instead of up to the first `@`;
  * it cannot cross `/`, `?` or `#`, so a path like `example.com/@user` is left
  * alone. The scheme and host survive, the credentials go away.
+ *
+ * The scheme quantifier is bounded on purpose. An unbounded `*` backtracks
+ * over the rest of the input at every start position, so a long
+ * `[a-z0-9+.-]` run that never reaches `://` — a model reply, a base64 blob —
+ * costs O(n²): seconds past a few hundred KB, on a path every audit record
+ * walks. Real schemes are a handful of characters, so the bound redacts
+ * exactly the same URLs and the scan stays linear.
  */
-const URL_USERINFO_PATTERN = /([a-z][a-z0-9+.-]*:\/\/)[^/\s?#]*@/gi;
+const URL_USERINFO_PATTERN = /([a-z][a-z0-9+.-]{0,31}:\/\/)[^/\s?#]*@/gi;
 
 /** A run of whitespace — how every collapsed-text site splits and joins. */
 export const WHITESPACE_RUN = /\s+/g;
@@ -260,6 +269,20 @@ export function shortHash(str: string): string {
 }
 
 /**
+ * Join identity parts into one NUL-separated cache key, so adjacent fields
+ * cannot merge into a different key. NUL is the separator because it does
+ * not occur in the ids, paths, and keys this builds keys from (a part that
+ * itself contains NUL would split that field). `undefined` parts become
+ * empty, so an absent credential and an empty one key the same.
+ *
+ * @param parts - The identity parts, in canonical order.
+ * @returns The joined key.
+ */
+export function cacheKey(...parts: (string | undefined)[]): string {
+  return parts.map((part) => part ?? "").join("\0");
+}
+
+/**
  * Normalize an absent (undefined) or empty-string field to `null`.
  *
  * @param value - The field value to normalize.
@@ -278,14 +301,19 @@ export function normalizeEmpty(value: string | undefined | null): string | null 
 export function textFromContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
-  return content
-    .map((block: unknown) => {
-      if (!isObjectRecord(block)) return "";
-      if (block.type === "text" && typeof block.text === "string") return block.text;
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
+  // This boundary sees `unknown` from session entries, so validate before
+  // delegating: pi-ai's `contentText` reads `.type`/`.text` on every element
+  // and would throw on a null block (and stringify a non-string `text`).
+  const textBlocks = content.filter(
+    (block): block is TextContent =>
+      isObjectRecord(block) &&
+      block.type === "text" &&
+      typeof block.text === "string" &&
+      // An empty text block drops out: it would otherwise contribute a
+      // phantom separator to the join.
+      block.text !== "",
+  );
+  return contentText(textBlocks);
 }
 
 /**
@@ -351,6 +379,18 @@ export function safeStringify(value: unknown): string {
  */
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The thrown value's class name: `TypeError`, a realm's `Error`. A message
+ * can carry a URL, a key, or a key-shaped fragment; a class name cannot,
+ * so only the class travels into review logs and notify text.
+ *
+ * @param error - The thrown value.
+ * @returns Its constructor's name, or a stable token for non-errors.
+ */
+export function errorClassName(error: unknown): string {
+  return error instanceof Error ? error.constructor.name : typeof error;
 }
 
 /**

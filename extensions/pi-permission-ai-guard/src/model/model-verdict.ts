@@ -7,6 +7,7 @@
  * that produce the availability reasons live in `review/failure-taxonomy.ts`.
  */
 
+import type { Usage } from "@earendil-works/pi-ai";
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 /**
@@ -19,6 +20,7 @@ export type AvailabilityReason =
   | "timeout"
   | "connection"
   | "model-unresolved"
+  | "unknown-error"
   | `http-${number}`;
 
 /** Why a model call deferred (for logging/debugging). */
@@ -37,7 +39,7 @@ export type ModelCallDeferKind =
  * lines carry the clarification question, not the lean), so it cannot
  * anchor the operator's judgment.
  */
-export type VerdictLean = "allow" | "deny";
+export type VerdictLean = Extract<AuthorizerVerdict["kind"], "allow" | "deny">;
 
 /** Result of a model review call. */
 export interface ReviewOutcome {
@@ -57,6 +59,11 @@ export interface ReviewOutcome {
   lean?: VerdictLean;
   /** Model call latency in milliseconds (cumulative across attempts). */
   latencyMs: number;
+  /**
+   * Token usage and its catalog-priced cost, when the backend reports
+   * token counts. Audit-only: the lane's verdict never depends on it.
+   */
+  usage?: Usage;
   /** How many executeCall attempts produced this outcome (1, or 2 after the empty-reply retry). */
   attempts?: number;
   /** Raw model reply (for debug logging). */
@@ -64,20 +71,23 @@ export interface ReviewOutcome {
   /** Risk level from the model verdict, if provided. */
   riskLevel?: RiskLevel;
   /**
-   * Empty/aborted-reply diagnostics, present only when the reply carried
-   * no text — see {@link ReviewOutcomeDiagnostic}.
+   * Reply or call-failure diagnostics, present only when no verdict could be
+   * read out of the call — see {@link ReviewOutcomeDiagnostic}.
    */
   diagnostic?: ReviewOutcomeDiagnostic;
-  /** The latest trusted user message the intent check judged against (audit-only). */
-  anchorText?: string;
 }
 
 /**
- * Why a model reply carried no text, captured when the reply is empty or
- * aborted. Persisted into the decision record so the review log is
- * self-diagnosing even with the permission system's debug log disabled.
+ * Why a model call produced no verdict, persisted into the decision record so
+ * the review log is self-diagnosing even with the permission system's debug
+ * log disabled. Records written before the call-error variant carry no `kind`;
+ * their shape is the reply variant.
  */
-export interface ReviewOutcomeDiagnostic {
+export type ReviewOutcomeDiagnostic = EmptyReplyDiagnostic | CallErrorDiagnostic;
+
+/** A reply arrived, but carried no usable text. */
+export interface EmptyReplyDiagnostic {
+  kind: "empty-reply";
   /** The provider stop reason (null when unknown). */
   stopReason: string | null;
   /** The UNADJUSTED provider stop reason (through the aborted reclassification). */
@@ -86,6 +96,18 @@ export interface ReviewOutcomeDiagnostic {
   contentTypes: string[];
   /** Sanitized provider error message, when the reply carried one. */
   errorMessage: string | null;
+}
+
+/**
+ * The call threw before any reply existed — a backend outage, or a wiring bug
+ * inside the reviewer. Only the error's class name is kept: an error message
+ * can carry a URL, a key, or a key-shaped fragment, and the debug stream holds
+ * the sanitized text for whoever needs it.
+ */
+export interface CallErrorDiagnostic {
+  kind: "call-error";
+  /** The thrown value's class name (`TypeError`, `Error`), or its type. */
+  errorClass: string;
 }
 
 /**

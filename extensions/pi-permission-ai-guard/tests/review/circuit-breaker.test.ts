@@ -121,7 +121,7 @@ describe("breaker accounting steps", () => {
   it("accountModelOutcome records the model verdict and credits machinery denials only", () => {
     const s = new CircuitBreaker();
     // A machinery denial: original defer + emitted deny + non-model-defers.
-    accountModelOutcome(s, "defer", { kind: "deny", reason: "x" });
+    accountModelOutcome(s, "defer", { kind: "deny", reason: "x" }, "call-failed");
     // Two credits (real defer is a no-op, machinery is consecutive-only) →
     // consecutive = 1, total = 0.
     expect(s.trippedTier({ consecutive: 1, total: 200, verdict: "deny" })).toBeDefined();
@@ -132,8 +132,24 @@ describe("breaker accounting steps", () => {
   it("accountModelOutcome records real denies into both tiers regardless of the emitted mapping", () => {
     const s = new CircuitBreaker();
     // permissive maps a soft deny to allow — the recording keeps the model's deny.
-    accountModelOutcome(s, "deny", { kind: "allow" });
+    accountModelOutcome(s, "deny", { kind: "allow" }, undefined);
     expect(s.trippedTier({ consecutive: 1, total: 20, verdict: "deny" })).toBeDefined();
     expect(s.trippedTier({ consecutive: 2, total: 1, verdict: "deny" })).toBeDefined();
+  });
+
+  it("credits a machinery defer the mode routed to a human ask", () => {
+    // The default lane emits a defer for a call that failed — not a deny — so
+    // without this credit a reviewer that can no longer answer asks forever
+    // and the streak that should trip never moves.
+    const s = new CircuitBreaker();
+    accountModelOutcome(s, "defer", { kind: "defer" }, "call-failed");
+    accountModelOutcome(s, "defer", { kind: "defer" }, "call-failed");
+    expect(s.trippedTier({ consecutive: 3, total: 200, verdict: "deny" })).toBeUndefined();
+    accountModelOutcome(s, "defer", { kind: "defer" }, "call-failed");
+    expect(s.trippedTier({ consecutive: 3, total: 200, verdict: "deny" })).toBeDefined();
+    // A model's own defer is a judgment, not a failure: it stays uncounted.
+    const t = new CircuitBreaker();
+    for (let i = 0; i < 3; i++) accountModelOutcome(t, "defer", { kind: "defer" }, "model-defer");
+    expect(t.trippedTier({ consecutive: 1, total: 200, verdict: "deny" })).toBeUndefined();
   });
 });

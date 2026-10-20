@@ -139,7 +139,7 @@ describe("output tool renderers (grep/find/ls/bash/powershell/read)", () => {
           highlighted = component.text.text;
           // The AA-enforced string color (the raw syntaxString is
           // lightened for the dark test scheme).
-          if (highlighted.includes("38;2;224;185;169m")) break;
+          if (highlighted.includes("38;2;223;184;167m")) break;
           await new Promise((resolve) => setTimeout(resolve, 20));
         }
         const betaLine = highlighted.split("\n").find((l) => plain(l).includes("beta"));
@@ -159,7 +159,7 @@ describe("output tool renderers (grep/find/ls/bash/powershell/read)", () => {
       // beta sits INSIDE the template → the string color (AA-enforced
       // form; the raw syntaxString 206,145,120 lightens on the dark
       // canvas).
-      expect(betaLine).toContain("38;2;224;185;169m");
+      expect(betaLine).toContain("38;2;223;184;167m");
       expect(betaLine).not.toContain("38;2;220;220;170m");
     },
   );

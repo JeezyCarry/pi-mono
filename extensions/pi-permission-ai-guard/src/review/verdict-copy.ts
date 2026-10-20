@@ -11,6 +11,68 @@ import type { MachineryFailureKind } from "#src/model/machinery-kinds.ts";
 import type { RiskLevel } from "#src/model/model-verdict.ts";
 
 /**
+ * The classifier lane's synthesized lines. The synthesis in
+ * engines/classifier/verdict.ts decides the outcome shape; these render it.
+ * Deliberately not shared with the chat lane's wording (prompt-principles
+ * §12): the defer shape is the contract, the words stay per-lane.
+ */
+
+/**
+ * The danger-hit prefix: readers attribute a defer to its lane by it.
+ * Names a concern, not a confirmed hit — the low-confidence branch
+ * has not established that the rule matches.
+ *
+ * @param category - The danger category in words.
+ * @returns The category-leading prefix.
+ */
+export function classifierDangerCriteria(category: string): string {
+  return `flagged ${category}`;
+}
+
+/**
+ * The confirmation note riding behind the danger prefix in parentheses.
+ * The two branches name different unknowns: a trusted reading whose
+ * authorization is established, versus a reading whose match itself
+ * is unestablished.
+ *
+ * @param dangerTrusted - Whether the danger reading cleared the confidence floor.
+ * @returns The parenthetical confirmation note.
+ */
+export function classifierDangerNote(dangerTrusted: boolean): string {
+  return dangerTrusted ? "you requested this; proceed?" : "unsure this applies; proceed?";
+}
+
+/**
+ * The low-confidence defer: names the reading that fell short.
+ *
+ * @param dangerReadingShort - Whether the danger reading fell short.
+ * @returns The uncertain defer line.
+ */
+export function classifierUncertainReason(dangerReadingShort: boolean): string {
+  return dangerReadingShort
+    ? "unsure this is dangerous (safe to run?)"
+    : "unsure how much damage this could do (safe to run?)";
+}
+
+/**
+ * The authorized-but-costly defer: the anchor's request is why it confirms.
+ *
+ * @returns The costly defer line.
+ */
+export function classifierCostlyReason(): string {
+  return "authorized but costly or hard to reverse (proceed?)";
+}
+
+/**
+ * The intent-gap defer.
+ *
+ * @returns The intent-gap defer line.
+ */
+export function classifierIntentGapReason(): string {
+  return "no matching request (did you ask for it?)";
+}
+
+/**
  * The deny reason when the reviewer's own uncertainty is denied with no
  * clarification request attached.
  *
@@ -30,7 +92,7 @@ export function uncertainDenyReason(mode: Mode): string {
  * @returns The notification message.
  */
 export function machineryDeferNotice(kind: MachineryFailureKind): string {
-  return `reviewer could not complete the review (${kind}), deferring to you`;
+  return `review unavailable (${kind}); you decide`;
 }
 
 /**
@@ -46,7 +108,7 @@ export function machineryDenyReason(
   deferKind: MachineryFailureKind | undefined,
   mode: Mode,
 ): string {
-  return `reviewer could not complete the review (${deferKind ?? "unknown"}), so ${mode} mode denied the request`;
+  return `review unavailable (${deferKind ?? "unknown"}), so ${mode} denied it`;
 }
 
 /**
@@ -64,10 +126,16 @@ export type DenyInstructionSource = "content" | "machinery";
 
 /**
  * The behavioral instruction for a content deny (the request was judged). No
- * trailing period: the host's agent-side reason render appends its own.
+ * trailing period: the host's agent-side reason render appends its own. The
+ * reader is the agent, so the unlocking move is named as the user's: a content
+ * deny means the anchor did not authorize the action, and a fresh explicit
+ * request from the user is what a later review reads as authorization (a
+ * danger hit then confirms with them rather than being denied outright — see
+ * {@link synthesizeClassifierVerdict}). The prohibition names the two bypass
+ * shapes (retry, work-around); a rephrase is one of them, not a third thing.
  */
 const CONTENT_DENY_INSTRUCTION =
-  "Automatic review denied this, not the user. Do not rephrase, retry, or work around it; if the user wants it, they should ask explicitly";
+  "Denied by automatic review, not the user. Do not retry or work around it; the user can request it explicitly if it matters";
 
 const MACHINERY_DENY_INSTRUCTION =
   "Automatic review failed (not the request). Retry later, or ask the user to request it if urgent";

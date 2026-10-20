@@ -77,9 +77,21 @@ export function collapseTail(hidden: number, theme: RenderTheme, expandHint: str
 export interface DerivedOutput {
   /** The full inert output text. */
   output: string;
+  /**
+   * Whether the output is empty (the empty guard — no per-frame trim).
+   * Per-producer semantics: grep/find/ls mean "no non-whitespace
+   * text"; read means "exact empty string" (its folded/expanded
+   * guards already test `masked === ""`, so the flag just records it).
+   */
+  isEmpty: boolean;
   /** The content lines: empty lines kept (grep's budget unit), the SDK's limit notice excluded. */
   lines: string[];
-  /** Non-empty content lines (find/ls: the SDK's path-list shape), the notice excluded. */
+  /**
+   * Non-empty content lines (find/ls: the SDK's path-list shape), the
+   * notice excluded. Read aliases `lines` (its window slices `lines`
+   * and `outputTaskKey` reads only output.length + hash) — do not read
+   * emptiness-filtered semantics off a read derivation.
+   */
   entries: string[];
   /**
    * The SDK's bracketed limit notice ("[1000 results limit reached. …]")
@@ -441,6 +453,7 @@ export function outputMemoOf(cell: OutputMemoCell): OutputDerive {
     const lines = body ? linesOf(body) : [];
     const derived: DerivedOutput = {
       output,
+      isEmpty: output.trim() === "",
       lines,
       // find/ls filter empty lines (the SDK's path list shape); grep
       // keeps them (a blank line is still an output line for its budget).
@@ -601,8 +614,18 @@ export function stopTiming(
   return state.endedAt - state.startedAt;
 }
 
-/** The view's inputs: the budgets and the footer sources. */
-export interface ViewOptions {
+/** The view's inputs: the window budgets plus the footer sources. */
+export interface ViewOptions extends WindowOptions {
+  /** The measured execution time (undefined while pending, and on a resumed row); unset = no footer. */
+  durationMs?: number;
+  /** The SDK's limit notice (DerivedOutput.notice) — painted as the warning footer line. */
+  notice?: string;
+  /** The pi theme (muted fg). */
+  theme: RenderTheme;
+}
+
+/** The window arithmetic's inputs: the collapsed budget and the optional expanded cap. */
+export interface WindowOptions {
   /**
    * The collapsed-state line budget (COLLAPSED_LINES.x). Unset = never
    * collapse (the window is always the full content).
@@ -616,12 +639,33 @@ export interface ViewOptions {
    * tail grammar. Unset = the expanded view shows everything.
    */
   expandedCap?: number;
-  /** The measured execution time (undefined while pending, and on a resumed row); unset = no footer. */
-  durationMs?: number;
-  /** The SDK's limit notice (DerivedOutput.notice) — painted as the warning footer line. */
-  notice?: string;
-  /** The pi theme (muted fg). */
-  theme: RenderTheme;
+}
+
+/** The window arithmetic's result: the shown slice and the hidden count. */
+export interface WindowSlice {
+  /** The lines inside the window. */
+  shown: string[];
+  /** The lines the window is hiding. */
+  hidden: number;
+}
+
+/**
+ * The window arithmetic: which lines to show and how many are hidden —
+ * the one authority for the collapse predicate and the hidden-count,
+ * shared by every collapsed body AND the error frame (whose tail is
+ * indented, not the footer block `collapsedView` composes). Two regimes:
+ * the collapsed budget, and the optional expanded cap.
+ *
+ * @param lines - The full output lines (already derived per tool).
+ * @param opts - The budgets (see WindowOptions).
+ * @returns The shown slice and the hidden count.
+ */
+export function collapsedWindow(lines: string[], opts: WindowOptions): WindowSlice {
+  const { budget, expanded, expandedCap } = opts;
+  const collapsed = !expanded && budget !== undefined && lines.length > budget;
+  const window = collapsed ? (budget ?? lines.length) : (expandedCap ?? lines.length);
+  const hidden = lines.length - Math.min(lines.length, window);
+  return { shown: lines.slice(0, window), hidden };
 }
 
 /** The collapsed window: the shown slice, the tail block, and the hidden count. */
@@ -643,7 +687,8 @@ export interface CollapsedWindow {
  * variance (the budgets, how lines are derived — filtering empties or
  * not) stays at call sites; this owns the shape: one window concept with
  * two regimes (collapsed budget + optional expanded cap) and one tail
- * grammar.
+ * grammar. The arithmetic is `collapsedWindow`; the error frame reuses
+ * that half only (its tail is indented).
  *
  * @param lines - The full output lines (already derived per tool).
  * @param opts - The view options (budgets and the measured duration).
@@ -651,13 +696,10 @@ export interface CollapsedWindow {
  * and no time was measured).
  */
 export function collapsedView(lines: string[], opts: ViewOptions): CollapsedWindow {
-  const { budget, expanded, expandedCap, durationMs, notice, theme } = opts;
+  const { expanded, durationMs, notice, theme } = opts;
   // An absent result source means no footer (write's create preview —
   // the SDK's own write renderer never showed timing either).
-  const collapsed = !expanded && budget !== undefined && lines.length > budget;
-  const window = collapsed ? (budget ?? lines.length) : (expandedCap ?? lines.length);
-  const hidden = lines.length - Math.min(lines.length, window);
-  const shown = lines.slice(0, window);
+  const { shown, hidden } = collapsedWindow(lines, opts);
   // Footers read top-down: the expand hint, the limit notice (the SDK's
   // warning about the whole output — the native renderers show the same
   // information as a `[Truncated: …]` line), and Took closes the tail

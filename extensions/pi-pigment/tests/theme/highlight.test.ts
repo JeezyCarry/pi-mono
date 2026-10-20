@@ -9,6 +9,8 @@ import { buildFakeTheme, makeRenderSession, resetPigmentForTest, viewFor } from 
 
 const DARK_BG = "\x1b[48;2;20;20;30m";
 const LIGHT_BG = "\x1b[48;2;250;250;250m";
+/** The light fixture's error surface — keeps the AA background set single-polarity. */
+const LIGHT_ERROR_BG = "\x1b[48;2;250;240;240m";
 
 const CODE = "const answer = 42;\n";
 
@@ -370,7 +372,9 @@ describe("the recommended pairs (the slash grammar)", () => {
       });
       const dark = await themeName(session.forTheme(themed({ successBg: DARK_BG })));
       expect(dark).toMatch(pair.dark ? new RegExp(`^${pair.dark}-aa-`) : /^pi-dark-/);
-      const light = await themeName(session.forTheme(themed({ successBg: LIGHT_BG })));
+      const light = await themeName(
+        session.forTheme(themed({ successBg: LIGHT_BG, errorBg: LIGHT_ERROR_BG })),
+      );
       expect(light).toMatch(pair.light ? new RegExp(`^${pair.light}-aa-`) : /^pi-light-/);
     }
   });

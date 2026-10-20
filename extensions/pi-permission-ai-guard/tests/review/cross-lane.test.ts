@@ -5,7 +5,6 @@
  */
 
 import type { AssistantMessage, ClassifierResult, Model } from "@earendil-works/pi-ai";
-import { APIError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 
 import { FALLBACK_EVENT, MODEL_CALL_ERROR_EVENT } from "#src/audit/events.ts";
@@ -20,11 +19,9 @@ import { createChatAdapter } from "#src/review/engines/chat/adapter.ts";
 import type { ModelCallFn } from "#src/review/engines/chat/call.ts";
 import { buildReviewSystemPrompt } from "#src/review/engines/chat/prompt.ts";
 import { createClassifierAdapter } from "#src/review/engines/classifier/adapter.ts";
-import type {
-  ClassifierClientLike,
-  ClassifierSystemOneResponse,
-} from "#src/review/engines/classifier/client.ts";
+import type { ClassifierClientLike } from "#src/review/engines/classifier/client.ts";
 import { DANGER_CRITERIA, DANGER_NONE } from "#src/review/engines/classifier/questions.ts";
+import { ClassifierApiError } from "#src/review/failure-taxonomy.ts";
 import { createReviewerPool } from "#src/review/pool.ts";
 import { buildAskContext } from "#src/review/request/ask.ts";
 import { isMachineryFailure } from "#src/review/reviewer-engine.ts";
@@ -50,16 +47,14 @@ const reviewCtx = (log: RecordingLogSink) => ({
   requestId: "cross-lane-test",
 });
 
-function classifierAllow(): ClassifierSystemOneResponse {
-  return {
-    model: "classifier-test",
-    usage: { input_tokens: 1, output_tokens: 0 },
+function classifierAllow(): ClassifierResult {
+  return classifierReply({
     answers: {
       danger_category: { type: "choice", choice: "none", confidence: 0.95, probabilities: {} },
-      intent_match: { type: "noul", noul: 0.9 },
-      risk: { type: "score", score: 0.2, confidence: 0.9, legend: {}, probabilities: {} },
-    } as ClassifierSystemOneResponse["answers"],
-  };
+      intent_match: { type: "bool", probability: 0.9 },
+      risk: { type: "score", score: 0.2, confidence: 0.9 },
+    },
+  });
 }
 
 function chatAllow(): AssistantMessage {
@@ -82,8 +77,7 @@ function chatAllow(): AssistantMessage {
   };
 }
 
-const httpError = (status: number) =>
-  APIError.fromResponse(status, { error: "no capacity" }, new Headers());
+const httpError = (status: number) => new ClassifierApiError(status, "no capacity");
 
 const registry = defaultRegistry({
   find: (provider, model) => ({ ...fakeModel, provider, id: model }) as Model<any>,
@@ -98,8 +92,7 @@ describe("cross-lane failover", () => {
       endpoints: [
         {
           lane: "classifier",
-          backend: "direct",
-          provider: { type: "typesafe", baseUrl: "https://primary.example", apiKey: "k" },
+          provider: "typesafe",
           model: "jev-1.13",
           timeoutMs: 5000,
           id: "typesafe/jev-1.13",
@@ -122,9 +115,10 @@ describe("cross-lane failover", () => {
               confidenceThreshold: 0.5,
             },
             instructions: {},
+            temperature: undefined,
           },
-          createClient: () => ({
-            systemOne: async () => {
+          registryClient: () => ({
+            classify: async () => {
               throw httpError(429);
             },
           }),
@@ -154,7 +148,7 @@ describe("cross-lane failover", () => {
 
   it("fails over from an chat primary to a classifier backup", async () => {
     const { events, log } = makeMergedRecordingLog();
-    const safeClassifier: ClassifierClientLike = { systemOne: async () => classifierAllow() };
+    const safeClassifier: ClassifierClientLike = { classify: async () => classifierAllow() };
     const engine = createReviewerPool({
       endpoints: [
         {
@@ -167,8 +161,7 @@ describe("cross-lane failover", () => {
         },
         {
           lane: "classifier",
-          backend: "direct",
-          provider: { type: "typesafe", baseUrl: "https://backup.example", apiKey: "k" },
+          provider: "typesafe",
           model: "jev-1.13",
           timeoutMs: 5000,
           id: "typesafe/jev-1.13",
@@ -194,8 +187,9 @@ describe("cross-lane failover", () => {
               confidenceThreshold: 0.5,
             },
             instructions: {},
+            temperature: undefined,
           },
-          createClient: () => safeClassifier,
+          registryClient: () => safeClassifier,
         }),
       },
     });
@@ -251,8 +245,9 @@ describe("cross-lane failover", () => {
       model: "primary",
       fallbacks: [
         {
-          provider: { type: "typesafe", baseUrl: "https://backup.example", apiKey: "k" },
+          provider: "typesafe",
           model: "jev-1.13",
+          modelType: "classifier",
         },
       ],
     });
@@ -270,32 +265,21 @@ describe("cross-lane failover", () => {
     ]);
   });
 
-  it("keeps the primary timeout top-level for both classifier backends", () => {
+  it("keeps the primary timeout top-level for the classifier lane", () => {
     // `classifier.timeoutMs` is gone: the primary's window is always the
     // top-level `timeoutMs`. The legacy `typesafe.timeoutMs` still parses
     // but no longer overrides anything.
-    const direct = configSchema.parse({
-      provider: { type: "typesafe", baseUrl: "https://primary.example", apiKey: "k" },
-      model: "jev-1.13",
-      timeoutMs: 60_000,
-      typesafe: { timeoutMs: 7_000 },
-      fallbacks: [{ provider: "openai", model: "backup" }],
-    });
-    const [directPrimary, directBackup] = resolvePoolEndpoints(direct);
-    expect(directPrimary?.timeoutMs).toBe(60_000);
-    expect(directBackup?.timeoutMs).toBe(10_000);
-
-    // The registry classifier primary — where `classifier.timeoutMs` used
-    // to be silently ignored — now reads the same top-level value.
-    const registryConfig = configSchema.parse({
+    const config = configSchema.parse({
       provider: "typesafe",
       model: "jev-latest",
       modelType: "classifier",
       timeoutMs: 60_000,
-      fallbacks: [],
+      typesafe: { timeoutMs: 7_000 },
+      fallbacks: [{ provider: "openai", model: "backup" }],
     });
-    const [registryPrimary] = resolvePoolEndpoints(registryConfig);
-    expect(registryPrimary?.timeoutMs).toBe(60_000);
+    const [primary, backup] = resolvePoolEndpoints(config);
+    expect(primary?.timeoutMs).toBe(60_000);
+    expect(backup?.timeoutMs).toBe(10_000);
   });
 
   it("scopes instructions per lane: a string broadcasts, slots stay per-lane", async () => {
@@ -318,8 +302,9 @@ describe("cross-lane failover", () => {
     });
     // A per-lane slot feeds only its own lane; the other runs built-ins.
     const overlay = configSchema.parse({
-      provider: { type: "typesafe", baseUrl: "https://primary.example", apiKey: "k" },
+      provider: "typesafe",
       model: "jev-1.13",
+      modelType: "classifier",
       instructions: { classifier: { background: "classifier background" } },
       fallbacks: [],
     });
@@ -342,8 +327,9 @@ describe("cross-lane failover", () => {
       model: "primary",
       fallbacks: [
         {
-          provider: { type: "typesafe", baseUrl: "https://backup.example", apiKey: "k" },
+          provider: "typesafe",
           model: "jev-1.13",
+          modelType: "classifier",
         },
       ],
       instructions: {
@@ -355,22 +341,20 @@ describe("cross-lane failover", () => {
     expect(chat).toEqual({ rules: "chat rules", replace: true });
     expect(classifier).toEqual({ background: "project background" });
 
-    const dangerAnswers = {
-      danger_category: {
-        type: "choice",
-        choice: "secrets_credentials",
-        confidence: 0.95,
-        probabilities: {},
-      },
-      intent_match: { type: "noul", noul: 0.2 },
-      risk: { type: "score", score: 0.95, confidence: 0.95, legend: {}, probabilities: {} },
-    } as ClassifierSystemOneResponse["answers"];
     const dangerClient: ClassifierClientLike = {
-      systemOne: async () => ({
-        model: "classifier-test",
-        usage: { input_tokens: 1, output_tokens: 0 },
-        answers: dangerAnswers,
-      }),
+      classify: async () =>
+        classifierReply({
+          answers: {
+            danger_category: {
+              type: "choice",
+              choice: "secrets_credentials",
+              confidence: 0.95,
+              probabilities: {},
+            },
+            intent_match: { type: "bool", probability: 0.2 },
+            risk: { type: "score", score: 0.95, confidence: 0.95 },
+          },
+        }),
     };
     const engine = createReviewerPool({
       endpoints: [
@@ -384,8 +368,7 @@ describe("cross-lane failover", () => {
         },
         {
           lane: "classifier",
-          backend: "direct",
-          provider: { type: "typesafe", baseUrl: "https://backup.example", apiKey: "k" },
+          provider: "typesafe",
           model: "jev-1.13",
           timeoutMs: 5000,
           id: "typesafe/jev-1.13",
@@ -403,8 +386,9 @@ describe("cross-lane failover", () => {
           config: {
             classifier: { intentThreshold: 0.5, riskThreshold: 0.5, confidenceThreshold: 0.5 },
             instructions: classifier,
+            temperature: undefined,
           },
-          createClient: () => dangerClient,
+          registryClient: () => dangerClient,
         }),
       },
     });
@@ -427,29 +411,22 @@ describe("registry backend resolution", () => {
     const [primary] = resolvePoolEndpoints(config);
     expect(primary).toMatchObject({
       lane: "classifier",
-      backend: "registry",
       provider: "typesafe",
       model: "jev-latest",
     });
   });
 
   it("builds each endpoint's audit identity with the endpoint", () => {
-    // The lane owns the spelling: chat and registry endpoints carry
-    // `provider/model`, a direct classifier endpoint the SDK protocol
-    // prefix. Built where the endpoint is built — the pool appends the walk
+    // The lane owns the spelling: an endpoint carries `provider/model`.
+    // Built where the endpoint is built — the pool appends the walk
     // position and nothing else.
     const chatConfig = configSchema.parse({ provider: "anthropic", model: "claude-haiku-4-5" });
     expect(resolvePoolEndpoints(chatConfig).map((e) => e.id)).toEqual([
       "anthropic/claude-haiku-4-5",
     ]);
 
-    const directConfig = configSchema.parse({ provider: { type: "typesafe" }, model: "jev-1.13" });
-    expect(resolvePoolEndpoints(directConfig).map((e) => e.id)).toEqual(["typesafe/jev-1.13"]);
-
-    // A deliberately non-typesafe provider id: the registry spelling must
-    // come from the endpoint itself, never from a hardcoded protocol prefix
-    // (the bug this replaced) — `typesafe/jev-latest` would hide it, since
-    // the wrong prefix and the right one spell the same string there.
+    // A deliberately non-typesafe provider id: the spelling must come from
+    // the endpoint itself, never from a hardcoded prefix.
     const registryConfig = configSchema.parse({
       provider: "cloudflare-workers-ai",
       model: "classify-v1",
@@ -474,14 +451,9 @@ describe("registry backend resolution", () => {
           ? { provider, id: model }
           : undefined;
       },
-      async classify(this: { runtime: unknown }, model: { id: string }) {
+      async classify(this: { runtime: unknown }) {
         seen.push(`classify:${String(this?.runtime !== undefined)}`);
-        return {
-          model: model.id,
-          stopReason: "stop",
-          answers: classifierAllow().answers,
-          usage: { input_tokens: 1, output_tokens: 0 },
-        };
+        return classifierAllow();
       },
       // The signatures deviate from `ModelRegistryLike` on purpose: this pin is
       // about `this`-binding and call shape, not type conformance.
@@ -505,14 +477,15 @@ describe("registry backend resolution", () => {
     expect(seen.some((s) => s.startsWith("classify:true"))).toBe(true);
   });
 
-  it("keeps object providers on classifier/direct and plain strings on chat", () => {
+  it("keeps a classifier string provider on the classifier lane and a chat one on chat", () => {
     const config = configSchema.parse({
-      provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "k" },
+      provider: "typesafe",
       model: "jev-1.13",
+      modelType: "classifier",
       fallbacks: [{ provider: "openai", model: "backup" }],
     });
     const [primary, backup] = resolvePoolEndpoints(config);
-    expect(primary).toMatchObject({ lane: "classifier", backend: "direct" });
+    expect(primary).toMatchObject({ lane: "classifier", provider: "typesafe" });
     expect(backup).toMatchObject({ lane: "chat" });
   });
 
@@ -524,7 +497,7 @@ describe("registry backend resolution", () => {
     });
     const skipped: Array<{ path: string; message: string }> = [];
     const endpoints = resolvePoolEndpoints(config, {
-      probe: () => false,
+      catalog: { findOfType: () => undefined },
       onSkipped: (issue) => skipped.push(issue),
     });
     expect(endpoints).toHaveLength(1);
@@ -550,46 +523,6 @@ describe("registry backend resolution", () => {
     ).toThrow(/not found in pi's model catalog/);
   });
 
-  it("throws on old pi without classifier support", () => {
-    const config = configSchema.parse({
-      provider: "typesafe",
-      model: "jev-latest",
-      modelType: "classifier",
-      fallbacks: [],
-    });
-    // No classify/findOfType: pre-0.99 registry shape.
-    expect(() => buildReviewerPool(config, { registry, modelCall: chatAllowCall })).toThrow(
-      /needs pi with classifier support/,
-    );
-  });
-
-  it("skips a classifier fallback on old pi instead of failing the session", () => {
-    // Same old pi, but the registry entry is a fallback: the fallback
-    // contract is "a broken backup degrades", so registration succeeds
-    // and the skip surfaces on the warn path.
-    const config = configSchema.parse({
-      provider: "anthropic",
-      model: "claude-haiku-4-5",
-      fallbacks: [{ provider: "typesafe", model: "jev-latest", modelType: "classifier" }],
-    });
-    const skipped: ConfigIssue[] = [];
-    // Old pi: probe is undefined, so resolve keeps the registry endpoint
-    // for the structural gate — which skips it (fallback, not primary)
-    // onto the warn path while the chat primary survives. The full build
-    // exercises the gate end to end.
-    const pool = buildReviewerPool(config, {
-      registry,
-      modelCall: chatAllowCall,
-      onSkippedFallback: (issue) => skipped.push(issue),
-    });
-    // ReviewerEngine exposes no endpoint list; assert the observable
-    // contract — registration succeeds (no throw) and the skip warns.
-    expect(pool).toBeDefined();
-    expect(skipped).toHaveLength(1);
-    expect(skipped[0]!.path).toBe("fallbacks.0");
-    expect(skipped[0]!.message).toContain("classifier support");
-  });
-
   it("never attempts a classifier fallback the gate rejected", async () => {
     // The warn path alone is not the guarantee: a rejected endpoint must
     // be physically absent, or the walk reaches an unrunnable backend on
@@ -600,10 +533,10 @@ describe("registry backend resolution", () => {
       fallbacks: [{ provider: "typesafe", model: "jev-latest", modelType: "classifier" }],
     });
     const skipped: ConfigIssue[] = [];
-    // Old pi: admission carries no probe, so the classifier fallback is
-    // rejected and never enters the list the pool walks.
+    // The catalog misses, so the classifier fallback is rejected and never
+    // enters the list the pool walks.
     const endpoints = resolvePoolEndpoints(config, {
-      probe: undefined,
+      catalog: { findOfType: () => undefined },
       onSkipped: (issue) => skipped.push(issue),
     });
     expect(endpoints.map((e) => e.lane)).toEqual(["chat"]);
@@ -631,8 +564,8 @@ describe("registry backend resolution", () => {
     // prebuilt facade instead of re-querying the catalog.
     let present = true;
     let calls = 0;
-    // `classify` returns pi-ai's classifier answers (bool/score/choice),
-    // which the facade projects back to SDK noul/choice/score shapes.
+    // `classify` returns pi-ai's classifier answers (bool/score/choice)
+    // directly — the lane's own shapes.
     const classifyResult = {
       api: REGISTRY_API,
       provider: "typesafe",

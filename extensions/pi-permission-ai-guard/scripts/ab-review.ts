@@ -146,6 +146,12 @@ interface RunResult {
   riskLevels: (string | null | undefined)[];
   deferKinds: (string | null | undefined)[];
   reasons: (string | undefined)[];
+  /**
+   * The classifier's per-question answers per run (undefined on the chat
+   * lane). This is the dump's replay input: a policy change can be re-scored
+   * offline against these answers instead of paying for another run.
+   */
+  answers: unknown[];
   /** The last repeat's latency; the dump reads one figure per case. */
   latencyMs: number | undefined;
   /** The repeats disagreed on the verdict or the category. */
@@ -182,11 +188,11 @@ const USAGE = `
 Usage: npx tsx scripts/ab-review.ts --lane <classifier|chat> [options]
 
 Options:
-  --lane <l>          "classifier" (typesafe direct SDK) or "chat" (registry model)
+  --lane <l>          "classifier" (registry classifier model) or "chat" (registry chat model)
   --provider <p>      Override the lane's provider
   --model <id>        Model id (or PI_AB_CLASSIFIER_MODEL / PI_AB_CHAT_MODEL)
   --base-url <url>    Base URL (or PI_AB_CLASSIFIER_BASE_URL / PI_AB_CHAT_BASE_URL)
-  --api-key <key>     API key (or TYPESAFE_API_KEY / PI_AB_CHAT_API_KEY)
+  --api-key <key>     API key (or PI_AB_CLASSIFIER_API_KEY / PI_AB_CHAT_API_KEY)
   --repeat <n>        Run each case n times (default 1)
   --only <rule>       Only run cases whose rule tag matches (repeatable,
                       comma-separated)
@@ -204,7 +210,7 @@ Options:
   --list              List the corpus ids and exit
   --help              Show this help
 
-Environment: TYPESAFE_API_KEY, PI_AB_CLASSIFIER_{MODEL,BASE_URL},
+Environment: PI_AB_CLASSIFIER_{MODEL,BASE_URL,API_KEY},
              PI_AB_CHAT_{MODEL,BASE_URL,API_KEY}.
 `;
 
@@ -278,7 +284,7 @@ function main(): void {
       },
       target: "ls",
     };
-    const built = buildClassifierRequest(transcript as never, request as never, overlay, "m");
+    const built = buildClassifierRequest(transcript as never, request as never, overlay);
     console.log(
       JSON.stringify(
         {
@@ -326,7 +332,7 @@ function resolveTarget(lane: Lane, values: Record<string, unknown>): ResolvedTar
       provider: (values.provider as string) ?? "typesafe",
       model: (values.model as string) ?? process.env.PI_AB_CLASSIFIER_MODEL ?? "",
       baseUrl: (values["base-url"] as string) ?? process.env.PI_AB_CLASSIFIER_BASE_URL,
-      apiKey: (values["api-key"] as string) ?? process.env.TYPESAFE_API_KEY ?? "",
+      apiKey: (values["api-key"] as string) ?? process.env.PI_AB_CLASSIFIER_API_KEY ?? "",
     };
   }
   return {
@@ -366,8 +372,9 @@ function buildConfig(
       ? { classifier: { background: variant.classifier.background } }
       : null;
     return configSchema.parse({
-      provider: { type: "typesafe", baseUrl: target.baseUrl, apiKey: target.apiKey },
+      provider: target.provider,
       model: target.model,
+      modelType: "classifier",
       reasoning: "off",
       timeoutMs,
       maxTokens: 4096,
@@ -389,7 +396,7 @@ function buildConfig(
     reasoning: "off",
     timeoutMs,
     maxTokens: 4096,
-    // Chat-only: the classifier's TypeSafe body carries no sampling field.
+    // Chat-only: the classifier body carries no sampling field.
     ...(temperature === null ? {} : { temperature }),
     surfaces,
     instructions: rules === null ? null : { chat: { rules, replace: true } },
@@ -406,7 +413,9 @@ function sessionFor(tc: AbCase) {
 
 // Recover the classifier danger category from a deny reason.
 function categoryFromReason(reason: string | undefined): string | undefined {
-  const m = /^matched a safety rule:\s*(.+)$/.exec(reason ?? "");
+  // A confirm-defer reason carries its note in trailing parentheses behind
+  // the category prefix; score the prefix, not the note.
+  const m = /^flagged\s*([a-z ]+?)(?:\s*\(|$)/.exec(reason ?? "");
   return m ? m[1].trim().replace(/\s+/g, "_") : undefined;
 }
 
@@ -495,14 +504,12 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
   }
   const config = buildConfig(lane, target, timeoutMs, variant, riskThreshold, temperature);
   const isClassifier = lane === "classifier";
-  const model = isClassifier
-    ? null
-    : buildModel({
-        provider: target.provider as ProviderName,
-        modelId: target.model,
-        baseUrl: target.baseUrl,
-      });
-  const providerInstance = isClassifier ? null : buildProvider(target.provider as ProviderName);
+  const model = buildModel({
+    provider: target.provider as ProviderName,
+    modelId: target.model,
+    baseUrl: target.baseUrl,
+  });
+  const providerInstance = buildProvider(target.provider as ProviderName);
 
   const allCases = AB_GROUPS.flatMap((g) => g.cases);
   const knownRules = new Set(allCases.map((c) => c.rule));
@@ -525,7 +532,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
   console.log("═".repeat(72));
   console.log(`  ab-review — lane ${lane}`);
   console.log(
-    `  provider ${target.provider}  model ${target.model}  base ${target.baseUrl ?? "(sdk)"}`,
+    `  provider ${target.provider}  model ${target.model}  base ${target.baseUrl ?? "(provider default)"}`,
   );
   console.log(`  repeat ${repeat}  cases ${cases.length}  variant ${variant?.label ?? "(none)"}`);
   console.log("═".repeat(72));
@@ -540,6 +547,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
     const riskLevels: (string | null | undefined)[] = [];
     const deferKinds: (string | null | undefined)[] = [];
     const reasons: (string | undefined)[] = [];
+    const answers: unknown[] = [];
     let latencyMs: number | undefined;
     let casePass = true;
     for (let i = 0; i < repeat; i++) {
@@ -557,6 +565,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
         riskLevels.push(facts.riskLevel);
         deferKinds.push(facts.deferKind);
         reasons.push(facts.reason);
+        answers.push(facts.answers);
         latencyMs = facts.latencyMs;
         // A machinery defer is not the reviewer's judgment: scoring it as a
         // pass on a defer-expecting case would report a dead endpoint as a
@@ -574,6 +583,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
         riskLevels.push(undefined);
         deferKinds.push(undefined);
         reasons.push(e instanceof Error ? e.message : String(e));
+        answers.push(undefined);
         casePass = false;
       }
     }
@@ -622,6 +632,7 @@ async function runLane(lane: Lane, values: Record<string, unknown>): Promise<voi
       riskLevels,
       deferKinds,
       reasons,
+      answers,
       latencyMs,
       mixed,
       majorityPass,

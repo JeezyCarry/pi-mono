@@ -51,7 +51,7 @@ Usage: npx tsx scripts/integration-test.ts --api-key <key> [options]
 Options:
   --api-key <key>      API key for the model provider (required)
   --base-url <url>     Base URL for the model API (default: the provider's own URL;
-                       typesafe passes it through unset, so the SDK's env/default applies)
+                       typesafe leaves it unset, so the provider default applies)
   --model <id>         Model ID to use (default: claude-haiku-4-5)
   --provider <p>       "anthropic", "openai", or "typesafe" (default: anthropic)
   --repeat <n>         Run each case n times and report the verdict distribution (default: 1)
@@ -64,7 +64,6 @@ Environment variables (fallbacks):
 
 interface CliArgs {
   apiKey: string;
-  /** Undefined for typesafe: the SDK falls back to TYPESAFE_BASE_URL. */
   baseUrl: string | undefined;
   modelId: string;
   provider: ProviderName;
@@ -119,9 +118,9 @@ function parseCliArgs(): CliArgs {
   const isTypesafe = provider === "typesafe";
   return {
     apiKey,
-    // Only the typesafe path has a provider-owned default: the SDK resolves
-    // its own URL and model, so borrowing Anthropic's would quietly send a
-    // classifier run to the wrong endpoint.
+    // Only the typesafe path has a provider-owned default: the provider
+    // resolves its own URL and model, so borrowing Anthropic's would
+    // quietly send a classifier run to the wrong endpoint.
     baseUrl:
       values["base-url"] ??
       process.env.PI_AI_GUARD_BASE_URL ??
@@ -377,23 +376,23 @@ const groups: TestGroup[] = [
 async function main(): Promise<void> {
   const args = parseCliArgs();
   const isTypesafe = args.provider === "typesafe";
-  const model = isTypesafe ? null : buildModel(args);
-  const providerInstance = isTypesafe ? null : buildProvider(args.provider);
+  const model = buildModel(args);
+  const providerInstance = buildProvider(args.provider);
   const config: AiGuardConfig = configSchema.parse({
-    provider: isTypesafe
-      ? { type: "typesafe", baseUrl: args.baseUrl, apiKey: args.apiKey }
-      : args.provider,
+    provider: args.provider,
     model: args.modelId,
+    ...(isTypesafe ? { modelType: "classifier" } : {}),
     reasoning: "off",
     timeoutMs: args.timeoutMs,
     surfaces: ["bash", "mcp", "skill"],
   });
 
-  const api = isTypesafe
-    ? "typesafe/systemone"
-    : args.provider === "anthropic"
+  const api =
+    args.provider === "anthropic"
       ? "anthropic-messages"
-      : "openai-responses";
+      : args.provider === "openai"
+        ? "openai-responses"
+        : "typesafe-system-one";
   const selected = groups.filter(
     (g) => args.only.length === 0 || args.only.some((s) => g.label.toLowerCase().includes(s)),
   );

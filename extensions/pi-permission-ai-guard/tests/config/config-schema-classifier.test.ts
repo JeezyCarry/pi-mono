@@ -3,32 +3,24 @@ import { describe, expect, it } from "vitest";
 import { configSchema, isClassifierMode } from "#src/config/config-schema.ts";
 
 const chatBase = { provider: "anthropic", model: "claude-haiku-4-5" };
-const classifierBase = { provider: { type: "typesafe" }, model: "jev-1.13" };
+const classifierBase = { provider: "typesafe", model: "jev-1.13", modelType: "classifier" };
 
 describe("provider union", () => {
   it("accepts a string provider (registry reference)", () => {
     expect(configSchema.safeParse(chatBase).success).toBe(true);
   });
 
-  it("accepts a bare typesafe object (env fallback)", () => {
-    const parsed = configSchema.safeParse(classifierBase);
-    expect(parsed.success).toBe(true);
-  });
-
-  it("accepts a full typesafe object", () => {
-    const parsed = configSchema.safeParse({
-      ...classifierBase,
-      provider: { type: "typesafe", baseUrl: "https://openrouter.ai/api", apiKey: "k" },
-    });
-    expect(parsed.success).toBe(true);
-  });
-
-  it("rejects an unknown object type", () => {
-    const parsed = configSchema.safeParse({
-      ...classifierBase,
-      provider: { type: "other" },
-    });
-    expect(parsed.success).toBe(false);
+  it("rejects the removed direct object (migration is named at load)", () => {
+    // The `{ type: "typesafe" }` provider form is gone: the schema stays a
+    // dumb type error; the load layer names the migration and the exact
+    // path (primary `provider`, or `fallbacks.N.provider`).
+    for (const provider of [
+      { type: "typesafe" },
+      { type: "typesafe", baseUrl: "https://openrouter.ai/api", apiKey: "k" },
+      { type: "other" },
+    ]) {
+      expect(configSchema.safeParse({ ...classifierBase, provider }).success).toBe(false);
+    }
   });
 
   it("applies classifier defaults", () => {
@@ -44,43 +36,23 @@ describe("provider union", () => {
   it("rejects a misspelled threshold key instead of silently defaulting", () => {
     // A stripped typo would leave the reviewer on 0.5 with no feedback, while
     // the JSON schema (additionalProperties: false) flags it in the editor.
-    // The legacy alias extends the same block, so it inherits the strictness.
     expect(
       configSchema.safeParse({ ...classifierBase, classifier: { intentTreshold: 0.9 } }).success,
     ).toBe(false);
-    expect(
-      configSchema.safeParse({ ...classifierBase, typesafe: { riskTreshold: 0.9 } }).success,
-    ).toBe(false);
   });
 
-  it("folds the deprecated `typesafe` thresholds, dropping its `timeoutMs`", () => {
+  it("strips the retired `typesafe` block (the load layer is what refuses it)", () => {
+    // The top level is not strict, so zod drops an unknown key silently. This
+    // pins that the schema alone would let the block through and that nothing
+    // downstream reads it; `loadAiGuardConfig` turns it into a named failure.
     const parsed = configSchema.safeParse({
       ...classifierBase,
       typesafe: { intentThreshold: 0.9, timeoutMs: 7_000 },
     });
     expect(parsed.success).toBe(true);
     if (!parsed.success) return;
-    // Thresholds still apply; `timeoutMs` is parsed for compatibility but
-    // must not reach `classifier` (the primary timeout is top-level only).
-    expect(parsed.data.classifier).toEqual({
-      intentThreshold: 0.9,
-      riskThreshold: 0.5,
-      confidenceThreshold: 0.5,
-    });
-    expect("timeoutMs" in parsed.data.classifier).toBe(false);
-    // The legacy key is folded away, so no consumer can read it.
     expect("typesafe" in parsed.data).toBe(false);
-  });
-
-  it("rejects both `classifier` and `typesafe` (never silently pick one)", () => {
-    const parsed = configSchema.safeParse({
-      ...classifierBase,
-      classifier: { intentThreshold: 0.4 },
-      typesafe: { intentThreshold: 0.9 },
-    });
-    expect(parsed.success).toBe(false);
-    if (parsed.success) return;
-    expect(parsed.error.issues.some((i) => i.message.includes("deprecated"))).toBe(true);
+    expect(parsed.data.classifier.intentThreshold).toBe(0.5);
   });
 });
 
@@ -259,38 +231,37 @@ describe("modelType", () => {
     expect(parsed.success).toBe(true);
   });
 
-  it("rejects modelType on a direct connection", () => {
-    const parsed = configSchema.safeParse({ ...classifierBase, modelType: "classifier" });
-    expect(parsed.success).toBe(false);
-    if (parsed.success) return;
-    const issue = parsed.error.issues.find((i) => i.path.join(".") === "modelType");
-    expect(issue?.message).toContain("registry (string) providers only");
+  it("rejects the removed direct connection even with modelType", () => {
+    expect(
+      configSchema.safeParse({
+        provider: { type: "typesafe" },
+        model: "jev-1.13",
+        modelType: "classifier",
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects an unknown modelType", () => {
     const parsed = configSchema.safeParse({ ...classifierBase, modelType: "bogus" });
     expect(parsed.success).toBe(false);
     if (parsed.success) return;
-    // The union fails opaquely at the top; the branch error underneath is
-    // the one that names the offending field and the two legal values.
     const [issue] = parsed.error.issues;
-    expect(issue?.code).toBe("invalid_union");
-    expect(JSON.stringify(issue)).toContain('"path":["modelType"]');
+    expect(issue?.code).toBe("invalid_value");
     expect(JSON.stringify(issue)).toContain('"values":["chat","classifier"]');
   });
 
-  it("rejects modelType inside a typesafe fallback (strict)", () => {
-    const parsed = configSchema.safeParse({
-      ...chatBase,
-      fallbacks: [
-        {
-          provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "k" },
-          model: "fb",
-          modelType: "classifier",
-        },
-      ],
-    });
-    expect(parsed.success).toBe(false);
+  it("rejects a direct object inside a fallback", () => {
+    expect(
+      configSchema.safeParse({
+        ...chatBase,
+        fallbacks: [
+          {
+            provider: { type: "typesafe", baseUrl: "https://x.ai/api", apiKey: "k" },
+            model: "fb",
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts a classifier fallback on a string provider", () => {
