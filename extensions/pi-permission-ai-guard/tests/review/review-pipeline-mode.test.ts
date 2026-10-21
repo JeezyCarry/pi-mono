@@ -46,7 +46,7 @@ describe("createReviewPipeline — mode", () => {
         }),
       }),
     );
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "defer" });
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "defer" });
   });
 
   it("default maps a soft deny to defer and annotates the decision record", async () => {
@@ -60,7 +60,7 @@ describe("createReviewPipeline — mode", () => {
         }),
       }),
     );
-    const verdict = await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), log);
+    const verdict = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), log);
     expect(verdict).toEqual({ kind: "defer" });
     const decision = reviewCalls.find((c) => c.event === DECISION_EVENT);
     expect(decision!.data.verdict).toBe("deny");
@@ -207,7 +207,7 @@ describe("createReviewPipeline — mode", () => {
         }),
       }),
     );
-    const verdict = await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
+    const verdict = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
     expect(verdict).toEqual({
       kind: "deny",
       reason: withAgentInstruction("unsafe", "content"),
@@ -661,13 +661,13 @@ describe("createReviewPipeline — advisor patches (strict completeness + audit)
  */
 
 describe("createReviewPipeline — leniency ladder lanes", () => {
-  it("lenient keeps hard-tier denies terminal even though its soft lanes ask", async () => {
+  it("lenient asks on a high-risk model deny: the model never hard-denies", async () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
       makePipeline({
         config: { ...baseConfig, mode: "lenient" },
         notify,
-        // Hard tier (high|critical|missing): terminal in every mode.
+        // Severity is the model's opinion; only the screen binds.
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
             { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"high"}' },
@@ -675,10 +675,7 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
         }),
       }),
     );
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "deny", reason: "unsafe" });
-    // v27 has no dialog for denials — the notify line is the only human
-    // -visible copy, so every mode notifies a model deny that carries a
-    // reason (the denied outcome adds no tail; the verb already says it).
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "defer" });
     expectNotices(notifications, { level: "warning", contains: ["unsafe", "risk high"] });
   });
 
@@ -697,7 +694,7 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     );
     // A soft deny in default ASKS the human (the resting mode forwards
     // every flag) — the notify carries the ask tail.
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "defer" });
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "defer" });
     expectNotices(notifications, { level: "warning", contains: ["unsafe", "risk low"] });
   });
 
@@ -714,7 +711,7 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
         }),
       }),
     );
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "deny", reason: "unsafe" });
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "deny", reason: "unsafe" });
     expectNotices(notifications, { level: "warning", contains: ["unsafe", "risk low"] });
   });
 
@@ -745,14 +742,17 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     });
   });
 
-  it("lenient's fail-open notice names what it loosens", async () => {
+  it("permissive's fail-open notice names what it loosens", async () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "lenient" },
+        config: { ...baseConfig, mode: "permissive" },
         notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
+            // A neutral model defer is what permissive loosens to allow —
+            // lenient's own loosened row (a benign-leaned doubt) passes
+            // silently, so the fail-open notice lives with permissive now.
             { type: "text", text: '{"verdict":"defer","reason":"which one?"}' },
           ]),
         }),
@@ -760,10 +760,10 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     );
     await expectVerdict(authorize, { value: "npm install x" }, { kind: "allow" });
     const [message] = expectNotices(notifications, { level: "warning" });
-    expect(message).toBe(failOpenNotice("lenient"));
+    expect(message).toBe(failOpenNotice());
   });
 
-  it("permissive maps a soft deny to allow, one notice, audit keeps the reason", async () => {
+  it("permissive denies a soft deny — one notice, the audit keeps the reason", async () => {
     const { notifications, notify } = makeNotifySpy();
     const { log, reviewCalls } = makeRecordingLog();
     const authorize = createReviewPipeline(
@@ -777,22 +777,31 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
         }),
       }),
     );
-    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), log);
+    const verdict = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), log);
+    // permissive's reject line sits at defer-danger, above soft-deny: a soft
+    // deny is never rubber-stamped there, so it holds as the model's deny.
+    expect(verdict).toEqual({
+      kind: "deny",
+      reason: withAgentInstruction("unsafe", "content"),
+    });
     const record = reviewCalls.find((c) => c.event === DECISION_EVENT)!.data;
     expect(record.verdict).toBe("deny");
-    expect(record.emittedVerdict).toBe("allow");
-    expect(record.emittedReason).toBe("unsafe");
-    expect(record.mode).toBe("permissive");
-    // Once per pipeline instance, warning-level.
-    const [message] = expectNotices(notifications, { level: "warning" });
-    expect(message).toBe(failOpenNotice("permissive"));
+    expect(record.reason).toBe("unsafe");
+    // The deny held: no cross-kind mapping, so no annotation fields.
+    expect(record.emittedVerdict).toBeUndefined();
+    expect(record.emittedReason).toBeUndefined();
+    expect(record.mode).toBeUndefined();
+    // A deny notifies (no dialog exists for denials) — one warning line.
+    expectNotices(notifications, { count: 1, level: "warning", contains: ["unsafe", "risk low"] });
   });
 
-  it("lenient maps a model defer to allow and marks the swallowed clarification", async () => {
+  it("lenient keeps a neutral model defer as an ask — the clarification is mirrored, not swallowed", async () => {
+    const { notifications, notify } = makeNotifySpy();
     const { log, reviewCalls } = makeRecordingLog();
     const authorize = createReviewPipeline(
       makePipeline({
         config: { ...baseConfig, mode: "lenient" },
+        notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
             { type: "text", text: '{"verdict":"defer","reason":"which package manager?"}' },
@@ -801,11 +810,15 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
       }),
     );
     const verdict = await authorize(makeDetails({ value: "npm install x" }), makeQuery("ask"), log);
-    expect(verdict).toEqual({ kind: "allow" });
+    // lenient's accept line sits at defer-benign: a neutral (lean-less)
+    // doubt still asks, and its clarification reaches the human.
+    expect(verdict).toEqual({ kind: "defer" });
     const record = reviewCalls.find((c) => c.event === DECISION_EVENT)!.data;
     expect(record.verdict).toBe("defer");
-    expect(record.emittedVerdict).toBe("allow");
-    expect(record.emittedReason).toBe("clarification-suppressed");
+    // The defer held: nothing was swallowed, so no mapping marker.
+    expect(record.emittedVerdict).toBeUndefined();
+    expect(record.emittedReason).toBeUndefined();
+    expectNotices(notifications, { level: "info", contains: ["which package manager?"] });
   });
 
   it("permissive still denies machinery failures and counts them into the breaker", async () => {

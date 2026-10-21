@@ -98,7 +98,9 @@ describe("opt-in approval notices", () => {
         notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
-            { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
+            // A neutral model defer is the row permissive still loosens to
+            // allow (a soft deny now denies there) — the mode-mapped voice.
+            { type: "text", text: '{"verdict":"defer","reason":"which one?"}' },
           ]),
         }),
       }),
@@ -107,19 +109,21 @@ describe("opt-in approval notices", () => {
       kind: "allow",
     });
     expect(notifications).toHaveLength(2);
-    expect(notifications[0]![0]).toBe(failOpenNotice("permissive"));
+    expect(notifications[0]![0]).toBe(failOpenNotice());
     expect(notifications[0]![1]).toBe("warning");
     // The approval notice names the mode and a cost, whatever the latency was.
     expect(notifications[1]![0]).toContain("permissive");
     expect(notifications[1]![0]).toMatch(/[\d.]+m?s/);
     expect(notifications[1]![1]).toBe("info");
-    // The stored deny replays from cache and maps again — the tail names
-    // the replay instead of restating the first call's latency.
+    // Defers are never cached: the repeated ask re-calls the model and maps
+    // again — the mode-mapped voice reports as a fresh review (a latency,
+    // not a cached tail), while the fail-open notice stays once-per-pipeline.
     expect(await authorize(makeDetails({ value: "cmd" }), makeQuery("ask"), noLog)).toEqual({
       kind: "allow",
     });
+    expect(notifications).toHaveLength(3);
     expect(notifications.at(-1)).toEqual([
-      "mode (permissive) auto-approved this request (cached)",
+      expect.stringMatching(/^mode \(permissive\) auto-approved this request \([\d.]+m?s\)$/),
       "info",
     ]);
   });

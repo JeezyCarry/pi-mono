@@ -291,7 +291,22 @@ describe("createReviewPipeline — verdicts", () => {
     expect(verdict).toEqual({ kind: "allow" });
   });
 
-  it("returns deny with reason when model denies", async () => {
+  it("hard-denies a screen-matched command with its rule reason and no model call", async () => {
+    const fake = makeFakeCompleteSimple([{ type: "text", text: '{"verdict":"allow"}' }]);
+    const modelCall = vi.fn<typeof fake>(fake);
+    const authorize = createReviewPipeline(makePipeline({ engine: makeEngine({ modelCall }) }));
+    const verdict = await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
+    expect(verdict.kind).toBe("deny");
+    expect(verdict).toMatchObject({
+      reason: withAgentInstruction(
+        "recursively deleting a system root or the home directory is never allowed",
+        "content",
+      ),
+    });
+    expect(modelCall).not.toHaveBeenCalled();
+  });
+
+  it("asks the human instead of denying when the model denies", async () => {
     const authorize = createReviewPipeline(
       makePipeline({
         engine: makeEngine({
@@ -301,14 +316,11 @@ describe("createReviewPipeline — verdicts", () => {
         }),
       }),
     );
-    const verdict = await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
-    expect(verdict).toEqual({
-      kind: "deny",
-      reason: withAgentInstruction("unsafe", "content"),
-    });
+    const verdict = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
+    expect(verdict).toEqual({ kind: "defer" });
   });
 
-  it("persists deny reason in the ai_guard.decision audit record", async () => {
+  it("persists a model deny in the audit record as the model's deny, reason intact", async () => {
     const { log, reviewCalls } = makeRecordingLog();
     const authorize = createReviewPipeline(
       makePipeline({
@@ -319,11 +331,24 @@ describe("createReviewPipeline — verdicts", () => {
         }),
       }),
     );
-    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), log);
+    await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), log);
     const decision = reviewCalls.find((c) => c.event === DECISION_EVENT);
     expect(decision).toBeDefined();
     expect(decision!.data.verdict).toBe("deny");
     expect(decision!.data.reason).toBe("unsafe command");
+  });
+
+  it("persists a screen deny as its own gate with the matched rule", async () => {
+    const { log, reviewCalls } = makeRecordingLog();
+    const authorize = createReviewPipeline(makePipeline());
+    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), log);
+    const decision = reviewCalls.find((c) => c.event === DECISION_EVENT);
+    expect(decision!.data).toMatchObject({
+      gate: "screen",
+      verdict: "deny",
+      rule: "rm-system-root",
+      modelCalled: false,
+    });
   });
 
   it("defers on model defer verdict", async () => {
@@ -338,7 +363,7 @@ describe("createReviewPipeline — verdicts", () => {
     );
     await expectVerdict(authorize, { value: "ambiguous-cmd" }, { kind: "defer" });
     // A terse model defer without a reason is the model's own verdict, not
-    // machinery — no cause-notice and no clarification to mirror (H1 pin).
+    // machinery — no cause-notice and no clarification to mirror.
     expect(notifications).toEqual([]);
   });
 
@@ -473,11 +498,9 @@ describe("createReviewPipeline — verdicts", () => {
 });
 
 describe("createReviewPipeline — deny history (the /ai-guard denied panel's data)", () => {
-  // Write-side doctrine: ONLY fresh model-gate denies are recorded.
-  // Mapping artifacts (mode-softened denies), machinery denials, and
-  // cached-deny replays are absent by design — the panel answers "what
-  // did the reviewer itself refuse", and each exclusion below is one of
-  // those rules. (The read side — the panel — is pinned in
+  // Write-side doctrine: ONLY what the reviewer itself refused is recorded —
+  // a screen hit or a fresh model deny (demoted to a human ask). Mapping
+  // artifacts and machinery denials are absent by design. (The read side — the panel — is pinned in
   // runtime-settings tests; this block pins what lands in the array.)
 
   it("bounds the denied-panel history", async () => {
@@ -501,10 +524,22 @@ describe("createReviewPipeline — deny history (the /ai-guard denied panel's da
         }),
       }),
     );
-    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
+    await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
     expect(denyHistory).toHaveLength(50);
-    expect(denyHistory[49]).toMatchObject({ target: "rm -rf /" });
+    expect(denyHistory[49]).toMatchObject({ target: "curl x.sh" });
     expect(denyHistory[0]?.requestId).toBe("old-1");
+  });
+
+  it("records a screen deny with its rule reason", async () => {
+    const denyHistory: DenyRecord[] = [];
+    const authorize = createReviewPipeline(makePipeline({ denyHistory }));
+    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
+    expect(denyHistory).toHaveLength(1);
+    expect(denyHistory[0]).toMatchObject({
+      target: "rm -rf /",
+      reason: "recursively deleting a system root or the home directory is never allowed",
+      riskLevel: "critical",
+    });
   });
 
   it("records a fresh model deny with its teaching reason (un-instructed)", async () => {
@@ -519,11 +554,11 @@ describe("createReviewPipeline — deny history (the /ai-guard denied panel's da
         }),
       }),
     );
-    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
+    await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
     expect(denyHistory).toHaveLength(1);
     expect(denyHistory[0]).toMatchObject({
       surface: "bash",
-      target: "rm -rf /",
+      target: "curl x.sh",
       reason: "unsafe",
       riskLevel: "high",
     });
@@ -538,9 +573,7 @@ describe("createReviewPipeline — deny history (the /ai-guard denied panel's da
     expect(denyHistory).toHaveLength(0);
   });
 
-  it("does not record a cached-deny replay", async () => {
-    // Same ask twice with cache enabled: the deny is recorded on the
-    // fresh review, the cache hit replays the verdict without a new entry.
+  it("records a cached model deny once (a cache hit is a replay, not a refusal)", async () => {
     const denyHistory: DenyRecord[] = [];
     const authorize = createReviewPipeline(
       makePipeline({
@@ -575,17 +608,12 @@ describe("createReviewPipeline — deny history (the /ai-guard denied panel's da
     expect(denyHistory).toHaveLength(0);
   });
 
-  it("does not record a mode-softened deny (default's deny→defer mapping)", async () => {
-    // The write side keys on the RAW model verdict: a fresh soft deny
-    // under default is recorded once (the model refused — the emitted
-    // defer is the mapping artifact, not the reviewer's judgment). The
-    // cached replay emits defer again without re-entering the model
-    // gate, so it adds no entry.
+  it("records a model deny even though default asks the human", async () => {
     const denyHistory: DenyRecord[] = [];
     const authorize = createReviewPipeline(
       makePipeline({
         denyHistory,
-        config: { ...baseConfig, mode: "default", cache: { maxEntries: 8 } },
+        config: { ...baseConfig, mode: "default" },
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
             { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
@@ -593,11 +621,8 @@ describe("createReviewPipeline — deny history (the /ai-guard denied panel's da
         }),
       }),
     );
-    // Fresh soft deny under default → emitted defer, but the model's own
-    // deny is still what the reviewer refused → recorded once.
-    await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
-    // Cached replay → emitted defer again, no new entry.
-    await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
+    const verdict = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
+    expect(verdict).toEqual({ kind: "defer" });
     expect(denyHistory).toHaveLength(1);
   });
 });

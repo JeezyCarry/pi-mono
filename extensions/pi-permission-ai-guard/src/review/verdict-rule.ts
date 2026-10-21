@@ -8,11 +8,11 @@
  * config warnings) are single-sourced in {@link ../config/mode-table.ts} and
  * consumed here as data.
  *
- * The doctrine stays local: hard-tier denies (riskLevel high|critical, or
- * missing) are terminal in every mode; reviewer machinery failures never
- * map to allow in ANY mode (a broken reviewer must not rubber-stamp) —
- * they deny under the two extremes and defer under the remaining two;
- * allow is never transformed.
+ * The doctrine stays local: hard-tier denies (only the deterministic screen's) are terminal in
+ * every mode, and every model deny is soft; danger-leaned defers ask in default and lenient, deny
+ * in strict, and DENY in permissive (the ladder has no ask path for danger); reviewer machinery
+ * failures never map to allow in ANY mode (a broken reviewer must not rubber-stamp) — they deny
+ * under the two extremes and defer under the remaining two; allow is never transformed.
  *
  * Pure functions: the fresh-model path and the cache-hit path both run
  * the mapping, so a cached verdict maps identically to a fresh one.
@@ -68,16 +68,20 @@ export interface ModelDeferInfo {
 type DenyTier = "hard" | "soft";
 
 /**
+ * Who issued a deny. Authority, not the model's self-reported severity,
+ * decides the tier: a model can misread a command, so its deny never binds
+ * a human who can see the command; only the deterministic screen binds.
+ */
+export type DenyAuthority = "screen" | "model";
+
+/**
  * Which mapping tier a deny falls into.
  *
- * @param riskLevel - The model's risk assessment for the deny.
- * @returns `"hard"` for high|critical or a missing risk level (absence of
- *   signal must not buy leniency), `"soft"` for low|medium.
+ * @param authority - Who issued the deny.
+ * @returns `"hard"` for the screen, `"soft"` for the model.
  */
-export function denyTier(riskLevel: RiskLevel | undefined): DenyTier {
-  return riskLevel === undefined || riskLevel === "high" || riskLevel === "critical"
-    ? "hard"
-    : "soft";
+export function denyTier(authority: DenyAuthority): DenyTier {
+  return authority === "screen" ? "hard" : "soft";
 }
 
 /**
@@ -108,14 +112,14 @@ export const CLARIFICATION_SUPPRESSED_REASON = "clarification-suppressed";
  * @param policy - The effective mode.
  * @param verdict - The model's (or cached) verdict.
  * @param modelDefer - Deferred-call context when the verdict is a fresh model defer.
- * @param riskLevel - The model's risk assessment for a deny verdict.
+ * @param authority - Who issued a deny verdict (default: the model).
  * @returns The verdict the link emits.
  */
 export function applyVerdictMode(
   policy: Mode,
   verdict: AuthorizerVerdict,
   modelDefer?: ModelDeferInfo,
-  riskLevel?: RiskLevel,
+  authority: DenyAuthority = "model",
 ): AuthorizerVerdict {
   if (verdict.kind === "allow") {
     return verdict;
@@ -130,10 +134,13 @@ export function applyVerdictMode(
   }
   // Everything else sits on the suspicion line: a deny by its tier (a
   // hard-tier deny is terminal in every mode — the one judgment the ladder
-  // never loosens), a model defer by its lean.
+  // never loosens), a model defer by its lean. The lean is the reviewer's
+  // directional inclination, an audit-and-routing fact: it selects the
+  // defer lane, never surfaces to the human, and a deny-leaned defer can
+  // at best ask (never allow).
   const suspicion: Suspicion =
     verdict.kind === "deny"
-      ? denyTier(riskLevel) === "hard"
+      ? denyTier(authority) === "hard"
         ? "hard-deny"
         : "soft-deny"
       : modelDefer?.lean === "allow"
@@ -257,8 +264,7 @@ interface MappingInput {
  * @returns The record-annotation, notify, and instruction-source decision.
  */
 export function resolveMapping(input: MappingInput): MappingDecision {
-  const { original, emitted, riskLevel, deferKind, deferReason, deferLean, mode, noticeShown } =
-    input;
+  const { original, emitted, riskLevel, deferKind, deferReason, deferLean, noticeShown } = input;
   // The agent instruction's source: machinery iff what was denied is a
   // machinery defer (the review failed — retry-later copy); content
   // otherwise (the request itself was judged — stop-pursuing copy). One
@@ -344,7 +350,7 @@ export function resolveMapping(input: MappingInput): MappingDecision {
     // "I would allow this", confirmed — allows never notify). Once per
     // pipeline: the first occurrence teaches, the rest stay quiet.
     markNoticeShown = true;
-    notice = { message: failOpenNotice(mode), level: "warning" };
+    notice = { message: failOpenNotice(), level: "warning" };
   }
   const verdict: AuthorizerVerdict =
     emitted.kind === "deny"

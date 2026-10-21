@@ -1,3 +1,7 @@
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { buildAskContext } from "#src/review/request/ask.ts";
@@ -6,6 +10,7 @@ import {
   EXCLUDED_ASK_FIELDS,
   EXCLUDED_REQUEST_FACTS,
   reviewRequestCacheMaterial,
+  snapshotRequest,
 } from "#src/review/request/review-request.ts";
 import { shortHash } from "#src/utils.ts";
 import { ev, makeDetails, payload } from "#test/fixtures.ts";
@@ -274,7 +279,7 @@ describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
 });
 
 describe("cache-identity key set (single source pinned)", () => {
-  it("materializes exactly the thirteen decision-relevant facts — no silent additions or drops", () => {
+  it("materializes exactly the fourteen decision-relevant facts — no silent additions or drops", () => {
     // The exclusion doctrine makes tripwires one-way: adding an excluded
     // field breaks the compile, but DROPPING a keyed field from the
     // material would compile silently. This pins the key set at runtime:
@@ -288,11 +293,15 @@ describe("cache-identity key set (single source pinned)", () => {
     expect(Object.keys(material).toSorted()).toEqual([
       "canonicalBoundary",
       "commandContext",
+      // The deterministic command facts join the cache material so a
+      // symlink retarget can never hide behind a stale entry.
+      "commandFacts",
       "executedUnit",
       "flaggedElements",
       "fullCommand",
       "kind",
       "matchedSpelling",
+      "observedFacts",
       "readPath",
       "resolvedAlias",
       "target",
@@ -300,6 +309,48 @@ describe("cache-identity key set (single source pinned)", () => {
       "value",
       "workingDirectory",
     ]);
+  });
+
+  it("invalidates when the snapshot evidence changes", () => {
+    // The evidence rides the per-review snapshot: the key differs when
+    // the snapshot differs (package.json edited between reviews), matches
+    // when the same snapshot object is re-keyed, and absence keys
+    // distinctly from presence. The snapshot is taken once per review — the
+    // key never reads the disk.
+    const dir = join(tmpdir(), `cache-facts-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    try {
+      const askFor = () => buildAskContext(makeDetails({ value: "npm run migrate" }), dir);
+      const snap = () => snapshotRequest(askFor()).observedFacts;
+      const keyFor = (facts: ReturnType<typeof snap>) =>
+        reviewRequestCacheMaterial({
+          ask: askFor(),
+          target: "npm run migrate",
+          observedFacts: facts,
+        });
+      const factsAbsent = snap();
+      const absent = keyFor(factsAbsent);
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ scripts: { migrate: "node a.js" } }),
+      );
+      // Reuse the SAME snapshot object after the file changed: the key is
+      // unchanged, proving the key consumes the snapshot, not the disk.
+      expect(keyFor(factsAbsent)).toBe(absent);
+      const factsA = snap();
+      const presentA = keyFor(factsA);
+      expect(presentA).not.toBe(absent);
+      // Same snapshot object re-keyed: identical key.
+      expect(keyFor(factsA)).toBe(presentA);
+      writeFileSync(
+        join(dir, "package.json"),
+        JSON.stringify({ scripts: { migrate: "node b.js" } }),
+      );
+      expect(keyFor(factsA)).toBe(presentA);
+      expect(keyFor(snap())).not.toBe(presentA);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -551,8 +551,6 @@ describe("createAiGuardExtension lifecycle", () => {
         reasoning: "off" as const,
         instructions: null,
         classifier: {
-          intentThreshold: 0.5,
-          riskThreshold: 0.5,
           confidenceThreshold: 0.5,
         },
         mode: "default" as const,

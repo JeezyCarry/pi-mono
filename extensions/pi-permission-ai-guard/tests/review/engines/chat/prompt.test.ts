@@ -74,15 +74,25 @@ function makeAsk(
 }
 
 describe("buildReviewSystemPrompt", () => {
-  it("states the always-deny categories by positive inclusion, never by exclusion", () => {
+  it("states the block categories by positive inclusion, never by exclusion", () => {
     // Same convention the classifier's DANGER_CRITERIA holds to (see
     // client.test.ts): a category says what it is, and neither what it is
     // not nor what stays in a sibling category. The lanes grade the same
-    // eight categories, so the wording standard is shared.
+    // block set, so the wording standard is shared.
     const prompt = buildReviewSystemPrompt({ rules: null, replace: false });
-    const alwaysDeny =
-      prompt.split("\n## ").find((block) => block.startsWith("DENY — Always")) ?? "";
-    expect(alwaysDeny).not.toMatch(EXCLUSION);
+    const block = prompt.split("\n## ").find((section) => section.startsWith("Block")) ?? "";
+    expect(block).not.toMatch(EXCLUSION);
+  });
+
+  it("has an exclusion pattern that actually detects exclusions", () => {
+    // Guards the shared pattern itself: a previous form joined the
+    // alternatives with whitespace instead of alternation, so it only
+    // matched the full concatenated string and the positive-inclusion
+    // tests above passed vacuously.
+    expect(EXCLUSION.test("this is not safe")).toBe(true);
+    expect(EXCLUSION.test("never do this")).toBe(true);
+    expect(EXCLUSION.test("this is\n  not safe")).toBe(true);
+    expect(EXCLUSION.test("a positive statement")).toBe(false);
   });
 
   // The copy is freely iterable, so pin the load-bearing structure rather
@@ -111,6 +121,82 @@ describe("buildReviewSystemPrompt", () => {
     expect(prompt).not.toContain(guardMarker);
     expect(prompt).toContain("Custom project rule");
     expect(prompt).toContain(contractMarker);
+  });
+
+  it("keeps the block boundaries unauthorizable", () => {
+    // The classifier block tier denies even when the anchor covers the
+    // action; the chat Decision Order carries the same row.
+    // This pins the rule text, not model behavior.
+    const prompt = buildReviewSystemPrompt({ rules: null, replace: false });
+    const order =
+      prompt.split("\n## ").find((section) => section.startsWith("General Rules")) ?? "";
+    expect(order).toContain("block-boundary hit");
+    expect(order).toContain("no anchor\n  overrides it");
+    // No competing authorization-override survives elsewhere.
+    expect(prompt).not.toContain("Authorized Danger");
+
+    // The output contract spells the critical tier: a still-effective ban, a
+    // block-boundary deny, and an anchor-uncovered duty deny all land there.
+    // This pins the rule text, not model behavior.
+    const verdict = prompt.split("\n## ").find((section) => section.startsWith("Verdict")) ?? "";
+    expect(verdict).toContain("A still-effective-ban deny");
+    expect(verdict).toContain("are critical");
+  });
+
+  it("orders all seven verdict rows", () => {
+    // The classifier decision order (ban → block → unknown → confirm →
+    // duty → confined observation → auth) is written once in Decision Order.
+    // This pins the rule text, not model behavior.
+    const prompt = buildReviewSystemPrompt({ rules: null, replace: false });
+    const order = prompt.split("\n## ").find((block) => block.startsWith("General Rules")) ?? "";
+    const ban = order.indexOf("still-effective human ban");
+    const block = order.indexOf("block-boundary hit");
+    const unknown = order.indexOf("cannot establish");
+    const confirm = order.indexOf("costly consequence");
+    const duty = order.indexOf("duty hit");
+    const confined = order.indexOf("Established read-only inspection");
+    const ordinary = order.indexOf("Any other established action");
+    expect(ban).toBeGreaterThanOrEqual(0);
+    expect(block).toBeGreaterThan(ban);
+    expect(unknown).toBeGreaterThan(block);
+    expect(confirm).toBeGreaterThan(unknown);
+    expect(duty).toBeGreaterThan(confirm);
+    expect(confined).toBeGreaterThan(duty);
+    expect(ordinary).toBeGreaterThan(confined);
+  });
+
+  it("defers an established costly consequence with a deny lean whatever the anchor says", () => {
+    // The classifier confirm tier defers with lean deny ahead of the auth
+    // row; the chat Decision Order carries the same row — a costly
+    // consequence asks regardless of the anchor's coverage.
+    // This pins the rule text, not model behavior.
+    const prompt = buildReviewSystemPrompt({ rules: null, replace: false });
+    const order =
+      prompt.split("\n## ").find((section) => section.startsWith("General Rules")) ?? "";
+    expect(order).toContain("whatever the anchor says");
+  });
+
+  it("defers ordinary uncovered actions without a lean", () => {
+    // The classifier auth rows emit a neutral defer; the chat Decision Order
+    // carries the same row — no lean-allow guidance.
+    // This pins the rule text, not model behavior.
+    const prompt = buildReviewSystemPrompt({ rules: null, replace: false });
+    const order =
+      prompt.split("\n## ").find((section) => section.startsWith("General Rules")) ?? "";
+    expect(order).toContain("`defer` with no lean");
+    expect(prompt).toContain("Omit lean when only the authorization link is unclear");
+  });
+
+  it("lifts a ban on an explicit later instruction and scopes authorization", () => {
+    // The classifier ban wall reads the anchor and earlier context, and ends
+    // on an explicit lift (questions.ts ban criteria); authorization covers
+    // the action, its target or recipient, and the specific consequence.
+    // This pins the rule text, not model behavior.
+    const prompt = buildReviewSystemPrompt({ rules: null, replace: false });
+    expect(prompt).toContain("explicitly lifts the ban ends its effect");
+    expect(prompt).toContain(
+      "Authorization covers the action, its target or recipient,\n  and the specific consequence it causes",
+    );
   });
 });
 
@@ -214,6 +300,9 @@ describe("buildReviewPrompt", () => {
     expect(prompt).toContain("- bash: ls");
     expect(prompt).toContain("- edit: file.ts");
     expect(prompt).toContain('command: "npm test"');
+    // No snapshot rides this fixture context, so the field is absent —
+    // the renderer consumes the per-review snapshot, never the disk.
+    expect(prompt).not.toContain("observed facts");
     expect(prompt).toContain(
       "Assess the permission request above and respond with your JSON verdict",
     );

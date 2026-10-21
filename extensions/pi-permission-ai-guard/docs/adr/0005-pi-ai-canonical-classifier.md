@@ -1,4 +1,4 @@
-# 0006 — pi-ai is the classifier lane's representation
+# 0005 — pi-ai is the classifier lane's representation
 
 - Status: accepted (2026-10-11)
 - Context: the classifier lane originally spoke the TypeSafe SDK's shapes (`SystemOneRequest`/`SystemOneResult`/`Questions`, and the SDK's error classes) and reached System One through the SDK's own client. When Pi grew a built-in classifier (`modelRegistry.classify`, pi-ai `ClassifierContext`/`ClassifierResult`), the registry backend became a translation layer between the two shape families. The direct SDK backend existed only to point the lane at an arbitrary System One endpoint from the extension's own config; Pi can host the same endpoints as a registered provider or a custom classifier provider. Keeping both meant carrying a second, redundant representation — and its dependency — for one call path.

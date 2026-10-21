@@ -11,6 +11,7 @@ import { buildReviewPrompt } from "#src/review/engines/chat/prompt.ts";
 import { buildClassifierRequest } from "#src/review/engines/classifier/client.ts";
 import type { ClassifierOverlay } from "#src/review/engines/classifier/instructions.ts";
 import type { AskContext } from "#src/review/request/ask.ts";
+import { readCommandFacts } from "#src/review/request/command-facts.ts";
 import type { ReviewRequestContext } from "#src/review/request/review-request.ts";
 import type { StrippedTranscript } from "#src/review/request/transcript-stripper.ts";
 import {
@@ -240,6 +241,37 @@ const CASES: Record<InventoryFactKey, FactCase> = {
     sentinel: S.target,
     chat: S.target,
     classifier: S.target,
+  },
+  observedFacts: {
+    context: {
+      ...ctx({ ask: { kind: "tool" }, request: { value: "" } }),
+      observedFacts: {
+        source: "package.json:scripts.migrate",
+        runner: "npm",
+        scripts: { migrate: "node scripts/migrate-db.js" },
+        scope: "entry-declaration-only",
+        lifecycleDeclared: false,
+        keys: ["migrate"],
+        manifestDir: "/project",
+      },
+    },
+    sentinel: "node scripts/migrate-db.js",
+    chat: "node scripts/migrate-db.js",
+    classifier: "node scripts/migrate-db.js",
+  },
+  commandFacts: {
+    // The verdict layer reads them; neither lane renders them. The context
+    // carries a real fact set so the parity runner proves absence in both
+    // renderings, not absence of a fixture. The sentinel is a marker the
+    // prompt/state never contain (`node_modules` appears in both: the
+    // command text itself renders in both lanes).
+    context: {
+      ...ctx({ ask: { kind: "bash", fullCommand: "rm -rf node_modules" } }),
+      commandFacts: readCommandFacts("rm -rf node_modules", { cwd: "/project" }),
+    },
+    sentinel: "LANE_PARITY_COMMAND_FACTS_SENTINEL",
+    chat: null,
+    classifier: null,
   },
 };
 

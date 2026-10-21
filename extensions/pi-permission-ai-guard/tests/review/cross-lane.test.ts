@@ -17,13 +17,12 @@ import {
 } from "#src/review/build-pool.ts";
 import { createChatAdapter } from "#src/review/engines/chat/adapter.ts";
 import type { ModelCallFn } from "#src/review/engines/chat/call.ts";
-import { buildReviewSystemPrompt } from "#src/review/engines/chat/prompt.ts";
 import { createClassifierAdapter } from "#src/review/engines/classifier/adapter.ts";
 import type { ClassifierClientLike } from "#src/review/engines/classifier/client.ts";
-import { DANGER_CRITERIA, DANGER_NONE } from "#src/review/engines/classifier/questions.ts";
 import { ClassifierApiError } from "#src/review/failure-taxonomy.ts";
 import { createReviewerPool } from "#src/review/pool.ts";
 import { buildAskContext } from "#src/review/request/ask.ts";
+import { snapshotRequest } from "#src/review/request/review-request.ts";
 import { isMachineryFailure } from "#src/review/reviewer-engine.ts";
 import { makeDetails } from "#test/fixtures.ts";
 import {
@@ -40,21 +39,18 @@ import {
   makeMergedRecordingLog,
 } from "./pipeline-helpers.ts";
 
-const reviewCtx = (log: RecordingLogSink) => ({
-  transcript: { trustedIntent: ["check"], toolCalls: [], strippedCount: 0 },
-  request: { ask: buildAskContext(makeDetails({ value: "ls" }), "/project"), target: "ls" },
-  log,
-  requestId: "cross-lane-test",
-});
+const reviewCtx = (log: RecordingLogSink) => {
+  const ask = buildAskContext(makeDetails({ value: "ls" }), "/project");
+  return {
+    transcript: { trustedIntent: ["check"], toolCalls: [], strippedCount: 0 },
+    request: { ask, target: "ls", commandFacts: snapshotRequest(ask).commandFacts },
+    log,
+    requestId: "cross-lane-test",
+  };
+};
 
 function classifierAllow(): ClassifierResult {
-  return classifierReply({
-    answers: {
-      danger_category: { type: "choice", choice: "none", confidence: 0.95, probabilities: {} },
-      intent_match: { type: "bool", probability: 0.9 },
-      risk: { type: "score", score: 0.2, confidence: 0.9 },
-    },
-  });
+  return classifierReply();
 }
 
 function chatAllow(): AssistantMessage {
@@ -110,8 +106,6 @@ describe("cross-lane failover", () => {
         classifier: createClassifierAdapter({
           config: {
             classifier: {
-              intentThreshold: 0.5,
-              riskThreshold: 0.5,
               confidenceThreshold: 0.5,
             },
             instructions: {},
@@ -147,6 +141,8 @@ describe("cross-lane failover", () => {
   });
 
   it("fails over from an chat primary to a classifier backup", async () => {
+    // The stubbed classifier reply has no intent answer, so the review
+    // carries no anchor — the anchor-free allow shape.
     const { events, log } = makeMergedRecordingLog();
     const safeClassifier: ClassifierClientLike = { classify: async () => classifierAllow() };
     const engine = createReviewerPool({
@@ -182,8 +178,6 @@ describe("cross-lane failover", () => {
         classifier: createClassifierAdapter({
           config: {
             classifier: {
-              intentThreshold: 0.5,
-              riskThreshold: 0.5,
               confidenceThreshold: 0.5,
             },
             instructions: {},
@@ -193,7 +187,9 @@ describe("cross-lane failover", () => {
         }),
       },
     });
-    const result = await engine.review(reviewCtx(log));
+    const anchorFree = reviewCtx(log);
+    anchorFree.transcript = { trustedIntent: [], toolCalls: [], strippedCount: 0 };
+    const result = await engine.review(anchorFree);
     if (isMachineryFailure(result)) throw new Error("unexpected machinery");
     expect(result.outcome.verdict.kind).toBe("allow");
     expect(result.modelId).toBe("typesafe/jev-1.13 (fallback 1)");
@@ -321,7 +317,9 @@ describe("cross-lane failover", () => {
   it("keeps a hard-tier deny when the chat slot replaces its built-ins", async () => {
     // Replacing the chat policy must not weaken the classifier fallback: the
     // classifier slot is append-only, so its question criteria (the answer
-    // contract) stay put and an always-deny category still denies.
+    // contract) stay put and a credential read still asks leaning deny.
+    // (The verdict layer never denies — only the screen hard-denies — so
+    // this pins the defer + critical audit label, not a deny.)
     const config = configSchema.parse({
       provider: "anthropic",
       model: "primary",
@@ -345,14 +343,25 @@ describe("cross-lane failover", () => {
       classify: async () =>
         classifierReply({
           answers: {
-            danger_category: {
+            ...classifierReply().answers,
+            effect: {
               type: "choice",
-              choice: "secrets_credentials",
+              choice: "read",
               confidence: 0.95,
               probabilities: {},
             },
-            intent_match: { type: "bool", probability: 0.2 },
-            risk: { type: "score", score: 0.95, confidence: 0.95 },
+            target: {
+              type: "choice",
+              choice: "credential_material",
+              confidence: 0.95,
+              probabilities: {},
+            },
+            intent: {
+              type: "choice",
+              choice: "not_requested",
+              confidence: 0.95,
+              probabilities: {},
+            },
           },
         }),
     };
@@ -384,7 +393,7 @@ describe("cross-lane failover", () => {
         }),
         classifier: createClassifierAdapter({
           config: {
-            classifier: { intentThreshold: 0.5, riskThreshold: 0.5, confidenceThreshold: 0.5 },
+            classifier: { confidenceThreshold: 0.5 },
             instructions: classifier,
             temperature: undefined,
           },
@@ -395,7 +404,10 @@ describe("cross-lane failover", () => {
     const { log } = makeMergedRecordingLog();
     const result = await engine.review(reviewCtx(log));
     if (isMachineryFailure(result)) throw new Error("unexpected machinery");
-    expect(result.outcome.verdict.kind).toBe("deny");
+    // The credential read asks leaning deny through the mode mapping
+    // (default asks, strict denies): the verdict layer never denies here,
+    // only the screen hard-denies.
+    expect(result.outcome.verdict.kind).toBe("defer");
     expect(result.outcome.riskLevel).toBe("critical");
   });
 });
@@ -561,6 +573,12 @@ describe("registry backend resolution", () => {
   it("survives a catalog hot-change after a prevalidated fallback", async () => {
     // Registration proved the fallback resolves; the catalog then drops
     // it. Resolution is eager and cached, so the per-ask path reads the
+    // prebuilt facade instead of re-querying the catalog. The surviving
+    // fallback answers the anchor-free allow shape (`trustedIntent` is
+    // cleared here — no anchor, no intent axis — so the reply needs no
+    // intent answer).
+    // Registration proved the fallback resolves; the catalog then drops
+    // it. Resolution is eager and cached, so the per-ask path reads the
     // prebuilt facade instead of re-querying the catalog.
     let present = true;
     let calls = 0;
@@ -573,9 +591,7 @@ describe("registry backend resolution", () => {
       timestamp: 0,
       stopReason: "stop",
       answers: {
-        danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
-        intent_match: { type: "bool", probability: 0.9 },
-        risk: { type: "score", score: 0.2, confidence: 0.9 },
+        ...classifierReply().answers,
       },
       usage: {
         input: 3,
@@ -610,25 +626,16 @@ describe("registry backend resolution", () => {
     // walk the surviving fallback still answers.
     present = false;
     const { log } = makeMergedRecordingLog();
-    const result = await pool.review(reviewCtx(log));
+    // The stubbed reply has no intent answer, so the review must carry no
+    // anchor — otherwise the intent reading would be incomplete and fail
+    // over instead of answering.
+    const anchorFree = reviewCtx(log);
+    anchorFree.transcript = { trustedIntent: [], toolCalls: [], strippedCount: 0 };
+    const result = await pool.review(anchorFree);
     // classify was attempted against the prebuilt facade — no wiring throw,
     // and a real verdict flowed back through the translation path.
     expect(calls).toBe(1);
     if (isMachineryFailure(result)) throw new Error(`machinery: ${result.kind}`);
     expect(result.outcome.verdict.kind).toBe("allow");
-  });
-});
-
-describe("lane parity", () => {
-  it("offers the same number of always-deny categories in both lanes", () => {
-    const alwaysDeny =
-      buildReviewSystemPrompt({ rules: null, replace: false })
-        .split("\n## ")
-        .find((block) => block.startsWith("DENY — Always")) ?? "";
-    const chatCategories = alwaysDeny.split("\n").filter((line) => line.startsWith("- **")).length;
-    const classifierCategories = Object.keys(DANGER_CRITERIA).filter(
-      (key) => key !== DANGER_NONE,
-    ).length;
-    expect(chatCategories).toBe(classifierCategories);
   });
 });

@@ -15,6 +15,7 @@ import { emitCallFailure } from "#src/audit/call-failure.ts";
 import { MODEL_ANSWERS_EVENT } from "#src/audit/events.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
 import type { ReviewOutcome } from "#src/model/model-verdict.ts";
+import { projectClassifierAnswers, synthesizeClassifierVerdict } from "#src/review/axes/verdict.ts";
 import { classifyBackendError } from "#src/review/failure-taxonomy.ts";
 import type {
   AttemptResult,
@@ -32,7 +33,6 @@ import {
   buildClassifierRequest,
 } from "./client.ts";
 import type { ClassifierOverlay } from "./instructions.ts";
-import { projectClassifierAnswers, synthesizeClassifierVerdict } from "./verdict.ts";
 
 export interface ClassifierAdapterDeps {
   /** The classifier-scoped config slice (thresholds + resolved instructions). */
@@ -109,11 +109,15 @@ export function createClassifierAdapter(deps: ClassifierAdapterDeps): LaneAdapte
           modelId,
           answers: response.answers,
         });
-        const outcome: ReviewOutcome = synthesizeClassifierVerdict(
-          projectClassifierAnswers(response.answers),
+        const hasAnchor = ctx.transcript.trustedIntent.length > 0;
+        const verdict = synthesizeClassifierVerdict(
+          projectClassifierAnswers(response.answers, hasAnchor),
+          ctx.request.commandFacts ?? null,
+          hasAnchor,
           classifier,
           now() - startedAt,
         );
+        const outcome: ReviewOutcome = verdict.outcome;
         // Usage rides the outcome into the structured audit record; the
         // rawReply keeps it too, so a record reader never depends on one path.
         if (response.usage !== undefined) outcome.usage = response.usage;

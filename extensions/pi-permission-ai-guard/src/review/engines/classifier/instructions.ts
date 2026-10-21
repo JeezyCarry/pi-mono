@@ -1,8 +1,8 @@
-import type { JsonValue } from "@earendil-works/pi-ai";
+import type { JsonObject, JsonValue } from "@earendil-works/pi-ai";
 
 import type { ClassifierQuestionId } from "#src/config/config-schema.ts";
 
-type ClassifierInstructionValue = string | { [key: string]: JsonValue } | JsonValue[];
+type ClassifierInstructionValue = string | JsonObject | JsonValue[];
 
 /**
  * The classifier lane's resolved instructions: the shared background plus the
@@ -12,8 +12,8 @@ type ClassifierInstructionValue = string | { [key: string]: JsonValue } | JsonVa
  * replaces them. The one merge exception is a per-question context whose
  * shape differs from the earlier layer's (see {@link mergeContext}); the
  * built-in background arrives as text, so it is never the layer dropped.
- * (DENY-Unless has no direct question by design: those categories are
- * intent-dependent, and intent-dependence is the (intent_match, risk) pair).
+ * (The overlay keys are the flat axis ids of the registry in questions.ts —
+ * one question per axis; how the verdict layer composes them lives there.)
  */
 export type ClassifierOverlay = {
   background?: ClassifierInstructionValue;
@@ -34,7 +34,7 @@ export type ClassifierQuestionEntry =
  * @param value - The overlay value to test.
  * @returns True for the JSON-object member.
  */
-function isJsonRecord(value: ClassifierInstructionValue): value is { [key: string]: JsonValue } {
+function isJsonRecord(value: ClassifierInstructionValue): value is JsonObject {
   return typeof value === "object" && !Array.isArray(value);
 }
 

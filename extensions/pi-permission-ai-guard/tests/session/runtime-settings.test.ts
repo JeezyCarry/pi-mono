@@ -801,7 +801,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
 describe("RuntimeSettings — picker stays plain for the highlighted value", () => {
   it("applies a plain permissive pick and notifies at warning level, undecorated", async () => {
     const { settings, overrides, notify } = makeSettings();
-    const ctx = makeUiCtx("permissive — only clear high-danger requests are blocked");
+    const ctx = makeUiCtx("permissive — benign and neutral doubts pass; danger and denials block");
     await settings.command.handler("mode", ctx);
     expect(overrides.mode).toBe("permissive");
     // The command surface is plain text — the warning-red emphasis is

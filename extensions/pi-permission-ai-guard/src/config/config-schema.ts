@@ -8,9 +8,10 @@ export const LINK_NAME = "ai-guard";
 
 /**
  * How the link disposes the reviewer's non-allow verdicts — the leniency
- * ladder, strictest first. Hard-tier denies (riskLevel high|critical, or
- * missing) always deny; the mode maps soft-tier denies (low|medium) and
- * the model's own uncertainty against the ladder. The ctrl+alt+g cycle
+ * ladder, strictest first. Only the deterministic screen hard-denies; a
+ * model deny is always soft, whatever `riskLevel` it reports — that field is
+ * an audit label and never picks the tier. The mode maps the model's deny
+ * and its own uncertainty against the ladder. The ctrl+alt+g cycle
  * visits `default`, `lenient`, and `permissive`; only `strict` is set
  * explicitly (`/ai-guard mode strict`).
  */
@@ -51,15 +52,20 @@ export const REASONING_VALUES: readonly ModelThinkingLevel[] = [
 ];
 
 /**
- * The System One question ids — a config-level contract. The schema
- * validates instruction overlays against this list, and the classifier engine
- * builds its questions from it; both sides share the one source so a new
- * question is one entry, not two lists that can drift.
+ * The axis question ids — a config-level contract. The schema validates
+ * instruction overlays against this list, and the request builder keys its
+ * questions by it (via the question registry in questions.ts), so both sides
+ * share the one source and a new axis is one entry, not two lists that can
+ * drift. Order matches the registry: the ban wall, the effect, the target,
+ * then the intent.
  */
-export const CLASSIFIER_QUESTION_IDS = ["danger_category", "intent_match", "risk"] as const;
+export const CLASSIFIER_QUESTION_IDS = ["ban", "effect", "target", "intent"] as const;
 
-/** Membership check for the overlay ids (string-keyed: config keys are strings). */
-const CLASSIFIER_QUESTION_ID_SET: ReadonlySet<string> = new Set(CLASSIFIER_QUESTION_IDS);
+/**
+ * Membership check for the overlay ids (string-keyed: config keys are strings). Exported for the
+ * offline A/B harness's variant validation.
+ */
+export const CLASSIFIER_QUESTION_ID_SET: ReadonlySet<string> = new Set(CLASSIFIER_QUESTION_IDS);
 
 /** One of the System One question ids. */
 export type ClassifierQuestionId = (typeof CLASSIFIER_QUESTION_IDS)[number];
@@ -157,11 +163,18 @@ const instructionsSchema = z
   .nullable()
   .default(null);
 
-/** Classifier verdict thresholds — pure policy, no transport knobs. */
+/**
+ * Classifier verdict thresholds — pure policy, no transport knobs. The five
+ * axis questions leave one threshold: the minimum confidence at which a
+ * classifier reading is adopted (0–1, default 0.5, retained from the
+ * retired protocol rather than recalibrated). Below it that axis takes its
+ * uncertainty path. The threshold compares pi-ai's returned `confidence` —
+ * the label distribution's peak concentration — which is NOT an
+ * evidence-coverage measure; `unestablished` and the explicit evidence-
+ * missing paths stay a separate mechanism.
+ */
 const classifierThresholdsSchema = z
   .object({
-    intentThreshold: z.number().min(0).max(1).default(0.5),
-    riskThreshold: z.number().min(0).max(1).default(0.5),
     confidenceThreshold: z.number().min(0).max(1).default(0.5),
   })
   .strict();
@@ -248,16 +261,18 @@ const configBaseSchema = z.object({
   classifier: classifierThresholdsSchema.default(CLASSIFIER_THRESHOLD_DEFAULTS),
 
   // How the link disposes the reviewer's non-allow verdicts (the leniency
-  // ladder, strictest first). Hard-tier denies (riskLevel high|critical,
-  // or missing) always stay deny. Soft-tier denies (low|medium) and the
-  // model's own uncertainty (split by its lean field — benign-leaned
-  // doubts, neutral doubts, danger-leaned doubts) map per mode:
+  // ladder, strictest first). Only the deterministic screen hard-denies: a
+  // model deny is soft whatever riskLevel it reports, and riskLevel is an
+  // audit label that never picks the tier. The model's own uncertainty is
+  // split by its lean field (benign-leaned doubts, neutral doubts,
+  // danger-leaned doubts):
   // - "strict": everything denies — the reviewer's allow is the only pass.
-  // - "default": you judge every flag but hard danger — soft denies and
-  //   every unresolved doubt (any lean) ask.
-  // - "lenient": benign and neutral doubts pass; soft denies and
-  //   danger-leaned doubts ask.
-  // - "permissive": everything passes except hard-tier denies.
+  // - "default": you judge every flag — every model deny and every
+  //   unresolved doubt (any lean) asks; only the screen's deny blocks.
+  // - "lenient": benign doubts pass; neutral doubts, danger-leaned doubts,
+  //   and every model deny ask.
+  // - "permissive": benign and neutral doubts pass; danger-leaned doubts
+  //   and every deny deny (permissive has no ask path for danger).
   // Reviewer machinery failures never map to allow in any mode: they deny
   // under "strict" and "permissive" (a broken reviewer must not rubber-
   // stamp), and defer under the other two.
@@ -401,6 +416,11 @@ export function uncoveredInstructionLanes(config: AiGuardConfig): Array<"chat" |
 /** Validated extension configuration (zod schema inference). */
 export type AiGuardConfig = z.output<typeof configSchema>;
 
+/** The one field the lane decision reads, so a partial entry can be judged. */
+interface ModelTypeCarrier {
+  readonly modelType?: unknown;
+}
+
 /**
  * Whether the config runs the classifier lane: a registry string provider
  * with classifier modelType. The pool's lane selection, the
@@ -410,6 +430,6 @@ export type AiGuardConfig = z.output<typeof configSchema>;
  * @param config - The validated config, or one fallback entry.
  * @returns True when the primary reviewer is a classifier endpoint.
  */
-export function isClassifierMode(config: { modelType?: unknown }): boolean {
+export function isClassifierMode(config: ModelTypeCarrier): boolean {
   return config.modelType === "classifier";
 }

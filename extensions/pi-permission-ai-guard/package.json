@@ -28,7 +28,8 @@
   "type": "module",
   "imports": {
     "#src/*": "./src/*",
-    "#test/*": "./tests/*"
+    "#test/*": "./tests/*",
+    "#scripts/*": "./scripts/*"
   },
   "exports": {
     ".": {
@@ -46,6 +47,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@aliou/sh": "^0.3.4",
     "jsonc-parser": "^3.3.1",
     "zod": "^4.6.5"
   },
@@ -57,6 +59,7 @@
     "@tsconfig/node22": "catalog:",
     "@types/node": "catalog:",
     "memfs": "catalog:",
+    "tsx": "^4.23.15",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },

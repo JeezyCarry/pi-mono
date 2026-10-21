@@ -1,0 +1,7 @@
+# 0004 — Jev reviewer via the ReviewerEngine seam
+
+- Status: accepted (2026-09-20)
+- Context: TypeSafe's Jev (System One) returns calibrated-probability answers to typed questions instead of generated text, so it cannot hang behind the `ModelRegistry.complete` text-generation seam. The correct cut point is the `ReviewOutcome` producer.
+- Decision: introduce a `ReviewerEngine` seam (`review(ctx) -> EngineReviewResult | EngineMachineryFailure`). `createLlmEngine` (factory, no class) carries the existing find/auth/prompt/reviewModel path; `createJevEngine` calls the official `@typesafe-ai/sdk` (`systemOne`) with ported questions (`danger_category`, `intent_match`, `risk`) and synthesizes a verdict (`synthesizeJevVerdict`). Config: `provider: string | { type: "typesafe", baseUrl?, apiKey? }`, top-level `model` unchanged, thresholds in a `typesafe` section; `reasoning`/`maxTokens` ignored in Jev mode; `instructions` overlays (string = shared background, object = per-question additions) instead of replacing.
+- Consequences: Jev answers never produce free text, so deny reasons are synthesized from the danger-category name with a generic fallback; low confidence defers. `modelId` records `typesafe/<model>`.
+- Note: superseded in parts — the lanes are now named `chat`/`classifier` (not Jev/LLM), the direct TypeSafe SDK backend is gone (Pi's `modelRegistry.classify` only, see ADR 0005), and synthesis confirms instead of denying on authorized danger hits (confirm-defer).

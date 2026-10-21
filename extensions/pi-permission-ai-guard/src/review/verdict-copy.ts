@@ -11,56 +11,35 @@ import type { MachineryFailureKind } from "#src/model/machinery-kinds.ts";
 import type { RiskLevel } from "#src/model/model-verdict.ts";
 
 /**
- * The classifier lane's synthesized lines. The synthesis in
- * engines/classifier/verdict.ts decides the outcome shape; these render it.
- * Deliberately not shared with the chat lane's wording (prompt-principles
- * §12): the defer shape is the contract, the words stay per-lane.
- */
-
-/**
- * The danger-hit prefix: readers attribute a defer to its lane by it.
- * Names a concern, not a confirmed hit — the low-confidence branch
- * has not established that the rule matches.
+ * The ban-wall deny: a still-effective instruction forbids the action, so
+ * no anchor can cover it (the block is unoverridable).
  *
- * @param category - The danger category in words.
- * @returns The category-leading prefix.
+ * @returns The ban deny line.
  */
-export function classifierDangerCriteria(category: string): string {
-  return `flagged ${category}`;
+export function classifierBanReason(): string {
+  return "a standing instruction in the conversation forbids this action";
 }
 
 /**
- * The confirmation note riding behind the danger prefix in parentheses.
- * The two branches name different unknowns: a trusted reading whose
- * authorization is established, versus a reading whose match itself
- * is unestablished.
+ * The safety-insufficient-info defer: an axis the safety proof depends on
+ * came back unestablished, so the record could not establish the action is
+ * safe. Names which axis fell short.
  *
- * @param dangerTrusted - Whether the danger reading cleared the confidence floor.
- * @returns The parenthetical confirmation note.
+ * @param axis - The unestablished axis in words (ban / effect / target / intent).
+ * @returns The insufficient-info defer line.
  */
-export function classifierDangerNote(dangerTrusted: boolean): string {
-  return dangerTrusted ? "you requested this; proceed?" : "unsure this applies; proceed?";
+export function classifierInsufficientInfoReason(axis: string): string {
+  return `safety ${axis} unestablished (safe to run?)`;
 }
 
 /**
- * The low-confidence defer: names the reading that fell short.
+ * The neutral authorization ask: the anchor's coverage could not be
+ * established, and nothing else on the screen leans either way.
  *
- * @param dangerReadingShort - Whether the danger reading fell short.
- * @returns The uncertain defer line.
+ * @returns The neutral ask defer line.
  */
-export function classifierUncertainReason(dangerReadingShort: boolean): string {
-  return dangerReadingShort
-    ? "unsure this is dangerous (safe to run?)"
-    : "unsure how much damage this could do (safe to run?)";
-}
-
-/**
- * The authorized-but-costly defer: the anchor's request is why it confirms.
- *
- * @returns The costly defer line.
- */
-export function classifierCostlyReason(): string {
-  return "authorized but costly or hard to reverse (proceed?)";
+export function classifierNeutralAskReason(): string {
+  return "cannot establish the request covers this (proceed?)";
 }
 
 /**
@@ -270,16 +249,12 @@ export function escalationMessage(
 
 /**
  * The fail-open notice: the mode passed something the reviewer did not allow, so
- * the line names the tier that still blocks. A loosened mode never reads as a
- * blanket pass.
+ * the line names what still blocks. Only an ask-free mode reaches it
+ * (`permissive`); every other mode either has no auto-pass for a
+ * non-benign-leaned defer or asks on one.
  *
- * @param mode - The mode that auto-approved the request.
  * @returns The notification message.
  */
-export function failOpenNotice(mode: Mode): string {
-  const loosened =
-    mode === "lenient"
-      ? "uncertainty; soft denials still ask"
-      : "non-allow verdicts; hard-tier denials still block";
-  return `${mode} auto-approves ${loosened}`;
+export function failOpenNotice(): string {
+  return "the mode auto-approves this request; a danger-leaned doubt and every deny still block";
 }

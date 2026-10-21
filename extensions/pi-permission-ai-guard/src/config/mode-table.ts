@@ -17,10 +17,12 @@ import { MODE_VALUES, type AiGuardConfig, type Mode } from "./config-schema.ts";
 
 /**
  * The reviewer-suspicion order — the total order the ladder is drawn on,
- * strictest last (ADR 0003). A `defer`'s rank is set by its lean (benign /
+ * strictest last (ADR 0002). A `defer`'s rank is set by its lean (benign /
  * none / danger); a `deny`'s by its tier. Machinery failures are NOT on
  * this line: they are a separate axis (a failure to obtain a verdict, not a
- * suspicion), carried by each mode's `machinery` lane.
+ * suspicion), carried by each mode's `machinery` lane. A danger-leaned defer
+ * sits above a soft deny: permissive rejects at that rung, so a danger
+ * confirmation never auto-flows into an allow.
  */
 export const SUSPICION_ORDER = [
   "allow",
@@ -85,16 +87,20 @@ export interface ModeEntry {
  * The defer lane splits by lean — the reviewer's directional inclination
  * on an unresolved request. Doctrine: lean only moves a defer across the
  * ask/allow boundary, in the lean's own direction — lenient passes the
- * benign and neutral doubts (the reviewer already ran the full screen and
- * found nothing dangerous, only an authorization link it cannot see),
- * while its deny-leaning doubts still ask (a deny-leaning doubt is an
- * active alarm, and the mode's blurb promises exactly those ask). default
- * asks on every unresolved doubt AND every soft deny — an unresolved
- * verdict always keeps an ask path somewhere in the ladder, so the intent
- * question (the one thing the model structurally cannot see) can always
- * reach the authorizer. The deny band is reachable only by decisive
- * (hard-tier) denies; strict and permissive are lean-inert (their
- * contracts are absolute). Read down any column and the three bands
+ * benign doubts (the reviewer already ran the full screen and found nothing
+ * dangerous, only an authorization link it cannot see), while its neutral
+ * doubts, danger-leaning doubts, and soft denies still ask (a neutral doubt
+ * keeps an ask path so the intent question can always reach the authorizer;
+ * a deny-leaning doubt is an active alarm, and the mode's blurb promises
+ * exactly those ask). default asks on every unresolved doubt AND every soft
+ * deny — an unresolved verdict always keeps an ask path somewhere in the
+ * ladder. The deny band is reachable only by decisive (hard-tier) denies in
+ * default and lenient; strict is lean-inert (its contract is absolute) while
+ * permissive is ask-free (the lean decides between allow and deny) —
+ * permissive auto-approves only the benign and neutral
+ * doubts, so a danger confirmation asks nowhere: permissive has no ask path
+ * for danger, and a danger-leaned defer DENIES there rather than allowing
+ * (the F-GAP closure). Read down any column and the three bands
  * (allow / ask / deny) are contiguous in suspicion order — here that
  * follows from the cut-line shape: each row is two cut lines on
  * {@link SUSPICION_ORDER}, and the contiguity test pins it.
@@ -119,19 +125,19 @@ export const MODE_TABLE: Record<Mode, ModeEntry> = {
     },
   },
   lenient: {
-    cuts: { acceptAtOrBelow: "defer-neutral", rejectAtOrAbove: "hard-deny" },
+    cuts: { acceptAtOrBelow: "defer-benign", rejectAtOrAbove: "hard-deny" },
     machinery: "defer",
     facts: {
-      blurb: "only the reviewer's active alarms ask you",
+      blurb: "benign doubts pass; active alarms and soft denials ask",
       inCycle: true,
       emphasize: false,
     },
   },
   permissive: {
-    cuts: { acceptAtOrBelow: "soft-deny", rejectAtOrAbove: "hard-deny" },
+    cuts: { acceptAtOrBelow: "defer-neutral", rejectAtOrAbove: "defer-danger" },
     machinery: "deny",
     facts: {
-      blurb: "only clear high-danger requests are blocked",
+      blurb: "benign and neutral doubts pass; danger and denials block",
       // In the casual cycle by operator choice (4-mode ladder): the red
       // footer emphasis is the guardrail — the mode is visible the moment
       // it lands. Only strict (full fail-closed automation) stays

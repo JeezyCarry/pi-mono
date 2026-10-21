@@ -21,26 +21,12 @@
       "type": "object",
       "description": "Classifier verdict thresholds — pure policy, no transport knobs.",
       "properties": {
-        "intentThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Intent probability at or above which the anchor counts as authorizing the action."
-        },
-        "riskThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Risk score at or above which the action denies; the tier follows the fixed quartile bands. Raising it widens what auto-allows in every mode."
-        },
         "confidenceThreshold": {
           "type": "number",
           "minimum": 0,
           "maximum": 1,
           "default": 0.5,
-          "description": "Minimum answer confidence; below it the verdict defers."
+          "description": "Minimum confidence at which a classifier reading is adopted (0–1, default 0.5); below it that axis takes its uncertainty path. Compares the returned confidence (the label distribution's peak concentration); it does not measure evidence completeness."
         }
       },
       "additionalProperties": false
@@ -109,7 +95,7 @@
       "type": "string",
       "enum": ["strict", "default", "lenient", "permissive"],
       "default": "default",
-      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Hard-tier denies (riskLevel high|critical, or missing) always deny. Soft-tier denies (low/medium) and the model's own uncertainty (split by its lean: benign-leaned, neutral, danger-leaned) map per mode: 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger (soft denies and every unresolved doubt ask); 'lenient' — benign and neutral doubts pass, soft denies and danger-leaned doubts ask; 'permissive' — everything passes except hard-tier denies. Reviewer machinery failures never map to allow: they deny under strict and permissive, and defer otherwise."
+      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Only the deterministic screen hard-denies: a model deny is soft whatever riskLevel it reports, and riskLevel is an audit label that never picks the tier. The model's own uncertainty is split by its lean (benign-leaned, neutral, danger-leaned): 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger (soft denies and every unresolved doubt ask); 'lenient' — benign doubts pass, neutral doubts, danger-leaned doubts, and soft denies ask; 'permissive' — benign and neutral doubts pass, danger-leaned doubts and every deny deny (permissive has no ask path for danger, so a danger confirmation blocks rather than auto-approving). Reviewer machinery failures never map to allow: they deny under strict and permissive, and defer otherwise."
     },
     "notifyLevel": {
       "type": "string",
@@ -237,7 +223,7 @@
                   "type": "object",
                   "description": "Per-question additions keyed by question id.",
                   "propertyNames": {
-                    "enum": ["danger_category", "intent_match", "risk"]
+                    "enum": ["ban", "effect", "target", "intent"]
                   },
                   "additionalProperties": {
                     "anyOf": [
@@ -256,7 +242,7 @@
                 }
               },
               "additionalProperties": false,
-              "description": "Classifier-lane slot (append-only): shared background plus per-question additions keyed by stable question id (danger_category, intent_match, risk). The built-in reviewer background, questions, and criteria are the answer contract the verdict thresholds are calibrated against, so nothing here replaces them."
+              "description": "Classifier-lane slot (append-only): shared background plus per-question additions keyed by stable axis question id. The built-in reviewer background, questions, and criteria are the answer contract the verdict thresholds are calibrated against, so nothing here replaces them."
             }
           },
           "additionalProperties": false,

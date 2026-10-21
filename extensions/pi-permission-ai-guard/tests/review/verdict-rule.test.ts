@@ -4,10 +4,9 @@
  * this table pins it densely — a semantic change to any cell is a
  * one-line failure here, before it reaches the pipeline's wiring tests.
  *
- * The ladder (strictest first): hard-tier denies (riskLevel
- * high|critical, or missing) are terminal in EVERY mode. Soft denies
- * (low|medium) and the model's own uncertainty map per mode; machinery
- * failures never map to allow.
+ * The ladder (strictest first): hard-tier denies (only the screen's) are
+ * terminal in EVERY mode. Every model deny is soft and, with the model's
+ * own uncertainty, maps per mode; machinery failures never map to allow.
  */
 
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
@@ -15,13 +14,14 @@ import { describe, expect, it } from "vitest";
 
 import { MODE_VALUES, type Mode } from "#src/config/config-schema.ts";
 import { MODE_TABLE, suspicionRank } from "#src/config/mode-table.ts";
-import { GENERIC_DENY_REASON, type RiskLevel } from "#src/model/model-verdict.ts";
+import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import {
   escalationMessage,
   failOpenNotice,
   withAgentInstruction,
 } from "#src/review/verdict-copy.ts";
 import {
+  type DenyAuthority,
   type ModelDeferInfo,
   applyVerdictMode,
   denyTier,
@@ -34,7 +34,7 @@ type Row = [
   policy: Mode,
   verdict: AuthorizerVerdict,
   modelDefer: ModelDeferInfo | undefined,
-  riskLevel: RiskLevel | undefined,
+  authority: DenyAuthority | undefined,
   expected: AuthorizerVerdict,
 ];
 
@@ -54,25 +54,21 @@ describe("applyVerdictMode — mapping table", () => {
     // Allow is never transformed, in any mode.
     ...MODE_VALUES.map((m) => [m, ALLOW, undefined, undefined, ALLOW] as Row),
 
-    // Hard-tier denies are terminal in every mode — high, critical, AND a
-    // missing risk level (absence of signal never buys leniency).
-    ...MODE_VALUES.flatMap((m) =>
-      ([undefined, "high", "critical"] as RiskLevel[]).map(
-        (rl) => [m, DENY, undefined, rl, DENY] as Row,
-      ),
-    ),
+    // A screen deny is terminal in every mode.
+    ...MODE_VALUES.map((m) => [m, DENY, undefined, "screen", DENY] as Row),
 
-    // Soft denies (low|medium) map down the ladder — default asks (the
-    // resting mode forwards every flag to the human; only hard-tier
-    // denies are final there).
+    // Model denies are soft and map down the ladder — default and lenient ask
+    // (the resting mode forwards every flag to the human), and permissive
+    // DENIES: it has no ask path for a danger confirmation, so a flagged
+    // screen is never rubber-stamped there.
     ...(
       [
         { mode: "strict", expected: DENY },
         { mode: "default", expected: { kind: "defer" } },
         { mode: "lenient", expected: { kind: "defer" } },
-        { mode: "permissive", expected: ALLOW },
+        { mode: "permissive", expected: DENY },
       ] as const
-    ).map(({ mode, expected }) => [mode, DENY, undefined, "low", expected] as Row),
+    ).map(({ mode, expected }) => [mode, DENY, undefined, "model", expected] as Row),
 
     // The model's own uncertainty (model-defer): strict denies it, carrying
     // the clarification request as the teaching reason; default asks;
@@ -88,15 +84,18 @@ describe("applyVerdictMode — mapping table", () => {
       },
     ],
     ["default", MODEL_DEFER, MODEL_DEFER_WITH_REASON, undefined, { kind: "defer" }],
-    ["lenient", MODEL_DEFER, MODEL_DEFER_WITH_REASON, undefined, { kind: "allow" }],
+    // A neutral (lean-less) doubt now asks in lenient too: lenient's accept
+    // line moved from defer-neutral to defer-benign, so only a benign-leaned
+    // doubt auto-passes there.
+    ["lenient", MODEL_DEFER, MODEL_DEFER_WITH_REASON, undefined, { kind: "defer" }],
     ["permissive", MODEL_DEFER, MODEL_DEFER_WITH_REASON, undefined, { kind: "allow" }],
 
     // The lean split: benign-leaned doubts pass in lenient but ASK in
     // default (an unresolved verdict always keeps an ask path — the
     // intent question must be able to reach the authorizer); deny at
     // strict (a lean is not an allow); danger-leaned doubts ask everywhere
-    // below strict (lenient's auto-pass breaks); permissive is lean-inert
-    // (its contract is absolute).
+    // below strict (lenient's auto-pass breaks); permissive is ask-free, so
+    // its lean decides between allow and deny.
     ...(
       [
         {
@@ -114,7 +113,7 @@ describe("applyVerdictMode — mapping table", () => {
             strict: { kind: "deny", reason: "which file does this target?" },
             default: { kind: "defer" },
             lenient: { kind: "defer" },
-            permissive: ALLOW,
+            permissive: { kind: "deny", reason: "which file does this target?" },
           } as const,
         },
       ] as const
@@ -152,18 +151,33 @@ describe("applyVerdictMode — mapping table", () => {
     ["strict", MODEL_DEFER, undefined, undefined, DENY_WITH_REASON],
     ["default", MODEL_DEFER, undefined, undefined, { kind: "defer" }],
     ["permissive", MODEL_DEFER, undefined, undefined, DENY_WITH_REASON],
-  ])("%s × %j (deferKind %j, risk %j) → %j", (policy, verdict, modelDefer, riskLevel, expected) => {
-    expect(applyVerdictMode(policy, verdict, modelDefer, riskLevel)).toEqual(expected);
-  });
+  ])(
+    "%s × %j (deferKind %j, authority %j) → %j",
+    (policy, verdict, modelDefer, authority, expected) => {
+      expect(applyVerdictMode(policy, verdict, modelDefer, authority)).toEqual(expected);
+    },
+  );
 });
 
 describe("denyTier", () => {
-  it("classifies high|critical and missing risk as hard, low|medium as soft", () => {
-    expect(denyTier(undefined)).toBe("hard");
-    expect(denyTier("high")).toBe("hard");
-    expect(denyTier("critical")).toBe("hard");
-    expect(denyTier("low")).toBe("soft");
-    expect(denyTier("medium")).toBe("soft");
+  it("makes only the screen hard", () => {
+    expect(denyTier("screen")).toBe("hard");
+    expect(denyTier("model")).toBe("soft");
+  });
+});
+
+describe("model deny authority invariant", () => {
+  it("never hard-denies a model deny in default or lenient, whatever its text", () => {
+    for (const mode of ["default", "lenient"] as const) {
+      expect(applyVerdictMode(mode, DENY, undefined, "model")).toEqual({ kind: "defer" });
+      expect(applyVerdictMode(mode, DENY)).toEqual({ kind: "defer" });
+    }
+  });
+
+  it("keeps the screen's deny a deny in every mode", () => {
+    for (const mode of MODE_VALUES) {
+      expect(applyVerdictMode(mode, DENY, undefined, "screen").kind).toBe("deny");
+    }
   });
 });
 
@@ -178,19 +192,19 @@ describe("machineryTarget", () => {
 
 it("routes a confirm-defer by the mode's defer-danger band", () => {
   // The danger rows' confirm exit: lean deny puts it on defer-danger, so
-  // strict still denies (fail-closed), default and lenient ask, and
-  // permissive — whose contract blocks only hard denies — allows. No mode
-  // reaches allow from the classifier's own danger rows; permissive's allow
-  // is the mode's ladder, never the classifier's judgment.
+  // strict denies (fail-closed), default and lenient ask, and permissive —
+  // which has no ask path for danger — denies. No mode reaches allow from the
+  // classifier's own danger rows; the permissive deny is the mode's ladder,
+  // never the classifier's judgment.
   const confirm: ModelDeferInfo = { kind: "model-defer", lean: "deny" };
   const exits = MODE_VALUES.map(
-    (mode) => [mode, applyVerdictMode(mode, { kind: "defer" }, confirm, "critical").kind] as const,
+    (mode) => [mode, applyVerdictMode(mode, { kind: "defer" }, confirm).kind] as const,
   );
   expect(Object.fromEntries(exits)).toEqual({
     strict: "deny",
     default: "defer",
     lenient: "defer",
-    permissive: "allow",
+    permissive: "deny",
   });
 });
 
@@ -207,23 +221,23 @@ describe("the ladder's structural invariant — contiguous bands in suspicion or
   const rank = { allow: 0, defer: 1, deny: 2 } as const;
 
   // The six verdict states in suspicion order — shared by the band
-  // contiguity and the ask-path invariant (the last two, soft and hard
-  // deny, differ only in riskLevel).
+  // contiguity and the ask-path invariant (the last two, model and screen
+  // deny, differ only in authority).
   const SUSPICION_ORDER_INPUTS: Array<
-    [AuthorizerVerdict, ModelDeferInfo | undefined, RiskLevel | undefined]
+    [AuthorizerVerdict, ModelDeferInfo | undefined, DenyAuthority | undefined]
   > = [
     [{ kind: "allow" }, undefined, undefined],
     [{ kind: "defer" }, { kind: "model-defer", lean: "allow" }, undefined],
     [{ kind: "defer" }, { kind: "model-defer" }, undefined],
     [{ kind: "defer" }, { kind: "model-defer", lean: "deny" }, undefined],
-    [{ kind: "deny", reason: "x" }, undefined, "low"],
-    [{ kind: "deny", reason: "x" }, undefined, "high"],
+    [{ kind: "deny", reason: "x" }, undefined, "model"],
+    [{ kind: "deny", reason: "x" }, undefined, "screen"],
   ];
 
   function bandSequence(mode: Mode): number[] {
     return SUSPICION_ORDER_INPUTS.map(
-      ([verdict, modelDefer, riskLevel]) =>
-        rank[applyVerdictMode(mode, verdict, modelDefer, riskLevel).kind],
+      ([verdict, modelDefer, authority]) =>
+        rank[applyVerdictMode(mode, verdict, modelDefer, authority).kind],
     );
   }
 
@@ -263,9 +277,9 @@ describe("the ladder's structural invariant — contiguous bands in suspicion or
     // mode, so the intent question can always reach the authorizer.
     // Only decisive verdicts (allow, hard deny) may bypass every ask.
     const unresolved = SUSPICION_ORDER_INPUTS.slice(1, 5);
-    for (const [verdict, modelDefer, riskLevel] of unresolved) {
+    for (const [verdict, modelDefer, authority] of unresolved) {
       const asks = MODE_VALUES.some(
-        (m) => applyVerdictMode(m, verdict, modelDefer, riskLevel).kind === "defer",
+        (m) => applyVerdictMode(m, verdict, modelDefer, authority).kind === "defer",
       );
       expect(asks, `${JSON.stringify(verdict)} lean=${modelDefer?.lean ?? "none"}`).toBe(true);
     }
@@ -400,10 +414,8 @@ describe("resolveMapping — the mapping consequence rule", () => {
     const notice = neutral.notice!;
     expect(notice.level).toBe("warning");
     expect(notice.message).toMatch(OPERATOR_COPY_SHAPE);
-    // The copy builder pins the mapping without pinning the wording: the
-    // lenient notice names a different remaining tier than the permissive one.
-    expect(notice.message).toBe(failOpenNotice("lenient"));
-    expect(notice.message).not.toBe(failOpenNotice("permissive"));
+    // The copy builder pins the mapping without pinning the wording.
+    expect(notice.message).toBe(failOpenNotice());
     // Already shown: silent, and the state is not re-marked.
     const again = resolveMapping({
       original: DEFER_V,
@@ -434,7 +446,7 @@ describe("resolveMapping — the mapping consequence rule", () => {
     expect(swallowed.emittedReason).toBe("unsafe");
     const notice = swallowed.notice!;
     expect(notice.level).toBe("warning");
-    expect(notice.message).toBe(failOpenNotice("permissive"));
+    expect(notice.message).toBe(failOpenNotice());
   });
 
   it("a defer→deny mapping records the synthesized teaching reason, never a suppressed marker", () => {

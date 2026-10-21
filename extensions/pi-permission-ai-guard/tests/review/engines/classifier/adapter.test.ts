@@ -7,6 +7,10 @@
  * requests).
  */
 
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { ClassifierAnswer, ClassifierResult } from "@earendil-works/pi-ai";
 import type { AuthorizerLog } from "@gotgenes/pi-permission-system";
 import { describe, expect, it } from "vitest";
@@ -21,13 +25,15 @@ import {
 } from "#src/review/failure-taxonomy.ts";
 import type { AttemptSpec, ClassifierPoolEndpoint } from "#src/review/pool.ts";
 import { buildAskContext } from "#src/review/request/ask.ts";
+import { snapshotRequest } from "#src/review/request/review-request.ts";
+import { applyVerdictMode } from "#src/review/verdict-rule.ts";
 import { makeDetails } from "#test/fixtures.ts";
 import { makeMergedRecordingLog } from "#test/review/pipeline-helpers.ts";
 
 import { classifierReply } from "./stubs.ts";
 
 /**
- * A reply that answered the three questions, with individual answers replaced.
+ * A reply that answered the four axis questions, with individual answers replaced.
  *
  * @param answers - Per-question answers replacing the allow-shaped defaults.
  * @returns The classifier result the stubbed backend serves.
@@ -35,9 +41,12 @@ import { classifierReply } from "./stubs.ts";
 function response(answers: Record<string, ClassifierAnswer> = {}): ClassifierResult {
   return classifierReply({
     answers: {
-      danger_category: { type: "choice", choice: "none", confidence: 0.95, probabilities: {} },
-      intent_match: { type: "bool", probability: 0.9 },
-      risk: { type: "score", score: 0.4, confidence: 0.9 },
+      ban: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+      effect: { type: "choice", choice: "read", confidence: 0.9, probabilities: {} },
+      target: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+      // The attempt contexts carry a trusted anchor, so the intent action
+      // is asked and the default reply answers it.
+      intent: { type: "choice", choice: "not_requested", confidence: 0.9, probabilities: {} },
       ...answers,
     },
   });
@@ -50,9 +59,10 @@ function response(answers: Record<string, ClassifierAnswer> = {}): ClassifierRes
  * @returns The context the adapter's `attempt` consumes.
  */
 function attemptContext(log: AuthorizerLog) {
+  const ask = buildAskContext(makeDetails({ value: "ls" }), "/project");
   return {
     transcript: { trustedIntent: ["inspect files"], toolCalls: [], strippedCount: 0 },
-    request: { ask: buildAskContext(makeDetails({ value: "ls" }), "/project"), target: "ls" },
+    request: { ask, target: "ls", commandFacts: snapshotRequest(ask).commandFacts },
     log,
     requestId: "classifier-adapter-test",
   };
@@ -80,8 +90,6 @@ const endpoint = (model = "jev-1.13", timeoutMs = 15000): ClassifierPoolEndpoint
 
 const classifierConfig = {
   classifier: {
-    intentThreshold: 0.5,
-    riskThreshold: 0.5,
     confidenceThreshold: 0.5,
   },
   instructions: {},
@@ -105,6 +113,109 @@ const throwing = (error: Error): ClassifierClientLike => ({
 const safe: ClassifierClientLike = { classify: async () => response() };
 
 describe("classifier adapter disposition", () => {
+  it("keeps an invisible downstream deferred through the production rows", async () => {
+    // Production-chain regression: a real package fixture whose entry
+    // declares a downstream file nobody read (scope: entry-declaration-only)
+    // — with an unreadable action and a naming anchor still defers. The
+    // snapshot does not authorize, and an unreadable command never allows.
+    // The adapter → verdict path is exercised with the real command, a
+    // naming anchor, and a negating anchor.
+    for (const anchor of [
+      "run the migration", // names the action — still defers
+      "do not run the migration", // negates it — no fact is manufactured
+    ]) {
+      const dir = join(tmpdir(), `adapter-facts-${process.pid}`);
+      mkdirSync(dir, { recursive: true });
+      try {
+        writeFileSync(
+          join(dir, "package.json"),
+          JSON.stringify({ scripts: { migrate: "node invisible.js" } }),
+        );
+        const { events, log } = makeMergedRecordingLog();
+        const ask = buildAskContext(makeDetails({ value: "npm run migrate" }), dir);
+        const withFacts = {
+          transcript: { trustedIntent: [anchor], toolCalls: [], strippedCount: 0 },
+          request: {
+            ask,
+            target: "npm run migrate",
+            observedFacts: snapshotRequest(ask).observedFacts,
+          },
+          log,
+          requestId: "classifier-adapter-test",
+        };
+        // The snapshot carries the real entry text — the test would fail
+        // if the producer stopped seeing the fixture.
+        expect(withFacts.request.observedFacts).toMatchObject({
+          source: "package.json:scripts.migrate",
+          scripts: { migrate: "node invisible.js" },
+        });
+        let seenState: Record<string, unknown> | undefined;
+        const invisible: ClassifierClientLike = {
+          classify: async (context) => {
+            // Capture the ACTUAL wire state the adapter built — the
+            // snapshot must ride the classifier request, not just the
+            // request context the test hands the adapter.
+            seenState = context.state as Record<string, unknown>;
+            return response({
+              effect: {
+                type: "choice",
+                choice: "cannot_determine",
+                confidence: 0.9,
+                probabilities: {},
+              },
+            });
+          },
+        };
+        const attempt = await adapter(invisible).attempt(endpoint(), withFacts, spec(false));
+        expect(attempt.kind).toBe("answered");
+        if (attempt.kind !== "answered") return;
+        expect(attempt.result.outcome.verdict.kind).toBe("defer");
+        expect(attempt.result.outcome.deferKind).toBe("model-defer");
+        // The captured wire state carries the same snapshot the request
+        // context holds — the adapter→buildState→classify joint is live.
+        expect(seenState?.observed_facts).toMatchObject({
+          source: "package.json:scripts.migrate",
+          scope: "entry-declaration-only",
+          downstream: "unresolved",
+          trust: "untrusted-project-text-not-authorization",
+          keys: ["migrate"],
+          scripts: { migrate: "node invisible.js" },
+        });
+        expect(events.filter((e) => e.event === "ai_guard.model_answers")).toHaveLength(1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("keeps a model-defer a defer through the default mode mapping", async () => {
+    // Production chain, second half: the adapter synthesizes the defer
+    // outcome, then the pipeline's mapping (default mode) must leave it a
+    // defer — the evidence does not authorize, and an unreadable command
+    // never maps to allow or deny. applyVerdictMode runs on the REAL outcome.
+    const { log } = makeMergedRecordingLog();
+    const attempt = await adapter({
+      classify: async () =>
+        response({
+          effect: {
+            type: "choice",
+            choice: "cannot_determine",
+            confidence: 0.9,
+            probabilities: {},
+          },
+        }),
+    }).attempt(endpoint(), attemptContext(log), spec(false));
+    expect(attempt.kind).toBe("answered");
+    if (attempt.kind !== "answered") return;
+    const outcome = attempt.result.outcome;
+    const mapped = applyVerdictMode("default", outcome.verdict, {
+      kind: outcome.deferKind,
+      reason: outcome.deferReason,
+      lean: outcome.lean,
+    });
+    expect(mapped.kind).toBe("defer");
+  });
+
   it("answers a valid allow with the primary identity", async () => {
     const { events, log } = makeMergedRecordingLog();
     const attempt = await adapter(safe).attempt(endpoint(), attemptContext(log), spec(false));
@@ -122,25 +233,43 @@ describe("classifier adapter disposition", () => {
 
   it("answers danger and low-confidence outcomes without failover signal", async () => {
     for (const [overrides, expected] of [
-      // A confident danger hit nobody asked for denies; the same hit with the
-      // anchor behind it confirms instead. An unsure confidence defers.
+      // A credential read is a block-tier row: it asks leaning deny even
+      // with a named request behind it; the mode mapping, not the verdict,
+      // keeps it soft. A workspace modification without a request asks
+      // leaning allow; an unsure confidence defers neutrally.
       [
         {
-          danger_category: { type: "choice", choice: "secrets_credentials", confidence: 0.9 },
-          intent_match: { type: "bool", probability: 0.1 },
-        },
-        { verdict: { kind: "deny" } },
-      ],
-      [
-        {
-          danger_category: { type: "choice", choice: "secrets_credentials", confidence: 0.9 },
-          intent_match: { type: "bool", probability: 0.9 },
+          effect: { type: "choice", choice: "read", confidence: 0.9, probabilities: {} },
+          target: {
+            type: "choice",
+            choice: "credential_material",
+            confidence: 0.9,
+            probabilities: {},
+          },
+          intent: { type: "choice", choice: "requested", confidence: 0.9, probabilities: {} },
         },
         { verdict: { kind: "defer" }, deferKind: "model-defer", lean: "deny" },
       ],
       [
-        { risk: { type: "score", score: 0.4, confidence: 0.1 } },
-        { verdict: { kind: "defer" }, deferKind: "model-defer" },
+        {
+          effect: { type: "choice", choice: "modify", confidence: 0.9, probabilities: {} },
+          target: {
+            type: "choice",
+            choice: "ordinary_files",
+            confidence: 0.9,
+            probabilities: {},
+          },
+        },
+        { verdict: { kind: "defer" }, deferKind: "model-defer", lean: "allow" },
+      ],
+      // A REPORTED-but-below-the-floor negative reading is adopted as
+      // benign — gating it would let confidence manufacture a
+      // missing-evidence wall.
+      [
+        {
+          ban: { type: "choice", choice: "none", confidence: 0.1, probabilities: {} },
+        },
+        { verdict: { kind: "allow" } },
       ],
     ] as const) {
       const attempt = await adapter({
@@ -345,7 +474,7 @@ describe("classifier adapter incomplete responses", () => {
     });
   });
 
-  it.each([[{ danger_category: undefined }], [{ risk: undefined }], [{ intent_match: undefined }]])(
+  it.each([[{ effect: undefined }], [{ target: undefined }], [{ ban: undefined }]])(
     "fails over on missing answers %j",
     async (overrides) => {
       const attempt = await adapter({
@@ -362,7 +491,9 @@ describe("classifier adapter incomplete responses", () => {
   it("fails over on a missing reading field", async () => {
     const attempt = await adapter({
       classify: async () =>
-        response({ risk: { type: "score", confidence: 0.9 } as unknown as ClassifierAnswer }),
+        response({
+          effect: { type: "bool", probability: 0.9 } as unknown as ClassifierAnswer,
+        }),
     }).attempt(endpoint(), attemptContext(makeMergedRecordingLog().log), spec(true));
     expect(attempt.kind).toBe("retryable");
     if (attempt.kind !== "retryable") return;
@@ -375,8 +506,8 @@ describe("classifier adapter incomplete responses", () => {
     const attempt = await adapter({
       classify: async () =>
         response({
-          danger_category: { type: "choice", choice: "none" } as unknown as ClassifierAnswer,
-          risk: { type: "score", score: 1 } as unknown as ClassifierAnswer,
+          ban: { type: "choice", choice: "none" } as unknown as ClassifierAnswer,
+          effect: { type: "choice", choice: "read" } as unknown as ClassifierAnswer,
         }),
     }).attempt(endpoint(), attemptContext(makeMergedRecordingLog().log), spec(true));
     expect(attempt.kind).toBe("answered");

@@ -4,6 +4,7 @@ import {
   attempt,
   bestEffort,
   cacheKey,
+  deepFreeze,
   encodeActionTextForPrompt,
   isObjectRecord,
   normalizeAndRedactText,
@@ -265,6 +266,37 @@ describe("isObjectRecord", () => {
 
   it("returns false for Symbol", () => {
     expect(isObjectRecord(Symbol("id"))).toBe(false);
+  });
+});
+
+describe("deepFreeze", () => {
+  it("freezes nested records and arrays", () => {
+    const value = { a: { b: 1 }, c: [1, { d: 2 }] };
+    deepFreeze(value);
+    expect(Object.isFrozen(value)).toBe(true);
+    expect(Object.isFrozen(value.a)).toBe(true);
+    expect(Object.isFrozen(value.c)).toBe(true);
+    expect(Object.isFrozen(value.c[1])).toBe(true);
+  });
+
+  it("freezes a self-referencing object without stacking overflow", () => {
+    // A cyclic snapshot (an object that references itself) must terminate:
+    // the visited-set returns on the second sighting instead of recursing
+    // forever. The whole graph ends up frozen.
+    const cyclic: Record<string, unknown> = { name: "root" };
+    cyclic.self = cyclic;
+    cyclic.list = [cyclic];
+    expect(() => deepFreeze(cyclic)).not.toThrow();
+    expect(Object.isFrozen(cyclic)).toBe(true);
+    expect(Object.isFrozen(cyclic.self)).toBe(true);
+    expect(Object.isFrozen(cyclic.list)).toBe(true);
+  });
+
+  it("accepts shared (diamond) references without revisiting", () => {
+    const shared = { leaf: 1 };
+    const value = { left: shared, right: shared };
+    deepFreeze(value);
+    expect(Object.isFrozen(shared)).toBe(true);
   });
 });
 

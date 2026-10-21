@@ -371,6 +371,36 @@ export function safeStringify(value: unknown): string {
 }
 
 /**
+ * Objects already visited by {@link deepFreeze}. Identity-keyed (WeakSet), so
+ * a cyclic graph freezes without recursing into itself forever; a repeated
+ * call on an already-frozen value is a no-op.
+ */
+const DEEP_FROZEN = new WeakSet<object>();
+
+/**
+ * Deep-freeze a value: `Object.freeze` recurses into nested records and
+ * arrays. TypeScript `readonly` is compile-time only; a snapshot shared
+ * across consumers (cache key, renderers) needs runtime immutability so a
+ * later mutation cannot put B's content under A's key.
+ *
+ * Cycle-safe: an object that (transitively) references itself is visited
+ * once — the recursion returns on the second sighting instead of stacking
+ * overflow.
+ *
+ * @param value - The value to freeze in place.
+ * @returns The same value, frozen.
+ */
+export function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    if (DEEP_FROZEN.has(value)) return value;
+    DEEP_FROZEN.add(value);
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
  * The message of a thrown value: an Error's message, any other value's
  * string form.
  *

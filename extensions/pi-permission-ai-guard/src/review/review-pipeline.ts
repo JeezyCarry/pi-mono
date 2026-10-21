@@ -28,13 +28,19 @@ import {
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
 import { effectiveOverride, type SessionOverrides } from "#src/config/session-overrides.ts";
 import { PRE_CALL_MACHINERY_KINDS } from "#src/model/machinery-kinds.ts";
+import type { RiskLevel } from "#src/model/model-verdict.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import { openAsk } from "#src/review/request/ask.ts";
-import { cacheIdentity, type ReviewRequestContext } from "#src/review/request/review-request.ts";
+import {
+  cacheIdentity,
+  snapshotRequest,
+  type ReviewRequestContext,
+} from "#src/review/request/review-request.ts";
 import {
   type SessionManagerLike,
   stripTranscript,
 } from "#src/review/request/transcript-stripper.ts";
+import { screenCommand } from "#src/review/screen/screen.ts";
 import { bestEffort, errorMessage, normalizeAndRedactText } from "#src/utils.ts";
 
 import { accountModelOutcome, type CircuitBreaker, consumeTrip } from "./circuit-breaker.ts";
@@ -184,7 +190,29 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       surface,
       target: normalizeAndRedactText(target),
     };
-    const request: ReviewRequestContext = { ask, target };
+    // The denied panel's data: what the reviewer refused (a screen hit or a
+    // model deny; mode mappings and machinery denials are absent by
+    // design). The reason is the un-instructed teaching text, and the target
+    // rides through the record's redacted form — a credential in the command
+    // must not echo to the terminal via the panel's notify.
+    const recordDenial = (reason: string, riskLevel: RiskLevel | undefined): void => {
+      // The panel reads the newest handful; a long session must not grow the
+      // array without bound.
+      if (deps.denyHistory.length >= DENY_HISTORY_MAX) deps.denyHistory.shift();
+      deps.denyHistory.push({
+        requestId,
+        surface,
+        target: base.target,
+        reason,
+        riskLevel: riskLevel ?? undefined,
+        timestamp: new Date().toISOString(),
+      });
+    };
+    // No request context is built before the gates: the policy gate and
+    // the breaker below decide without model evidence, and the
+    // observed-facts snapshot (a project file read) is taken only on the
+    // path that actually needs a model review — after the gates, before
+    // the cache lookup.
 
     // Policy gate: defer when the deterministic engine already decided —
     // this link only adds value when the policy is undecided ("ask").
@@ -206,6 +234,27 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         }),
       );
       return { kind: "defer" };
+    }
+
+    // Screen: the closed deterministic hard rules, the only layer that may
+    // deny outright. It runs before the breaker and the model, so a hit costs
+    // no model call, is never cached, and holds even with a tripped breaker.
+    const screen = ask.fullCommand === undefined ? undefined : screenCommand(ask.fullCommand);
+    if (screen?.kind === "deny") {
+      const verdict = { kind: "deny" as const, reason: screen.reason };
+      const released = disposition.releaseVerdictGate({
+        mode,
+        record: DecisionRecord.screenDecided(base, screen),
+        original: verdict,
+        emitted: applyVerdictMode(mode, verdict, undefined, "screen"),
+        riskLevel: "critical",
+        defer: undefined,
+        cost: { kind: "fresh", latencyMs: 0 },
+      });
+      emitRecord(released.record);
+      recordDenial(screen.reason, "critical");
+      deps.circuitBreaker.recordVerdict("deny");
+      return released.verdict;
     }
 
     // Circuit breaker: a tripped breaker short-circuits without a model
@@ -290,7 +339,17 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // Cache lookup. The request snapshot contains the action context,
     // working directory, and policy-derived path boundary, so a verdict
     // cannot cross those contexts; the identity doctrine lives with the
-    // builder (see cacheIdentity).
+    // builder (see cacheIdentity). The observed-facts snapshot is taken
+    // here — after the policy and breaker gates, before the cache lookup —
+    // so a decided ask never reads the project file, and every consumer
+    // below (cache key, state, both lanes) reads one frozen value.
+    const snapshot = snapshotRequest(ask);
+    const request: ReviewRequestContext = {
+      ask,
+      target,
+      observedFacts: snapshot.observedFacts,
+      commandFacts: snapshot.commandFacts,
+    };
     const { commandHash, contextHash } = cacheIdentity(request, transcript);
     const cc = config.cache;
     const lookup = deps.verdictCache.lookup(commandHash, contextHash, cc);
@@ -301,7 +360,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       // classification exists to make it machinery). The cached riskLevel
       // rides along so a cached deny maps identically to its fresh first
       // pass.
-      const emitted = applyVerdictMode(mode, lookup.verdict, undefined, lookup.riskLevel);
+      const emitted = applyVerdictMode(mode, lookup.verdict);
       const released = disposition.releaseVerdictGate({
         mode,
         record: DecisionRecord.cacheHit(base, lookup.verdict),
@@ -358,7 +417,9 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       emitRecord(released.record);
       return released.verdict;
     }
-    const { outcome: reviewOutcome, modelId } = engineResult;
+    const { modelId } = engineResult;
+    // A model never hard-denies; see denyTier in verdict-rule.ts.
+    const reviewOutcome = engineResult.outcome;
 
     // Raw replies are verbose AND unnecessary for clean verdicts (the
     // structured record + sentinel suffice) — only defer failures keep the
@@ -390,12 +451,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // counts real model denials and the cache still stores the model's
     // deny, so a cached deny maps identically on a later hit. Defer isn't
     // cached (cache hits and breaker trips short-circuited above).
-    const emitted = applyVerdictMode(
-      mode,
-      reviewOutcome.verdict,
-      deferInfo,
-      reviewOutcome.riskLevel,
-    );
+    const emitted = applyVerdictMode(mode, reviewOutcome.verdict, deferInfo);
     const released = disposition.releaseVerdictGate({
       mode,
       record: DecisionRecord.model({
@@ -426,17 +482,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // the target rides through the record's redacted form (a credential in
     // the command must not echo to the terminal via the panel's notify).
     if (reviewOutcome.verdict.kind === "deny") {
-      // The denied panel reads the newest handful of these; a long session with
-      // many denials must not grow the array without bound.
-      if (deps.denyHistory.length >= DENY_HISTORY_MAX) deps.denyHistory.shift();
-      deps.denyHistory.push({
-        requestId,
-        surface,
-        target: base.target,
-        reason: reviewOutcome.verdict.reason,
-        riskLevel: reviewOutcome.riskLevel ?? undefined,
-        timestamp: new Date().toISOString(),
-      });
+      recordDenial(reviewOutcome.verdict.reason ?? "", reviewOutcome.riskLevel);
     }
 
     // The per-ask accounting: the model's real verdict feeds the breaker,

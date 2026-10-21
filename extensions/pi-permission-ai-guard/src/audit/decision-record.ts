@@ -27,6 +27,7 @@ import type {
 import type { BreakerVerdict } from "#src/config/config-schema.ts";
 import { PRE_CALL_MACHINERY_KINDS, type PreCallMachineryKind } from "#src/model/machinery-kinds.ts";
 import type { ReviewOutcome, VerdictKind } from "#src/model/model-verdict.ts";
+import type { HardRuleHit } from "#src/review/screen/hard-rules.ts";
 import { normalizeAndRedactText, truncateMiddle } from "#src/utils.ts";
 
 /** The audit-log correlation slice every call context carries (log + request id). */
@@ -178,8 +179,8 @@ const CLEAN_VERDICT_OMITTED = "(clean verdict, rawReply omitted)";
 
 /**
  * Longest raw model reply the audit streams keep. The record is written to the
- * review log, and ADR 0010 bounds what the logs accumulate; mid-truncation
- * keeps the tail, so a defer stays replayable.
+ * review log, and MAX_RAW_REPLY_CHARS bounds what the logs accumulate;
+ * mid-truncation keeps the tail, so a defer stays replayable.
  */
 export const MAX_RAW_REPLY_CHARS = 2000;
 
@@ -242,6 +243,25 @@ export const DecisionRecord = {
       matchedSpelling:
         policy.matchedSpelling === null ? null : normalizeAndRedactText(policy.matchedSpelling),
       deferKind: `policy-${policy.state}`,
+    };
+  },
+
+  /**
+   * The deterministic screen hard-denied — no model was called.
+   *
+   * @param base - Shared decision-record context.
+   * @param hit - The matched rule's stable id and the reason emitted.
+   * @returns A decision record for the screen gate.
+   */
+  screenDecided(base: DecisionBase, hit: HardRuleHit): DecisionRecordEntry {
+    return {
+      ...base,
+      gate: "screen",
+      modelCalled: false,
+      verdict: "deny",
+      rule: hit.rule,
+      reason: hit.reason,
+      riskLevel: "critical",
     };
   },
 
@@ -450,8 +470,8 @@ export const DecisionRecord = {
  * MODEL's judgment (with its reason and riskLevel); `emittedVerdict` names
  * what the link actually returned, and `mode` names which mode
  * mapped it (the default/lenient lanes route flags to human review,
- * the strict lane tightens uncertainty to denial, permissive loosens both
- * flags and uncertainty to allow, lenient only its benign/neutral
+ * the strict lane tightens uncertainty to denial, permissive denies every
+ * deny and every danger-leaned doubt, lenient passes only benign-leaned
  * uncertainty — the annotation covers every direction).
  *
  * @param record - The decision record for the model or cache-hit gate.

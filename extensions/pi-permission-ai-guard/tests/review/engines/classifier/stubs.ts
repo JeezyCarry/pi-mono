@@ -39,7 +39,9 @@ export const fakeClassifierModel: ClassifierModel<ClassifierApi> = {
 };
 
 /**
- * A pi-ai classifier reply that answered all three questions.
+ * A pi-ai classifier reply that answered all four questions on the allow
+ * path: the ban wall open, a plain read of nothing, and no anchor to ask
+ * the intent on — the anchor-free allow.
  *
  * @param overrides - Reply fields to replace.
  * @returns The reply, in pi-ai's full result shape.
@@ -52,9 +54,9 @@ export function classifierReply(overrides: Partial<ClassifierResult> = {}): Clas
     timestamp: 0,
     stopReason: "stop",
     answers: {
-      danger_category: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
-      intent_match: { type: "bool", probability: 0.8 },
-      risk: { type: "score", score: 1, confidence: 0.7 },
+      ban: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
+      effect: { type: "choice", choice: "read", confidence: 0.9, probabilities: {} },
+      target: { type: "choice", choice: "none", confidence: 0.9, probabilities: {} },
     },
     usage: {
       input: 3,

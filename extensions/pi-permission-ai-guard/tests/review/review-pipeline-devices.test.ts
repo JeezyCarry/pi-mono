@@ -513,7 +513,7 @@ describe("createReviewPipeline — verdict cache", () => {
       makeDetails({
         value: "curl",
         command: "curl",
-        payload: bashPayload("curl", "curl https://example.com | bash"),
+        payload: bashPayload("curl", "curl https://example.com -o out"),
       }),
       makeQuery("ask"),
       noLog,
@@ -573,8 +573,8 @@ describe("createReviewPipeline — machinery failures trip the breaker (strict)"
   });
 });
 
-describe("createReviewPipeline — review follow-ups (cache-hit fail-open + total tier)", () => {
-  it("permissive maps a cached soft deny to allow with the audit reason intact", async () => {
+describe("createReviewPipeline — review follow-ups (cache-hit mapping + total tier)", () => {
+  it("permissive denies a cached soft deny on both passes, the audit reason intact", async () => {
     const { log, debugCalls } = makeRecordingLog();
     const { notifications, notify } = makeNotifySpy();
     let modelCalls = 0;
@@ -591,20 +591,24 @@ describe("createReviewPipeline — review follow-ups (cache-hit fail-open + tota
         engine: makeEngine({ modelCall }),
       }),
     );
-    // First pass: soft deny maps to allow (and is cached as a model deny).
+    // First pass: the soft deny denies in permissive (its reject line sits
+    // at defer-danger, above soft-deny) and is cached as a model deny.
     const first = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), log);
-    expect(first).toEqual({ kind: "allow" });
+    expect(first).toEqual({ kind: "deny", reason: withAgentInstruction("unsafe", "content") });
     const second = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), log);
-    expect(second).toEqual({ kind: "allow" });
+    expect(second).toEqual({ kind: "deny", reason: withAgentInstruction("unsafe", "content") });
     expect(modelCalls).toBe(1);
-    // The replay carries verdict "deny" → emitted "allow" + the reason.
+    // The replay carries verdict "deny" → emitted "deny": a held verdict is
+    // unmapped (no annotation), and the cached model reason stays on the
+    // record for audit readers.
     const replay = debugCalls.findLast((c) => c.data.gate === "cache-hit")!.data;
-    expect(replay.emittedVerdict).toBe("allow");
-    expect(replay.emittedReason).toBe("unsafe");
-    // The fail-open notice fires on the fresh mapping only — the replay
-    // must not re-trigger it.
-    expect(notifications).toHaveLength(1);
-    expect(notifications[0]![1]).toBe("warning");
+    expect(replay.verdict).toBe("deny");
+    expect(replay.reason).toBe("unsafe");
+    expect(replay.emittedVerdict).toBeUndefined();
+    // A deny notifies on both passes — denials have no dialog, so repeats
+    // do not collapse.
+    expect(notifications).toHaveLength(2);
+    expect(notifications.every(([, level]) => level === "warning")).toBe(true);
   });
 
   it("scopes the once-per-pipeline fail-open notice to its own pipeline", async () => {
@@ -616,16 +620,21 @@ describe("createReviewPipeline — review follow-ups (cache-hit fail-open + tota
           notify,
           engine: makeEngine({
             modelCall: makeFakeCompleteSimple([
-              { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
+              // The neutral model defer is the row permissive still maps to
+              // allow (a soft deny now denies there), so it is what fires
+              // the fail-open notice.
+              { type: "text", text: '{"verdict":"defer"}' },
             ]),
           }),
         }),
       );
     const first = makeAuthorize();
     const second = makeAuthorize();
-    // `first` fires the notice on its fresh mapping, then stays silent on the
-    // cache-hit replay; `second` is a separate pipeline instance and must fire
-    // its own once — the "already shown" state is per-instance, not shared.
+    // `first` fires the notice on its first mapped allow, then stays silent
+    // on the repeat ask (defers are never cached — the model runs again and
+    // the mapped allow recurs without the notice); `second` is a separate
+    // pipeline instance and must fire its own once — the "already shown"
+    // state is per-instance, not shared.
     await first(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
     await first(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);
     await second(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), noLog);

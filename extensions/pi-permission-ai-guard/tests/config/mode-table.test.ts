@@ -63,8 +63,6 @@ describe("modeWarnings", () => {
     surfaces: ["bash"],
     instructions: null,
     classifier: {
-      intentThreshold: 0.5,
-      riskThreshold: 0.5,
       confidenceThreshold: 0.5,
     },
     cache: { maxEntries: 128 },

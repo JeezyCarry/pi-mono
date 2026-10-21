@@ -118,6 +118,28 @@ export interface CallErrorDiagnostic {
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 /**
+ * The valid risk levels, derived from {@link RiskLevel} (the single source of
+ * truth). The type argument rejects a bad member at compile time; it cannot
+ * catch an omission, so a new member has to be added here too.
+ */
+export const RISK_LEVELS: ReadonlySet<string> = new Set<RiskLevel>([
+  "low",
+  "medium",
+  "high",
+  "critical",
+]);
+
+/**
+ * Type guard: is `value` one of the risk levels?
+ *
+ * @param value - The string to test.
+ * @returns True if `value` is a valid risk level (type-narrowed to `RiskLevel`).
+ */
+export function isRiskLevel(value: string): value is RiskLevel {
+  return RISK_LEVELS.has(value);
+}
+
+/**
  * The valid verdict values, derived from {@link AuthorizerVerdict}["kind"] —
  * the upstream type is the single source of truth. Used to validate the
  * `verdict` field the model returns in its JSON reply.

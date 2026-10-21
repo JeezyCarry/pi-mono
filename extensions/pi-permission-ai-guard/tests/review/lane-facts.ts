@@ -125,4 +125,14 @@ export const LANE_CONTEXT_FACTS: Record<Exclude<keyof ReviewRequestContext, "ask
     chat: { rendered: true, name: "target", encode: "redact" },
     classifier: { rendered: true, name: "command", encode: "redact" },
   },
+  observedFacts: {
+    chat: { rendered: true, name: "observed facts", encode: "redact" },
+    classifier: { rendered: true, name: "observed_facts", encode: "redact" },
+  },
+  // Deterministic command facts: the verdict layer reads them, the model
+  // request never carries them — neither lane renders them.
+  commandFacts: {
+    chat: { rendered: false, reason: "verdict-layer only — never in the prompt" },
+    classifier: { rendered: false, reason: "verdict-layer only — never in the state" },
+  },
 };
