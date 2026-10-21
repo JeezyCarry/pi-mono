@@ -4,9 +4,10 @@
  *
  * This module owns the verdict-bearing side of the leniency ladder — the
  * hard/soft deny tiers, the soft-deny/model-defer/machinery application.
- * The ladder's operational facts (cut lines, cycle membership, emphasis,
- * config warnings) are single-sourced in {@link ../config/mode-table.ts} and
- * consumed here as data.
+ * The ladder's geometry lives in {@link ../config/suspicion.ts}; the
+ * effective policy (built-in row or resolved custom pair) arrives as a
+ * {@link ../config/mode-policy.ts!ModePolicy} — this module never indexes
+ * the table by a mode name.
  *
  * The doctrine stays local: hard-tier denies (only the deterministic screen's) are terminal in
  * every mode, and every model deny is soft; danger-leaned defers ask in default and deny
@@ -21,7 +22,8 @@
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 import type { Mode } from "#src/config/config-schema.ts";
-import { MODE_TABLE, type Suspicion, suspicionBand } from "#src/config/mode-table.ts";
+import type { ModePolicy } from "#src/config/mode-policy.ts";
+import { type Suspicion, suspicionBand } from "#src/config/suspicion.ts";
 import { isModelDefer } from "#src/model/machinery-kinds.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import type { ModelCallDeferKind, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
@@ -90,14 +92,14 @@ export const CLARIFICATION_SUPPRESSED_REASON = "clarification-suppressed";
 /**
  * Apply the configured mode to a model verdict.
  *
- * @param policy - The effective mode.
+ * @param policy - The effective mode policy (mode name plus its cut lines).
  * @param verdict - The model's (or cached) verdict.
  * @param modelDefer - Deferred-call context when the verdict is a fresh model defer.
  * @param authority - Who issued a deny verdict (default: the model).
  * @returns The verdict the link emits.
  */
 export function applyVerdictMode(
-  policy: Mode,
+  policy: ModePolicy,
   verdict: AuthorizerVerdict,
   modelDefer?: ModelDeferInfo,
   authority: DenyAuthority = "model",
@@ -105,12 +107,18 @@ export function applyVerdictMode(
   if (verdict.kind === "allow") {
     return verdict;
   }
+  // The deterministic screen's deny is terminal in every mode: it never
+  // enters the ladder, so no pair of cut lines — built-in or custom — can
+  // lift it (ADR 0006). Only the screen issues hard-tier denies.
+  if (authority === "screen") {
+    return verdict;
+  }
   // Machinery failures are their own axis (a failure to obtain a verdict),
   // never on the suspicion line — map through the mode's machinery lane,
   // which never allows: a broken reviewer must not rubber-stamp.
   if (verdict.kind === "defer" && !isModelDefer(modelDefer?.kind)) {
-    return MODE_TABLE[policy].onReviewFailure === "deny"
-      ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy) }
+    return policy.onReviewFailure === "deny"
+      ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy.mode) }
       : verdict;
   }
   // Everything else sits on the suspicion line: a deny by its tier (a
@@ -129,8 +137,7 @@ export function applyVerdictMode(
         : modelDefer?.lean === "deny"
           ? "defer-danger"
           : "defer-neutral";
-  const { cuts } = MODE_TABLE[policy];
-  const band = suspicionBand(cuts, suspicion);
+  const band = suspicionBand(policy.cuts, suspicion);
   if (band === "allow") {
     return { kind: "allow" };
   }
@@ -139,7 +146,7 @@ export function applyVerdictMode(
     // (the model's clarification request, or the generic uncertainty copy).
     return verdict.kind === "deny"
       ? verdict
-      : { kind: "deny", reason: modelDefer?.reason ?? uncertainDenyReason(policy) };
+      : { kind: "deny", reason: modelDefer?.reason ?? uncertainDenyReason(policy.mode) };
   }
   // The ask band: a defer passes through; a softened deny becomes a defer.
   return verdict.kind === "defer" ? verdict : { kind: "defer" };

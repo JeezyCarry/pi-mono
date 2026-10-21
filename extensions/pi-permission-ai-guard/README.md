@@ -107,7 +107,8 @@ Chain facts that shape how this link behaves:
 | `instructions`    | string\|object\|null                                                    | `null`                                    | Custom safety rules. String = broadcast append to both lanes. Object = per-lane slots (`chat.rules`, `classifier.background` + `classifier.questions`, ids: `ban`, `effect`, `target`, `intent`); `chat.replace: true` swaps the chat built-in rules instead of appending (the classifier lane is append-only). `null` = built-ins |
 | `classifier`      | object                                                                  | see below                                 | Classifier verdict thresholds — pure policy, no transport knobs                                                                                                                                                                                                                                                                    |
 | `fallbacks`       | array                                                                   | `[]`                                      | Ordered backup reviewers in either lane, each with `provider`, `model`, and optional `timeoutMs` and `temperature`                                                                                                                                                                                                                 |
-| `mode`            | `"strict"\|"default"\|"auto"`                                           | `"default"`                               | Leniency ladder for non-allow verdicts (see below)                                                                                                                                                                                                                                                                                 |
+| `mode`            | `"strict"\|"default"\|"auto"\|"custom"`                                 | `"default"`                               | Leniency ladder for non-allow verdicts (see below)                                                                                                                                                                                                                                                                                 |
+| `customMode`      | object\|null                                                            | `null`                                    | Your own ladder row, read only when `mode` is `"custom"` (see below)                                                                                                                                                                                                                                                               |
 | `notifyLevel`     | `"info"\|"warning"\|"error"\|"off"`                                     | `"info"`                                  | Ambient-notify threshold — the minimum review-loop notify level that still notifies; command feedback is never gated                                                                                                                                                                                                               |
 | `notifyApprovals` | boolean                                                                 | `false`                                   | Show a notice when AI Guard approves a request; requires `notifyLevel: "info"`                                                                                                                                                                                                                                                     |
 | `circuitBreaker`  | object                                                                  | `{consecutive:3,total:20,verdict:"deny"}` | Circuit breaker config (see below)                                                                                                                                                                                                                                                                                                 |
@@ -261,6 +262,23 @@ Each mode is two cut lines on that order — an auto-pass band, an ask band, a t
 
 The reading per mode: `strict` — the reviewer's allow is the only pass (full fail-closed automation); `default` — you judge every flag except the screen's hard blocks (the resting mode and the onboarding posture — watch the reviewer work, then loosen); `auto` — no prompt is ever raised: only benign and neutral doubts pass; a deny-leaning doubt or a deny is blocked, because auto has no ask path (a danger confirmation never auto-flows into an allow). `auto` is not the yolo mode of Codex (`--yolo`), Claude Code (`bypassPermissions`), or Gemini CLI (`yolo`): those neither ask nor block, while `auto` still blocks every deny and every danger-leaned doubt. `lean` routes a defer between the middle rungs (in `auto` it decides between allow and deny); it never appears in dialogs or notify lines (the ask is the human's judgment moment) — it lives in the `ai_guard.decision` audit record.
 
+`custom` runs your own two cut lines instead of a built-in row:
+
+```json
+{
+  "mode": "custom",
+  "customMode": {
+    "allowThrough": "defer-benign",
+    "denyFrom": "hard-deny",
+    "onReviewFailure": "defer"
+  }
+}
+```
+
+The example above passes only benign-leaned doubts, asks on everything up to a hard deny, and defers reviewer failures to you — the closest expressible neighbour of the retired `lenient` rung. The vocabulary is the suspicion order's rung names (`allow`, `defer-benign`, `defer-neutral`, `defer-danger`, `soft-deny`, `hard-deny`); `onReviewFailure` is `deny` or `defer`, never `allow` — a broken reviewer must not rubber-stamp, whatever the cuts say. A mode is two boundaries, so a custom row is contiguous by construction: there are no per-rung cells to set incoherently, and an accept line at or above the reject line is legal (the mode simply never asks — allow wins the overlap). A pair that redraws a built-in rung exactly is reported as redundant, with the rung to use instead.
+
+`custom` is only selectable while `customMode` configures it: the picker and the casual cycle hide it otherwise, and `mode: "custom"` with no block runs `default` and reports a config issue saying so (repair, not refusal — a mode choice never takes the guard offline). The `ctrl+alt+g` cycle visits a configured `custom` last, and the footer renders it in warning red exactly when it never asks — the same derivation as the built-in ask-free rung, so an allow-everything custom cannot hide. An unconfigured `custom` left in the session file restores as nothing.
+
 The classifier lane reaches the same five verdicts through its decision table, so the mode matrix above applies unchanged. What the table emits depends on the readings ([Policy](docs/policy.md) lists the rows):
 
 | Reading                                                    | Verdict               |
@@ -279,7 +297,7 @@ A model deny never binds: it is soft whatever its `riskLevel`, so `default` asks
 
 Rules that hold in every mode:
 
-- Reviewer machinery failures (model unresolved, auth failed, transcript errors, timeouts, unparseable or empty replies, no review target) **never map to allow**; they deny under `strict` and `auto`, and defer under `default`. A machinery deny stays silent (the deny reason reaches the agent); a machinery-forced defer notifies its classified cause (`reviewer could not complete the review (empty-reply), deferring to you`), on every occurrence.
+- Reviewer machinery failures (model unresolved, auth failed, transcript errors, timeouts, unparseable or empty replies, no review target) **never map to allow**; they deny under `strict` and `auto`, defer under `default`, and follow the custom row's `onReviewFailure` under `custom`. A machinery deny stays silent (the deny reason reaches the agent); a machinery-forced defer notifies its classified cause (`reviewer could not complete the review (empty-reply), deferring to you`), on every occurrence.
 - A model deny that holds or escalates notifies in every mode (`reviewer denied this request (risk high); <reason>`), because the host renders no dialog for denials; the notify line is the operator's only copy. A mode-softened deny adds `, asking you to decide instead`. `auto` passes benign-leaned defers silently and neutral ones with a one-time fail-open notice (`this mode allows the request without asking; a danger-leaned doubt and every deny still block`), fired the first time it passes a doubt the reviewer did not resolve to allow. Reasons go out whole; the audit record keeps the full text.
 - The lean never caches: defers are never stored, so an identical benign defer re-reviews every time.
 - A link's `deny` is final — it short-circuits the chain and never reaches a prompt. A `defer` falls through to the interactive permission prompt (the denying terminal in headless sessions — headless mode collapses every defer to deny).
@@ -300,7 +318,7 @@ Effective config layers, in precedence order: **session overrides** (the control
 - `/ai-guard breaker reset` — clear both trip tiers. Pure counter reset: cache and overrides untouched; reviews resume immediately.
 - `/ai-guard report` — suggest permission-rule fragments for repeatedly-reviewed asks (same ask 3+ times, one context, no denies) — copy-paste evidence, never an applied rule.
 - `/ai-guard denied` — browse this session's model denies; pick one to see its full reason.
-- `ctrl+alt+g` — cycle `default → auto → default`. Only `strict` stays out of casual reach.
+- `ctrl+alt+g` — cycle `default → auto → default` (`custom` joins last while configured). Only `strict` stays out of casual reach.
 
 The footer shows deviations from the baseline only (`off · auto (session)`) and renders `auto` in warning red, so a silenced pane stays visible. Overrides persist per session in pi's session file (never model context): resume restores them, `/tree` navigation re-derives from the active branch, and a fresh session starts from the config default.
 

@@ -556,6 +556,7 @@ describe("createAiGuardExtension lifecycle", () => {
         mode: "default" as const,
         notifyLevel: "info" as const,
         notifyApprovals: false,
+        customMode: null,
       },
       issues: [],
       outcome: "loaded" as const,

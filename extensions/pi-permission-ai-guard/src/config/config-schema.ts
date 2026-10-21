@@ -3,6 +3,8 @@ import { z } from "zod";
 
 import { isObjectRecord } from "#src/utils.ts";
 
+import { SUSPICION_ORDER } from "./suspicion.ts";
+
 export const EXTENSION_ID = "pi-permission-ai-guard";
 export const LINK_NAME = "ai-guard";
 
@@ -15,7 +17,18 @@ export const LINK_NAME = "ai-guard";
  * `default` and `auto`; only `strict` is set explicitly (`/ai-guard mode
  * strict`).
  */
-export const MODE_VALUES = ["strict", "default", "auto"] as const;
+export const BUILTIN_MODE_VALUES = ["strict", "default", "auto"] as const;
+
+/** A built-in mode: a row of the ladder table (`MODE_TABLE`). */
+export type BuiltinMode = (typeof BUILTIN_MODE_VALUES)[number];
+
+/**
+ * How the link disposes the reviewer's non-allow verdicts — a built-in
+ * ladder rung, or `custom` for the operator-defined cuts in `customMode`.
+ * `custom` is only selectable while `customMode` configures legal cuts;
+ * the resolver (`mode-policy.ts`) enforces that after parsing.
+ */
+export const MODE_VALUES = [...BUILTIN_MODE_VALUES, "custom"] as const;
 
 /** How the link disposes model deny/defer verdicts (see the `mode` field comment). */
 export type Mode = (typeof MODE_VALUES)[number];
@@ -200,6 +213,19 @@ const circuitBreakerSchema = z.object({
   verdict: z.enum(BREAKER_VERDICT_VALUES).default("deny"),
 });
 
+/**
+ * The operator-defined ladder row: two cut lines on `SUSPICION_ORDER` plus the
+ * reviewer-failure lane. There are no per-rung cells, so a custom row is
+ * contiguous by construction — the same shape the built-in rows have. A pair
+ * whose accept line touches or passes its reject line is legal (it has no ask
+ * band); the resolver decides whether the result is worth a warning.
+ */
+const customModeSchema = z.object({
+  allowThrough: z.enum(SUSPICION_ORDER),
+  denyFrom: z.enum(SUSPICION_ORDER),
+  onReviewFailure: z.enum(["deny", "defer"]),
+});
+
 const cacheSchema = z.object({
   maxEntries: z.number().int().min(0).max(1000).default(128),
 });
@@ -212,6 +238,7 @@ export const NESTED_CONFIG_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new 
   ["transcript", new Set(Object.keys(transcriptSchema.shape))],
   ["circuitBreaker", new Set(Object.keys(circuitBreakerSchema.shape))],
   ["cache", new Set(Object.keys(cacheSchema.shape))],
+  ["customMode", new Set(Object.keys(customModeSchema.shape))],
 ]);
 
 const configBaseSchema = z.object({
@@ -261,11 +288,18 @@ const configBaseSchema = z.object({
   classifier: classifierThresholdsSchema.default(CLASSIFIER_THRESHOLD_DEFAULTS),
 
   // How the link disposes the reviewer's non-allow verdicts (the leniency
-  // ladder, strictest first): two cut lines on `SUSPICION_ORDER`, per-mode
-  // blurbs in `MODE_BLURBS`, reviewer-failure targets in each mode's
-  // `onReviewFailure`. The per-mode rows live in `README.md`'s mode table,
-  // the one operator-facing authority — this comment only points at it.
+  // ladder, strictest first): `"custom"` runs the `customMode` row instead
+  // of a built-in one (see that field). Two cut lines on `SUSPICION_ORDER`,
+  // per-mode blurbs in `MODE_BLURBS`, reviewer-failure targets in each
+  // mode's `onReviewFailure`. The per-mode rows live in `README.md`'s mode
+  // table, the one operator-facing authority — this comment only points
+  // at it.
   mode: z.enum(MODE_VALUES).default("default"),
+
+  // The custom row's cut lines, read only when `mode` is "custom"; null
+  // means "not configured". The resolver validates the pair after parsing and
+  // falls back to `default` when `mode: "custom"` has nothing to resolve.
+  customMode: customModeSchema.nullable().default(null),
 
   // Ambient (review-loop) notification threshold. Levels mirror the TUI's
   // notify levels plus `off`; the total-tier breaker trip uses `error`.
@@ -373,11 +407,14 @@ export const configSchema = registryShapeSchema.superRefine(
  * @param config - The validated config.
  * @returns The lane names the pool will run, primary first.
  */
-function configuredLanes(config: {
-  provider: unknown;
-  modelType?: unknown;
-  fallbacks?: readonly { provider: unknown; modelType?: unknown }[];
-}): Array<"chat" | "classifier"> {
+/** The fields the lane composition reads: the primary entry plus each fallback entry. */
+interface ReviewerPoolShape {
+  readonly provider: unknown;
+  readonly modelType?: unknown;
+  readonly fallbacks?: readonly { readonly provider: unknown; readonly modelType?: unknown }[];
+}
+
+function configuredLanes(config: ReviewerPoolShape): Array<"chat" | "classifier"> {
   const lanes: Array<"chat" | "classifier"> = [isClassifierMode(config) ? "classifier" : "chat"];
   for (const entry of config.fallbacks ?? []) {
     const lane = isClassifierMode(entry) ? "classifier" : "chat";

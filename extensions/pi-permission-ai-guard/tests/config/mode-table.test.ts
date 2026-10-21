@@ -8,22 +8,21 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MODE_VALUES } from "#src/config/config-schema.ts";
+import { BUILTIN_MODE_VALUES } from "#src/config/config-schema.ts";
 import {
   CYCLE_DESCRIPTION,
   CYCLE_MODE_VALUES,
-  EMPHASIZED_MODE,
   MODE_TABLE,
   modeWarnings,
 } from "#src/config/mode-table.ts";
 
 describe("MODE_TABLE", () => {
   it("covers every mode value exactly once, in ladder order", () => {
-    expect(Object.keys(MODE_TABLE)).toEqual([...MODE_VALUES]);
+    expect(Object.keys(MODE_TABLE)).toEqual([...BUILTIN_MODE_VALUES]);
   });
 
   it("never maps machinery failures to allow in any mode", () => {
-    for (const mode of MODE_VALUES) {
+    for (const mode of BUILTIN_MODE_VALUES) {
       expect(MODE_TABLE[mode].onReviewFailure).not.toBe("allow");
     }
   });
@@ -46,6 +45,7 @@ describe("derived cycle facts", () => {
 });
 
 describe("modeWarnings", () => {
+  const breakerDefer = { consecutive: 3, total: 20, verdict: "defer" as const };
   const base = {
     provider: "p",
     model: "m",
@@ -63,6 +63,7 @@ describe("modeWarnings", () => {
     cache: { maxEntries: 128 },
     notifyLevel: "info" as const,
     notifyApprovals: false,
+    customMode: null,
   };
 
   it("warns on the two extremes combined with a breaker forced to defer", () => {
@@ -70,9 +71,9 @@ describe("modeWarnings", () => {
       const config = {
         ...base,
         mode,
-        circuitBreaker: { consecutive: 3, total: 20, verdict: "defer" as const },
+        circuitBreaker: breakerDefer,
       };
-      const warnings = modeWarnings(config);
+      const warnings = modeWarnings(config, MODE_TABLE[config.mode].cuts);
       expect(warnings).toHaveLength(1);
       expect(warnings[0]!.path).toBe("mode");
       expect(warnings[0]!.message).toContain(`mode "${mode}"`);
@@ -81,36 +82,23 @@ describe("modeWarnings", () => {
   });
 
   it("stays silent otherwise", () => {
-    for (const mode of MODE_VALUES) {
+    for (const mode of BUILTIN_MODE_VALUES) {
       const config = {
         ...base,
         mode,
         circuitBreaker: { consecutive: 3, total: 20, verdict: "deny" as const },
       };
-      expect(modeWarnings(config)).toEqual([]);
+      expect(modeWarnings(config, MODE_TABLE[config.mode].cuts)).toEqual([]);
     }
     expect(
-      modeWarnings({
-        ...base,
-        mode: "default",
-        circuitBreaker: { consecutive: 3, total: 20, verdict: "defer" as const },
-      }),
+      modeWarnings(
+        {
+          ...base,
+          mode: "default",
+          circuitBreaker: breakerDefer,
+        },
+        MODE_TABLE.default.cuts,
+      ),
     ).toEqual([]);
-  });
-
-  it("the red value is derived: the one cycled mode with no ask band", () => {
-    expect(EMPHASIZED_MODE).toBe("auto");
-    expect(CYCLE_MODE_VALUES).toContain(EMPHASIZED_MODE);
-    // The defining property, observed through the ladder's own warning:
-    // an ask-free mode paired with a deferring breaker warns, a mode with
-    // an ask band stays silent — so the red value is the cycled mode that
-    // never asks, whichever literal it happens to be.
-    const breakerDefer = { consecutive: 3, total: 20, verdict: "defer" as const };
-    const warned = (mode: (typeof MODE_VALUES)[number]): boolean =>
-      modeWarnings({ ...base, mode, circuitBreaker: breakerDefer }).length > 0;
-    expect(warned(EMPHASIZED_MODE!)).toBe(true);
-    expect(CYCLE_MODE_VALUES.filter((m) => m !== EMPHASIZED_MODE).map(warned)).toEqual(
-      CYCLE_MODE_VALUES.filter((m) => m !== EMPHASIZED_MODE).map(() => false),
-    );
   });
 });

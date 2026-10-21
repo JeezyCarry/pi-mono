@@ -26,6 +26,7 @@ import {
   SHORT_CIRCUIT_EVENT,
 } from "#src/audit/events.ts";
 import type { AiGuardConfig } from "#src/config/config-schema.ts";
+import { resolveModePolicy } from "#src/config/mode-policy.ts";
 import { effectiveOverride, type SessionOverrides } from "#src/config/session-overrides.ts";
 import { PRE_CALL_MACHINERY_KINDS } from "#src/model/machinery-kinds.ts";
 import type { RiskLevel } from "#src/model/model-verdict.ts";
@@ -144,6 +145,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // effectiveOverride in session-overrides). Read per-call: the override
     // object is mutable session state.
     const mode = effectiveOverride(deps.overrides, config, "mode");
+    const { policy } = resolveModePolicy({ mode, customMode: config.customMode });
 
     // surface-unmatched is expected config behavior (silent defer; outside
     // this link's jurisdiction). no-target is an unexpected ask — the
@@ -158,7 +160,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         // The review failed to open — a machinery-lane gate (a permanent
         // property of the ask's shape, not a transient reviewer failure).
         const released = disposition.releaseMachineryGate({
-          mode,
+          policy,
           kind: PRE_CALL_MACHINERY_KINDS.noTarget,
           record: DecisionRecord.noTarget(details.requestId, opened.surface),
           breaker: deps.circuitBreaker,
@@ -243,10 +245,10 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     if (screen?.kind === "deny") {
       const verdict = { kind: "deny" as const, reason: screen.reason };
       const released = disposition.releaseVerdictGate({
-        mode,
+        policy,
         record: DecisionRecord.screenDecided(base, screen),
         original: verdict,
-        emitted: applyVerdictMode(mode, verdict, undefined, "screen"),
+        emitted: applyVerdictMode(policy, verdict, undefined, "screen"),
         riskLevel: "critical",
         defer: undefined,
         cost: { kind: "fresh", latencyMs: 0 },
@@ -327,7 +329,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
         }),
       );
       const released = disposition.releaseMachineryGate({
-        mode,
+        policy,
         kind: PRE_CALL_MACHINERY_KINDS.transcriptError,
         record: DecisionRecord.transcriptError(base),
         breaker: deps.circuitBreaker,
@@ -360,9 +362,9 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       // classification exists to make it machinery). The cached riskLevel
       // rides along so a cached deny maps identically to its fresh first
       // pass.
-      const emitted = applyVerdictMode(mode, lookup.verdict);
+      const emitted = applyVerdictMode(policy, lookup.verdict);
       const released = disposition.releaseVerdictGate({
-        mode,
+        policy,
         record: DecisionRecord.cacheHit(base, lookup.verdict),
         original: lookup.verdict,
         emitted,
@@ -407,7 +409,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
             normalizeAndRedactText(engineResult.detail ?? ""),
           );
       const released = disposition.releaseMachineryGate({
-        mode,
+        policy,
         kind: isModelUnresolved
           ? PRE_CALL_MACHINERY_KINDS.modelUnresolved
           : PRE_CALL_MACHINERY_KINDS.authFailed,
@@ -451,9 +453,9 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // counts real model denials and the cache still stores the model's
     // deny, so a cached deny maps identically on a later hit. Defer isn't
     // cached (cache hits and breaker trips short-circuited above).
-    const emitted = applyVerdictMode(mode, reviewOutcome.verdict, deferInfo);
+    const emitted = applyVerdictMode(policy, reviewOutcome.verdict, deferInfo);
     const released = disposition.releaseVerdictGate({
-      mode,
+      policy,
       record: DecisionRecord.model({
         base,
         modelId,

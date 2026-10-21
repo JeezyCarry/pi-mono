@@ -1,8 +1,10 @@
 /**
  * The mode ladder — the single source of truth for every OPERATIONAL fact
- * about a mode value: the suspicion cut lines (imported by verdict-rule), the
- * casual-cycle membership, the warning-red emphasis, and the
- * config-surprise warnings (imported by config-layer).
+ * about a BUILT-IN mode value: the suspicion cut lines, the casual-cycle
+ * membership, and the config-surprise warnings (imported by config-layer).
+ * The geometry those rows are drawn on lives in `suspicion.ts`; a `custom`
+ * mode has no row here (its cuts come from the config, resolved by
+ * `mode-policy.ts`).
  *
  * Deliberate exceptions live OUTSIDE the table: the Mode union itself
  * (config-schema — it is the config contract), and the curated human prose
@@ -13,66 +15,8 @@
 
 import type { VerdictOrigin } from "#src/model/model-verdict.ts";
 
-import { MODE_VALUES, type AiGuardConfig, type Mode } from "./config-schema.ts";
-
-/**
- * The reviewer-suspicion order — the total order the ladder is drawn on,
- * strictest last (ADR 0002). A `defer`'s rank is set by its lean (benign /
- * none / danger); a `deny`'s by its tier. Machinery failures are NOT on
- * this line: they are a separate axis (a failure to obtain a verdict, not a
- * suspicion), carried by each mode's `onReviewFailure` lane. A danger-leaned
- * defer sits above a soft deny: the `auto` mode rejects at that rung, so a
- * danger confirmation never auto-flows into an allow there.
- */
-export const SUSPICION_ORDER = [
-  "allow",
-  "defer-benign",
-  "defer-neutral",
-  "defer-danger",
-  "soft-deny",
-  "hard-deny",
-] as const;
-
-export type Suspicion = (typeof SUSPICION_ORDER)[number];
-
-/**
- * A suspicion rung's rank (higher = more suspicious).
- *
- * @param suspicion - A rung of the suspicion order.
- * @returns Its index in {@link SUSPICION_ORDER}.
- */
-export function suspicionRank(suspicion: Suspicion): number {
-  return SUSPICION_ORDER.indexOf(suspicion);
-}
-
-/**
- * Which band a mode's cuts put a rung in — the ladder's one geometry, used
- * by the verdict mapping and by the ask-band derivation below, so the
- * mapping and its own invariants cannot disagree.
- *
- * @param cuts - The mode's two cut lines.
- * @param suspicion - The rung to place.
- * @returns `allow` at or below the accept line, `deny` at or above the
- *   reject line, `ask` between them (allow wins when the lines cross).
- */
-export function suspicionBand(cuts: ModeCuts, suspicion: Suspicion): "allow" | "ask" | "deny" {
-  const rank = suspicionRank(suspicion);
-  if (rank <= suspicionRank(cuts.allowThrough)) return "allow";
-  return rank >= suspicionRank(cuts.denyFrom) ? "deny" : "ask";
-}
-
-/**
- * A mode's two cut lines on the suspicion order: at or below the accept
- * line the mode auto-allows; at or above the reject line it auto-denies;
- * between them it asks (defers). The cut-line shape makes each mode's
- * allow / ask / deny bands contiguous (pinned by the contiguity test).
- */
-export interface ModeCuts {
-  /** At or below this rung the mode auto-allows (inclusive). */
-  allowThrough: Suspicion;
-  /** At or above this rung the mode auto-denies (inclusive). */
-  denyFrom: Suspicion;
-}
+import { BUILTIN_MODE_VALUES, type AiGuardConfig, type BuiltinMode } from "./config-schema.ts";
+import { type ModeCuts, hasNoAskBand } from "./suspicion.ts";
 
 /** Per-mode operational facts for the settings/UX surfaces. */
 export interface ModeFacts {
@@ -121,7 +65,7 @@ export interface ModeEntry {
  * each row is two cut lines on {@link SUSPICION_ORDER}, and the contiguity
  * test pins it.
  */
-export const MODE_TABLE: Record<Mode, ModeEntry> = {
+export const MODE_TABLE: Record<BuiltinMode, ModeEntry> = {
   strict: {
     cuts: { allowThrough: "allow", denyFrom: "defer-benign" },
     onReviewFailure: "deny",
@@ -155,22 +99,19 @@ export const MODE_TABLE: Record<Mode, ModeEntry> = {
  * The casual ctrl+alt+g cycle, derived from the table's inCycle flags in
  * ladder order (default → auto; the red footer makes the auto stop visible
  * — only strict, the full fail-closed automation rung, stays out of casual
- * reach).
+ * reach). A configured `custom` mode joins last via `cycleValues`
+ * (mode-policy.ts), never here: the table owns built-in rows only.
  */
-export const CYCLE_MODE_VALUES: readonly Mode[] = MODE_VALUES.filter(
+export const CYCLE_MODE_VALUES: readonly BuiltinMode[] = BUILTIN_MODE_VALUES.filter(
   (m) => MODE_TABLE[m].facts.inCycle,
 );
 
 /**
- * The single emphasized value (renders in warning red), or undefined.
- *
- * Derived, not hand-set: a mode the casual cycle reaches that never asks is
- * the one an operator can land in without ever seeing a dialog, so the red
- * footer is the guardrail that keeps it visible. Today that is `auto`.
+ * The `custom` row's blurb. It has no table row (its cuts come from the
+ * config), so its one line lives here, next to the rows it is described
+ * alongside in the picker.
  */
-export const EMPHASIZED_MODE: Mode | undefined = MODE_VALUES.find(
-  (m) => MODE_TABLE[m].facts.inCycle && hasNoAskBand(MODE_TABLE[m].cuts),
-);
+const CUSTOM_MODE_BLURB = "your own two cut lines, set in customMode";
 
 /**
  * Each mode's one-line blurb, keyed by the mode name — the picker's
@@ -178,11 +119,16 @@ export const EMPHASIZED_MODE: Mode | undefined = MODE_VALUES.find(
  * pass"). Derived from the table like the cycle subset, so the picker
  * labels cannot drift from the modes they describe.
  */
-export const MODE_BLURBS: Readonly<Record<string, string>> = Object.fromEntries(
-  MODE_VALUES.map((m) => [m, MODE_TABLE[m].facts.blurb]),
-);
+export const MODE_BLURBS: Readonly<Record<string, string>> = {
+  ...Object.fromEntries(BUILTIN_MODE_VALUES.map((m) => [m, MODE_TABLE[m].facts.blurb])),
+  custom: CUSTOM_MODE_BLURB,
+};
 
-/** The generated shortcut description's cycle part ("default → auto"). */
+/**
+ * The generated shortcut description's cycle part ("default → auto") — the
+ * built-in stops. The live rotation may append a configured `custom` last;
+ * the description names the suffix ("+ custom when configured") for that.
+ */
 export const CYCLE_DESCRIPTION = CYCLE_MODE_VALUES.join(" → ");
 
 /**
@@ -199,32 +145,20 @@ export interface ModeWarning {
 }
 
 /**
- * Whether a mode's cuts leave no ask band at all: the accept line touches
- * or passes the reject line, so no rung lands between them. `strict` and
- * `auto` are such modes by construction, and a hand-configured one can be
- * too.
- *
- * @param cuts - The mode's two cut lines.
- * @returns True when every rung maps to allow or deny, never to ask.
- */
-function hasNoAskBand(cuts: ModeCuts): boolean {
-  return SUSPICION_ORDER.every((s) => suspicionBand(cuts, s) !== "ask");
-}
-
-/**
  * The config surprise warnings: an ask-free mode paired with a breaker
  * verdict of `defer`, where the breaker can interrupt the human (the
  * reviewer-untrusted escape valve) — legal but worth surfacing. Owned by the
  * ladder module: the generic JSONC layer should not carry ladder semantics.
  *
- * @param config - The validated config.
- * @param cuts - The effective mode's cut lines, defaulting to the built-in
- *   table's row (the loader passes nothing; a custom mode passes its own).
+ * @param config - The validated config (only `mode` and `circuitBreaker` are read).
+ * @param cuts - The effective mode's cut lines: the built-in row's, or the
+ *   resolved custom pair's. Always explicit — the ladder never guesses
+ *   which cuts a mode name means.
  * @returns Warning issues, if any (path is always "mode").
  */
 export function modeWarnings(
-  config: AiGuardConfig,
-  cuts: ModeCuts = MODE_TABLE[config.mode].cuts,
+  config: Pick<AiGuardConfig, "mode" | "circuitBreaker">,
+  cuts: ModeCuts,
 ): ModeWarning[] {
   if (hasNoAskBand(cuts) && config.circuitBreaker.verdict === "defer") {
     return [

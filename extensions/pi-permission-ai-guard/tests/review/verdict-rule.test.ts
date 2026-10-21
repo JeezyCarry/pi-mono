@@ -12,8 +12,10 @@
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 import { describe, expect, it } from "vitest";
 
-import { MODE_VALUES, type Mode } from "#src/config/config-schema.ts";
-import { MODE_TABLE, suspicionRank } from "#src/config/mode-table.ts";
+import { BUILTIN_MODE_VALUES, MODE_VALUES, type Mode } from "#src/config/config-schema.ts";
+import { resolveModePolicy, type ModePolicy } from "#src/config/mode-policy.ts";
+import { MODE_TABLE } from "#src/config/mode-table.ts";
+import { suspicionRank } from "#src/config/suspicion.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import {
   escalationMessage,
@@ -48,13 +50,23 @@ const MODEL_DEFER_WITH_REASON: ModelDeferInfo = {
 /** A deny that must carry a teaching reason — content unpinned, presence pinned. */
 const DENY_WITH_REASON = { kind: "deny", reason: expect.any(String) } as const;
 
+/**
+ * The built-in row's policy: custom is never constructed here.
+ *
+ * @param mode - A built-in mode value.
+ * @returns The policy drawn from the ladder table.
+ */
+function pol(mode: Mode): ModePolicy {
+  return resolveModePolicy({ mode, customMode: null }).policy;
+}
+
 describe("applyVerdictMode — mapping table", () => {
   it.each<Row>([
     // Allow is never transformed, in any mode.
-    ...MODE_VALUES.map((m) => [m, ALLOW, undefined, undefined, ALLOW] as Row),
+    ...BUILTIN_MODE_VALUES.map((m) => [m, ALLOW, undefined, undefined, ALLOW] as Row),
 
     // A screen deny is terminal in every mode.
-    ...MODE_VALUES.map((m) => [m, DENY, undefined, "screen", DENY] as Row),
+    ...BUILTIN_MODE_VALUES.map((m) => [m, DENY, undefined, "screen", DENY] as Row),
 
     // Model denies are soft and map down the ladder — default asks (the resting
     // mode forwards every flag to the human), and auto DENIES: it has no ask
@@ -108,7 +120,7 @@ describe("applyVerdictMode — mapping table", () => {
         },
       ] as const
     ).flatMap(({ lean, expected }) =>
-      MODE_VALUES.map(
+      BUILTIN_MODE_VALUES.map(
         (m) =>
           [m, MODEL_DEFER, { ...MODEL_DEFER_WITH_REASON, lean }, undefined, expected[m]] as Row,
       ),
@@ -143,7 +155,7 @@ describe("applyVerdictMode — mapping table", () => {
   ])(
     "%s × %j (deferKind %j, authority %j) → %j",
     (policy, verdict, modelDefer, authority, expected) => {
-      expect(applyVerdictMode(policy, verdict, modelDefer, authority)).toEqual(expected);
+      expect(applyVerdictMode(pol(policy), verdict, modelDefer, authority)).toEqual(expected);
     },
   );
 });
@@ -158,15 +170,27 @@ describe("denyTier", () => {
 describe("model deny authority invariant", () => {
   it("never hard-denies a model deny in default, whatever its text", () => {
     for (const mode of ["default"] as const) {
-      expect(applyVerdictMode(mode, DENY, undefined, "model")).toEqual({ kind: "defer" });
-      expect(applyVerdictMode(mode, DENY)).toEqual({ kind: "defer" });
+      expect(applyVerdictMode(pol(mode), DENY, undefined, "model")).toEqual({ kind: "defer" });
+      expect(applyVerdictMode(pol(mode), DENY)).toEqual({ kind: "defer" });
     }
   });
 
   it("keeps the screen's deny a deny in every mode", () => {
-    for (const mode of MODE_VALUES) {
-      expect(applyVerdictMode(mode, DENY, undefined, "screen").kind).toBe("deny");
+    for (const mode of BUILTIN_MODE_VALUES) {
+      expect(applyVerdictMode(pol(mode), DENY, undefined, "screen").kind).toBe("deny");
     }
+  });
+
+  it("keeps the screen's deny a deny under a custom that allows everything else", () => {
+    // The ladder never sees a screen deny: even allowThrough hard-deny
+    // cannot lift it (ADR 0006 — a screen deny is hard in every mode).
+    const { policy } = resolveModePolicy({
+      mode: "custom",
+      customMode: { allowThrough: "hard-deny", denyFrom: "hard-deny", onReviewFailure: "deny" },
+    });
+    expect(applyVerdictMode(policy, DENY, undefined, "screen")).toEqual(DENY);
+    // The boundary it does move: a model deny at the same rung allows.
+    expect(applyVerdictMode(policy, DENY, undefined, "model")).toEqual({ kind: "allow" });
   });
 });
 
@@ -177,8 +201,8 @@ it("routes a confirm-defer by the mode's defer-danger band", () => {
   // danger rows; the auto deny is the mode's ladder, never the classifier's
   // judgment.
   const confirm: ModelDeferInfo = { kind: "model-defer", lean: "deny" };
-  const exits = MODE_VALUES.map(
-    (mode) => [mode, applyVerdictMode(mode, { kind: "defer" }, confirm).kind] as const,
+  const exits = BUILTIN_MODE_VALUES.map(
+    (mode) => [mode, applyVerdictMode(pol(mode), { kind: "defer" }, confirm).kind] as const,
   );
   expect(Object.fromEntries(exits)).toEqual({
     strict: "deny",
@@ -216,11 +240,11 @@ describe("the ladder's structural invariant — contiguous bands in suspicion or
   function bandSequence(mode: Mode): number[] {
     return SUSPICION_ORDER_INPUTS.map(
       ([verdict, modelDefer, authority]) =>
-        rank[applyVerdictMode(mode, verdict, modelDefer, authority).kind],
+        rank[applyVerdictMode(pol(mode), verdict, modelDefer, authority).kind],
     );
   }
 
-  it.each(MODE_VALUES)("%s's outputs are three contiguous bands", (mode) => {
+  it.each(BUILTIN_MODE_VALUES)("%s's outputs are three contiguous bands", (mode) => {
     const seq = bandSequence(mode);
     // Contiguity = the distinct bands, in first-appearance order, are
     // monotonically increasing — a band never REAPPEARS after a stricter
@@ -241,7 +265,7 @@ describe("the ladder's structural invariant — contiguous bands in suspicion or
     // A tie or inversion silently merges a band to the allow side (allow
     // wins ties in applyVerdictMode), failing open. The contiguity test
     // cannot see it — a merged band is still contiguous.
-    for (const mode of MODE_VALUES) {
+    for (const mode of BUILTIN_MODE_VALUES) {
       const { allowThrough, denyFrom } = MODE_TABLE[mode].cuts;
       expect(
         suspicionRank(allowThrough),
@@ -257,8 +281,8 @@ describe("the ladder's structural invariant — contiguous bands in suspicion or
     // Only decisive verdicts (allow, hard deny) may bypass every ask.
     const unresolved = SUSPICION_ORDER_INPUTS.slice(1, 5);
     for (const [verdict, modelDefer, authority] of unresolved) {
-      const asks = MODE_VALUES.some(
-        (m) => applyVerdictMode(m, verdict, modelDefer, authority).kind === "defer",
+      const asks = BUILTIN_MODE_VALUES.some(
+        (m) => applyVerdictMode(pol(m), verdict, modelDefer, authority).kind === "defer",
       );
       expect(asks, `${JSON.stringify(verdict)} lean=${modelDefer?.lean ?? "none"}`).toBe(true);
     }
@@ -408,6 +432,30 @@ describe("resolveMapping — the mapping consequence rule", () => {
     });
     expect(again.markNoticeShown).toBe(false);
     expect(again.notice).toBeNull();
+  });
+
+  it("an allow-everything custom fires the same fail-open notice as the built-in rung", () => {
+    // The notice condition reads the mapping (emitted allow the reviewer
+    // did not grant), never the mode name — a custom that never asks
+    // cannot slip past it.
+    const { policy } = resolveModePolicy({
+      mode: "custom",
+      customMode: { allowThrough: "hard-deny", denyFrom: "hard-deny", onReviewFailure: "deny" },
+    });
+    const emitted = applyVerdictMode(policy, DEFER_V, { kind: "model-defer" }, "model");
+    expect(emitted).toEqual(ALLOW_V);
+    const mapped = resolveMapping({
+      original: DEFER_V,
+      emitted,
+      riskLevel: undefined,
+      deferKind: undefined,
+      deferReason: undefined,
+      deferLean: undefined,
+      mode: "custom",
+      noticeShown: false,
+    });
+    expect(mapped.markNoticeShown).toBe(true);
+    expect(mapped.notice!.message).toBe(failOpenNotice());
   });
 
   it("a deny→allow mapping keeps the swallowed reason and fires the fail-open copy", () => {

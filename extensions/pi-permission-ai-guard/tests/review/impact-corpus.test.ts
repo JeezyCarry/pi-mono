@@ -10,27 +10,30 @@ import {
   type ImpactClass,
 } from "#scripts/review-corpus-impact.ts";
 import { AB_GROUPS } from "#scripts/review-corpus.ts";
-import type { Mode } from "#src/config/config-schema.ts";
+import type { BuiltinMode } from "#src/config/config-schema.ts";
+import { resolveModePolicy } from "#src/config/mode-policy.ts";
 import { screenCommand } from "#src/review/screen/screen.ts";
 import { applyVerdictMode } from "#src/review/verdict-rule.ts";
 
-const MODES: Mode[] = ["strict", "default", "auto"];
+const MODES: BuiltinMode[] = ["strict", "default", "auto"];
 const existing = AB_GROUPS.flatMap((g) => g.cases);
 const impact = IMPACT_GROUPS.flatMap((g) => g.cases);
 const all = [...existing, ...impact];
 
-const runClass = (cls: ImpactClass, mode: Mode): string => {
+const runClass = (cls: ImpactClass, mode: BuiltinMode): string => {
+  const { policy } = resolveModePolicy({ mode, customMode: null });
   switch (cls) {
     case "harmless":
-      return applyVerdictMode(mode, { kind: "allow" }).kind;
+      return applyVerdictMode(policy, { kind: "allow" }).kind;
     case "likely_fine":
-      return applyVerdictMode(mode, { kind: "defer" }, { kind: "model-defer", lean: "allow" }).kind;
+      return applyVerdictMode(policy, { kind: "defer" }, { kind: "model-defer", lean: "allow" })
+        .kind;
     case "unclear":
-      return applyVerdictMode(mode, { kind: "defer" }, { kind: "model-defer" }).kind;
+      return applyVerdictMode(policy, { kind: "defer" }, { kind: "model-defer" }).kind;
     case "needs_human":
-      return applyVerdictMode(mode, { kind: "deny", reason: "r" }).kind;
+      return applyVerdictMode(policy, { kind: "deny", reason: "r" }).kind;
     case "screen_only":
-      return applyVerdictMode(mode, { kind: "deny", reason: "r" }, undefined, "screen").kind;
+      return applyVerdictMode(policy, { kind: "deny", reason: "r" }, undefined, "screen").kind;
   }
 };
 

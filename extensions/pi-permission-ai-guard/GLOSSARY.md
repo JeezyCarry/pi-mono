@@ -41,7 +41,10 @@ The directional inclination on a defer (`allow`, `deny`, or omitted). A routing 
 _Avoid_: treating the lean as the verdict
 
 **Mode**:
-The leniency ladder for non-allow verdicts, strictest first: `strict`, `default`, `auto`.
+The leniency ladder for non-allow verdicts: the built-in rungs `strict`, `default`, `auto` (strictest first), or `custom` for the operator-defined row in `customMode` — two cut lines plus the reviewer-failure lane, only selectable while configured.
+
+**CustomMode**:
+The operator-defined ladder row (`allowThrough`, `denyFrom`, `onReviewFailure`), read only when `mode` is `custom`. Two boundaries, so contiguous by construction; the failure lane is `deny` or `defer`, never `allow`.
 
 **Hard deny / Soft deny**:
 The deny split by authority. A screen deny is hard — no mode lifts it. A model deny is soft — it maps against the ladder like any other doubt. The model's self-reported risk level is audit evidence and never picks the tier.

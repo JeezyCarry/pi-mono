@@ -36,6 +36,7 @@ import {
   configSchema,
   uncoveredInstructionLanes,
 } from "./config-schema.ts";
+import { resolveModePolicy } from "./mode-policy.ts";
 import { modeWarnings } from "./mode-table.ts";
 
 /** A single validation or read error from config loading. */
@@ -46,6 +47,13 @@ export interface ConfigIssue {
   message: string;
   /** File path that produced the issue, or undefined for merged-config errors. */
   sourcePath?: string;
+  /**
+   * How the finding rates. Absent is `error` — the pre-existing meaning: the
+   * load failed. `warning` is a notice on a config that still loads, and
+   * `error` from the mode resolver is a policy that was refused while the
+   * fallback rung ran, so the guard keeps working either way.
+   */
+  severity?: "error" | "warning";
 }
 
 /** How a config load resolved — assigned at each decision point, never derived. */
@@ -1052,11 +1060,31 @@ export function loadAiGuardConfig(
     });
   }
 
+  // Resolve the configured mode into the policy the pipeline runs. An
+  // unusable `custom` row falls back to a built-in rung (repair, not
+  // refusal — failing the whole config would take the guard offline over
+  // a mode choice), and every finding becomes a loader issue with the
+  // layer that wrote the leaf, so the operator knows which file to fix.
+  // The ladder-owned surprise warnings read the RESOLVED cuts, never the
+  // table default — a `mode: "custom"` load warns about the custom pair.
+  const resolution = resolveModePolicy({
+    mode: parsed.data.mode,
+    customMode: parsed.data.customMode,
+  });
+  for (const finding of resolution.issues) {
+    issues.push({
+      path: finding.path,
+      message: finding.message,
+      severity: finding.severity,
+      sourcePath: layerThatWrote(finding.path, global, project),
+    });
+  }
+
   // Ladder-owned surprise warnings (e.g. the extremes plus a breaker
   // forced to defer — the reviewer-untrusted escape valve interrupts the
   // human): the JSONC layer asks the ladder module instead of carrying
   // ladder semantics itself.
-  issues.push(...modeWarnings(parsed.data));
+  issues.push(...modeWarnings(parsed.data, resolution.policy.cuts));
 
   return { config: parsed.data, issues, outcome: "loaded" };
 }

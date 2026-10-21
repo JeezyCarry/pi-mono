@@ -10,8 +10,9 @@ import { type Mock, describe, expect, it, vi } from "vitest";
 
 import type { LogEntry } from "#src/audit/decision-log-reader.ts";
 import type { SaveConfigFn } from "#src/config/config-layer.ts";
-import { MODE_VALUES, configSchema } from "#src/config/config-schema.ts";
-import { CYCLE_MODE_VALUES, EMPHASIZED_MODE, MODE_BLURBS } from "#src/config/mode-table.ts";
+import { configSchema } from "#src/config/config-schema.ts";
+import { selectableModes } from "#src/config/mode-policy.ts";
+import { MODE_BLURBS } from "#src/config/mode-table.ts";
 import type { SessionOverrides } from "#src/config/session-overrides.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import type { BreakerTier } from "#src/review/circuit-breaker.ts";
@@ -50,14 +51,14 @@ function makeBranch(...data: unknown[]): SessionBranchReader {
   };
 }
 
+// Mirrors the extension's real spec: the values/cycle/highlight derivation
+// lives in RuntimeSettings (read from the loaded config), not in the spec.
 const SPECS: readonly EnumSettingSpec[] = [
   {
     name: "mode",
-    values: [...MODE_VALUES],
+    values: [...selectableModes({ mode: "default", customMode: null })],
     description: "how denials and uncertainty are disposed",
     hiddenValue: "default",
-    cycleValues: CYCLE_MODE_VALUES,
-    highlightValue: EMPHASIZED_MODE,
     optionDetails: MODE_BLURBS,
   },
 ];
@@ -84,6 +85,8 @@ interface MakeSettingsOptions {
   saveConfig?: SaveConfigFn;
   /** The session's deny-history records (default: empty). */
   denyHistory?: DenyRecord[];
+  /** Merged over the parsed session config (e.g. a customMode block). */
+  sessionConfig?: Record<string, unknown>;
   /** The report command's log-read stub (default: no log). */
   readDecisionLog?: () => LogEntry[] | undefined;
 }
@@ -103,7 +106,10 @@ function makeSettings(overridesInit: SessionOverrides = {}, options: MakeSetting
               load: {
                 config: options.noConfig
                   ? undefined
-                  : configSchema.parse({ provider: "test", model: "test" }),
+                  : {
+                      ...configSchema.parse({ provider: "test", model: "test" }),
+                      ...options.sessionConfig,
+                    },
                 issues: [],
                 outcome: (options.noConfig ? "failed" : "loaded") as "failed" | "loaded",
               },
@@ -517,6 +523,48 @@ describe("RuntimeSettings — shortcut", () => {
     const { settings: s2, overrides: o2 } = makeSettings({ mode: "auto" });
     s2.shortcut.handler(makeUiCtx());
     expect(o2.mode).toBe("default");
+  });
+
+  it("a configured custom joins the cycle last and renders red", () => {
+    const customMode = {
+      allowThrough: "defer-neutral",
+      denyFrom: "defer-danger",
+      onReviewFailure: "deny",
+    };
+    const { settings, overrides } = makeSettings({}, { sessionConfig: { customMode } });
+    const ctx = makeUiCtx();
+
+    // default → auto → custom → default: the configured row is a stop,
+    // and only the last one.
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("auto");
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("custom");
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("default");
+
+    // The ask-free custom renders in warning red like the built-in rung.
+    settings.syncFooter(ctx);
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "\x1b[1;31mcustom (session)\x1b[0m");
+  });
+
+  it("an unconfigured custom is not offered, not cyclable, not restorable", async () => {
+    const { settings, overrides } = makeSettings();
+    const ctx = makeUiCtx();
+
+    // The direct form rejects it: there are no cuts behind the name.
+    await settings.command.handler("mode custom", ctx);
+    expect(overrides.mode).toBeUndefined();
+
+    // The cycle never lands on it.
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("auto");
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("default");
+
+    // A stale session-file entry for it restores as nothing.
+    settings.restore(makeBranch({ mode: "custom" }));
+    expect(overrides.mode).toBeUndefined();
   });
 
   it("without an active session warns instead of crashing", () => {

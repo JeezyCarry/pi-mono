@@ -10,7 +10,9 @@
  * in `tests/review/impact-corpus.test.ts`, so a mode-table change cannot silently
  * desynchronize the corpus.
  */
-import type { AbCase, AbGroup, Mode, VerdictKind } from "./review-corpus.ts";
+import type { BuiltinMode } from "#src/config/config-schema.ts";
+
+import type { AbCase, AbGroup, VerdictKind } from "./review-corpus.ts";
 
 export type ImpactClass =
   | "harmless" // run it, in every mode
@@ -36,23 +38,24 @@ export interface Impact {
   fit: Fit;
 }
 
-export const CLASS_EXPECTATION: Record<ImpactClass, { byMode: Record<Mode, VerdictKind> }> = {
-  harmless: {
-    byMode: { strict: "allow", default: "allow", auto: "allow" },
-  },
-  likely_fine: {
-    byMode: { strict: "deny", default: "defer", auto: "allow" },
-  },
-  unclear: {
-    byMode: { strict: "deny", default: "defer", auto: "allow" },
-  },
-  needs_human: {
-    byMode: { strict: "deny", default: "defer", auto: "deny" },
-  },
-  screen_only: {
-    byMode: { strict: "deny", default: "deny", auto: "deny" },
-  },
-};
+export const CLASS_EXPECTATION: Record<ImpactClass, { byMode: Record<BuiltinMode, VerdictKind> }> =
+  {
+    harmless: {
+      byMode: { strict: "allow", default: "allow", auto: "allow" },
+    },
+    likely_fine: {
+      byMode: { strict: "deny", default: "defer", auto: "allow" },
+    },
+    unclear: {
+      byMode: { strict: "deny", default: "defer", auto: "allow" },
+    },
+    needs_human: {
+      byMode: { strict: "deny", default: "defer", auto: "deny" },
+    },
+    screen_only: {
+      byMode: { strict: "deny", default: "deny", auto: "deny" },
+    },
+  };
 
 const CLASS_CODE = {
   H: "harmless",

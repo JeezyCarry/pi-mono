@@ -93,9 +93,48 @@
     },
     "mode": {
       "type": "string",
-      "enum": ["strict", "default", "auto"],
+      "enum": ["strict", "default", "auto", "custom"],
       "default": "default",
-      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Only the deterministic screen hard-denies: a model deny is soft whatever riskLevel it reports, and riskLevel is an audit label that never picks the tier. The model's own uncertainty is split by its lean (benign-leaned, neutral, danger-leaned): 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger, so soft denies and every unresolved doubt ask; 'auto' — no prompt is ever raised, benign and neutral doubts pass, danger-leaned doubts and every deny deny. 'auto' is not the yolo mode of Codex, Claude Code, or Gemini CLI: those neither ask nor block, while auto still blocks every deny and every danger-leaned doubt. Reviewer machinery failures never map to allow: they deny under strict and auto, and defer under default."
+      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Only the deterministic screen hard-denies: a model deny is soft whatever riskLevel it reports, and riskLevel is an audit label that never picks the tier. The model's own uncertainty is split by its lean (benign-leaned, neutral, danger-leaned): 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger, so soft denies and every unresolved doubt ask; 'auto' — no prompt is ever raised, benign and neutral doubts pass, danger-leaned doubts and every deny deny. 'auto' is not the yolo mode of Codex, Claude Code, or Gemini CLI: those neither ask nor block, while auto still blocks every deny and every danger-leaned doubt. Reviewer machinery failures never map to allow: they deny under strict and auto, and defer under default. 'custom' runs the two cut lines and the failure lane from customMode; it is only selectable while that block is present, and an unconfigured custom falls back to 'default' with a config issue."
+    },
+
+    "customMode": {
+      "type": ["object", "null"],
+      "default": null,
+      "additionalProperties": false,
+      "description": "The operator-defined ladder row, read only when mode is 'custom'. Two cut lines and the reviewer-failure lane, nothing else: a mode is two boundaries, so a custom row is contiguous by construction and cannot express an incoherent per-rung table. allowThrough at or above denyFrom is legal and leaves no ask band (the mode never prompts); the footer then renders it in warning red once the casual cycle can reach it. A pair drawing exactly a built-in row is reported as redundant.",
+      "properties": {
+        "allowThrough": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "defer-benign",
+            "defer-neutral",
+            "defer-danger",
+            "soft-deny",
+            "hard-deny"
+          ],
+          "description": "At or below this rung the mode allows (inclusive). 'defer-neutral' is the ask-free-but-still-blocking posture: benign and neutral doubts pass, danger-leaned doubts deny."
+        },
+        "denyFrom": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "defer-benign",
+            "defer-neutral",
+            "defer-danger",
+            "soft-deny",
+            "hard-deny"
+          ],
+          "description": "At or above this rung the mode denies (inclusive). The deterministic screen's hard deny is terminal in every mode."
+        },
+        "onReviewFailure": {
+          "type": "string",
+          "enum": ["deny", "defer"],
+          "description": "How a review that produced no verdict is disposed of. Never allow: a broken reviewer must not rubber-stamp."
+        }
+      },
+      "required": ["allowThrough", "denyFrom", "onReviewFailure"]
     },
     "notifyLevel": {
       "type": "string",

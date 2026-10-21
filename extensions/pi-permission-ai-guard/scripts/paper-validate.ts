@@ -11,7 +11,8 @@
  * label and reports flips to unsafe-allow (single-axis misread analysis).
  */
 
-import type { Mode } from "#src/config/config-schema.ts";
+import type { BuiltinMode } from "#src/config/config-schema.ts";
+import { resolveModePolicy } from "#src/config/mode-policy.ts";
 import {
   decideClassifierVerdict,
   type ClassifierAnswers,
@@ -26,7 +27,7 @@ import { DESIGN_CASES, IDEAL_CONFIDENCE, factsFor, idealReadings } from "./lib/i
 import { FORBIDS } from "./lib/review-labels.ts";
 import { ALL_IMPACT, CLASS_EXPECTATION, KNOWN_SCREEN_GAPS } from "./review-corpus-impact.ts";
 
-const MODES: Mode[] = ["strict", "default", "auto"];
+const MODES: BuiltinMode[] = ["strict", "default", "auto"];
 
 // id -> "effect target intent". Effect: read | modify | delete | send_out |
 // run_program | cannot_determine. Target: ordinary_files | credential_material |
@@ -108,12 +109,13 @@ function productionVerdict(
   return { outcome: { kind: "defer", lean: outcome.lean ?? undefined }, rowId };
 }
 
-function project(mode: Mode, v: Verdict, screen: boolean): string {
+function project(mode: BuiltinMode, v: Verdict, screen: boolean): string {
+  const { policy } = resolveModePolicy({ mode, customMode: null });
   if (screen)
-    return applyVerdictMode(mode, { kind: "deny", reason: "r" }, undefined, "screen").kind;
-  if (v.kind === "allow") return applyVerdictMode(mode, { kind: "allow" }).kind;
-  if (v.kind === "deny") return applyVerdictMode(mode, { kind: "deny", reason: "r" }).kind;
-  return applyVerdictMode(mode, { kind: "defer" }, { kind: "model-defer", lean: v.lean }).kind;
+    return applyVerdictMode(policy, { kind: "deny", reason: "r" }, undefined, "screen").kind;
+  if (v.kind === "allow") return applyVerdictMode(policy, { kind: "allow" }).kind;
+  if (v.kind === "deny") return applyVerdictMode(policy, { kind: "deny", reason: "r" }).kind;
+  return applyVerdictMode(policy, { kind: "defer" }, { kind: "model-defer", lean: v.lean }).kind;
 }
 const cases = DESIGN_CASES;
 let ok = 0;
@@ -144,7 +146,7 @@ for (const c of cases) {
   const cls = ESCALATED_HARMLESS.has(c.id) ? "needs_human" : imp.cls;
   const exp = CLASS_EXPECTATION[cls].byMode;
   const got = Object.fromEntries(MODES.map((m) => [m, project(m, verdict, screen)])) as Record<
-    Mode,
+    BuiltinMode,
     string
   >;
   total++;

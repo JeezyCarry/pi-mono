@@ -17,7 +17,7 @@ import {
   persistConfigLayer,
 } from "#src/config/config-layer.ts";
 import { MODE_VALUES, NOTIFY_LEVEL_VALUES } from "#src/config/config-schema.ts";
-import { CYCLE_MODE_VALUES, EMPHASIZED_MODE, MODE_BLURBS } from "#src/config/mode-table.ts";
+import { MODE_BLURBS } from "#src/config/mode-table.ts";
 import { warn } from "#src/notice.ts";
 import { type ModelCallFn, createModelCall } from "#src/review/engines/chat/call.ts";
 import { type ReviewPipelineDeps, createReviewPipeline } from "#src/review/review-pipeline.ts";
@@ -51,15 +51,16 @@ export interface AiGuardDependencies {
 const SETTINGS: readonly EnumSettingSpec[] = [
   // `default` is the shipped baseline — a footer line saying "default"
   // permanently would be pure noise, so RuntimeSettings omits it. The
-  // cycle subset and the warning-red emphasis derive from the ladder
-  // table (mode-table.ts), not from hand-edited copies here.
+  // values, cycle subset, and warning-red emphasis derive per session from
+  // the loaded config (mode-policy.ts): `custom` joins each surface only
+  // while customMode configures its cuts. The static `values` below is the
+  // superset the command validates against before the session-aware
+  // derivation runs.
   {
     name: "mode",
     values: [...MODE_VALUES],
     description: "how denials and uncertainty are disposed",
     hiddenValue: "default",
-    cycleValues: CYCLE_MODE_VALUES,
-    highlightValue: EMPHASIZED_MODE,
     optionDetails: MODE_BLURBS,
   },
   {

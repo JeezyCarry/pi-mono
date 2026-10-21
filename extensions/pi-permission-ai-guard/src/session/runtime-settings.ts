@@ -32,7 +32,14 @@ import type {
   LoadConfigResult,
   SaveConfigFn,
 } from "#src/config/config-layer.ts";
-import type { AiGuardConfig } from "#src/config/config-schema.ts";
+import type { AiGuardConfig, Mode } from "#src/config/config-schema.ts";
+import {
+  cycleValues,
+  isHighlighted,
+  resolveModePolicy,
+  selectableModes,
+  type ModeConfig,
+} from "#src/config/mode-policy.ts";
 import { CYCLE_DESCRIPTION } from "#src/config/mode-table.ts";
 import {
   effectiveConfig,
@@ -261,17 +268,18 @@ export class RuntimeSettings {
 
   /** The ctrl+alt+g shortcut registration object (cycles the first setting). */
   readonly shortcut: AiGuardShortcut = {
-    // Generated from the ladder table's cycle membership — the description
-    // cannot drift from the cycle it describes.
-    description: `Cycle ai-guard mode: ${CYCLE_DESCRIPTION} (session)`,
+    // Names the built-in cycle; a configured `custom` mode joins the
+    // actual rotation last (see #cycleOf), so the suffix keeps the line
+    // honest in both states.
+    description: `Cycle ai-guard mode: ${CYCLE_DESCRIPTION} (+ custom when configured) (session)`,
     handler: (ctx) => {
       // The cycle anchors the MODE spec by name — the cycled setting must
       // not depend on spec order or count.
       const spec = this.#spec("mode");
       if (!spec || !this.#guardSessionConfig()) return;
-      // The cycle visits the CASUAL subset only (cycleValues) — the
-      // command and picker cover the full value set.
-      const values = spec.cycleValues ?? spec.values;
+      // The cycle visits the CASUAL subset only — the command and picker
+      // cover the full value set.
+      const values = this.#cycleOf(spec);
       const first = values[0];
       if (first === undefined) return;
       const current = this.#effective(spec);
@@ -292,7 +300,7 @@ export class RuntimeSettings {
    */
   restore(reader: SessionBranchReader): void {
     for (const spec of this.#specs) {
-      const restored = restoreSetting(spec.name, spec.values, reader);
+      const restored = restoreSetting(spec.name, this.#valuesOf(spec), reader);
       this.#writeOverride(spec, restored);
     }
   }
@@ -323,7 +331,7 @@ export class RuntimeSettings {
       const effective = this.#effective(spec) ?? "";
       if (effective === spec.hiddenValue) continue;
       const fragment = override ? `${effective} (session)` : effective;
-      fragments.push(effective === spec.highlightValue ? highlightText(fragment) : fragment);
+      fragments.push(this.#isHighlighted(spec, effective) ? highlightText(fragment) : fragment);
     }
     ctx.ui.setStatus(FOOTER_KEY, fragments.length > 0 ? fragments.join(" · ") : undefined);
   }
@@ -533,7 +541,7 @@ export class RuntimeSettings {
    */
   #options(spec: EnumSettingSpec): readonly SettingOption[] {
     return [
-      ...spec.values.map((v) => ({ text: v, kind: "value" as const })),
+      ...this.#valuesOf(spec).map((v) => ({ text: v, kind: "value" as const })),
       { text: "reset", kind: "reset" as const },
     ];
   }
@@ -657,6 +665,65 @@ export class RuntimeSettings {
   }
 
   /**
+   * The mode fields the policy resolver reads from the live session
+   * config. Absent config (no session yet) reads as the resting state —
+   * `default` with no custom row — so every derived surface has an answer
+   * before the first load.
+   *
+   * @returns The mode name and the custom row (or null).
+   */
+  #modeConfig(): ModeConfig {
+    const config = this.#deps.session.session?.load.config;
+    return { mode: config?.mode ?? "default", customMode: config?.customMode ?? null };
+  }
+
+  /**
+   * The values a spec offers on the command and picker. The mode spec
+   * follows the config: `custom` is offered only while the config defines
+   * its cuts, so an unconfigured `custom` can neither be picked nor
+   * restored from the session file.
+   *
+   * @param spec - The setting to list values for.
+   * @returns The selectable values.
+   */
+  #valuesOf(spec: EnumSettingSpec): readonly string[] {
+    return spec.name === "mode" ? selectableModes(this.#modeConfig()) : spec.values;
+  }
+
+  /**
+   * The values the shortcut cycles for a spec. The mode cycle is the
+   * built-in casual subset plus a configured `custom` last.
+   *
+   * @param spec - The setting to cycle.
+   * @returns The cycle, in press order.
+   */
+  #cycleOf(spec: EnumSettingSpec): readonly string[] {
+    return spec.name === "mode"
+      ? cycleValues(this.#modeConfig())
+      : (spec.cycleValues ?? spec.values);
+  }
+
+  /**
+   * Whether a value renders in warning red: the cycle can reach it and it
+   * never asks. Resolved through the policy, so a custom row that never
+   * asks is emphasized exactly like the built-in ask-free rung — and an
+   * unconfigured `custom` (which resolves to the fallback) is not.
+   *
+   * @param spec - The setting the value belongs to.
+   * @param value - The effective or selected value.
+   * @returns True when the footer emphasizes it.
+   */
+  #isHighlighted(spec: EnumSettingSpec, value: string): boolean {
+    if (spec.name !== "mode") return value === spec.highlightValue;
+    const modeConfig = this.#modeConfig();
+    const { policy } = resolveModePolicy({
+      mode: value as Mode,
+      customMode: modeConfig.customMode,
+    });
+    return isHighlighted(policy, modeConfig);
+  }
+
+  /**
    * The spec's override value (undefined = config default).
    *
    * @param spec - The setting to read.
@@ -700,7 +767,7 @@ export class RuntimeSettings {
       return;
     }
     // The one write-side cast: every value reaches this seam through
-    // spec.values (command validation and restoreSetting both check
+    // #valuesOf (command validation and restoreSetting both check
     // membership), so a string spec value IS a legal value of the dual-typed
     // field. With more than one spec the key is a union and TS cannot
     // prove the value/key pair — erase through the string-keyed view.
@@ -729,7 +796,7 @@ export class RuntimeSettings {
     } else {
       // Selecting the highlighted value deserves a warning-level notice
       // (plain text — the emphasis is footer-only).
-      const highlighted = value === spec.highlightValue;
+      const highlighted = this.#isHighlighted(spec, value);
       this.#deps.notify(`${word} = ${value} (session)`, highlighted ? "warning" : "info");
     }
     this.syncFooter(ctx);

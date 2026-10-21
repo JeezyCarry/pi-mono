@@ -1089,6 +1089,65 @@ describe("config loader — JSONC", () => {
     expect(message).toContain("benign-leaned");
   });
 
+  it("loads mode custom with its own cuts and warns about nothing redundant", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "custom",
+  "customMode": { "allowThrough": "defer-benign", "denyFrom": "hard-deny", "onReviewFailure": "defer" }
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.outcome).toBe("loaded");
+    expect(result.config?.mode).toBe("custom");
+    expect(result.config?.customMode).toEqual({
+      allowThrough: "defer-benign",
+      denyFrom: "hard-deny",
+      onReviewFailure: "defer",
+    });
+    expect(result.issues).toEqual([]);
+  });
+
+  it("repairs mode custom with no block to default and keeps the guard running", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "custom"
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.outcome).toBe("loaded");
+    expect(result.config?.mode).toBe("custom");
+    const modeIssues = result.issues.filter((i) => i.path === "mode");
+    expect(modeIssues).toHaveLength(1);
+    expect(modeIssues[0]!.message).toContain('running "default" instead');
+  });
+
+  it("warns about the resolved custom cuts, not the table default", () => {
+    // An ask-free custom paired with a deferring breaker warns, naming
+    // custom — the warning reads the resolved pair, not default's cuts
+    // (which would stay silent).
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "custom",
+  "customMode": { "allowThrough": "defer-neutral", "denyFrom": "defer-danger", "onReviewFailure": "deny" },
+  "circuitBreaker": { "consecutive": 3, "total": 20, "verdict": "defer" }
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.outcome).toBe("loaded");
+    const message = result.issues.map((i) => i.message).join("\n");
+    expect(message).toContain('mode "custom"');
+    expect(message).toContain("circuitBreaker.verdict");
+  });
+
   it("still records an issue on genuinely malformed JSONC", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": "{ invalid json",

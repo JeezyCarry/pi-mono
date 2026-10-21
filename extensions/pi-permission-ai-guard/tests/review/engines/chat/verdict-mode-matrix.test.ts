@@ -10,7 +10,8 @@
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 import { describe, expect, it } from "vitest";
 
-import { MODE_VALUES, type Mode } from "#src/config/config-schema.ts";
+import { BUILTIN_MODE_VALUES, type BuiltinMode } from "#src/config/config-schema.ts";
+import { resolveModePolicy } from "#src/config/mode-policy.ts";
 import { MODEL_DEFER_KIND } from "#src/model/machinery-kinds.ts";
 import type { ReviewOutcome } from "#src/model/model-verdict.ts";
 import { parseVerdictObject } from "#src/review/engines/chat/verdict-parser.ts";
@@ -19,7 +20,7 @@ import { applyVerdictMode, type ModelDeferInfo } from "#src/review/verdict-rule.
 type Kind = AuthorizerVerdict["kind"];
 
 /** The per-mode emitted kind, one entry per ladder mode. */
-type ModeKinds = Readonly<Record<Mode, Kind>>;
+type ModeKinds = Readonly<Record<BuiltinMode, Kind>>;
 
 /**
  * The ModelDeferInfo the pipeline hands the mapping for a fresh model defer.
@@ -42,9 +43,13 @@ function deferInfoOf(outcome: ReviewOutcome): ModelDeferInfo | undefined {
  */
 function emitPerMode(outcome: ReviewOutcome): ModeKinds {
   const modelDefer = deferInfoOf(outcome);
-  const emitted = {} as Record<Mode, Kind>;
-  for (const mode of MODE_VALUES) {
-    emitted[mode] = applyVerdictMode(mode, outcome.verdict, modelDefer).kind;
+  const emitted = {} as Record<BuiltinMode, Kind>;
+  for (const mode of BUILTIN_MODE_VALUES) {
+    emitted[mode] = applyVerdictMode(
+      resolveModePolicy({ mode, customMode: null }).policy,
+      outcome.verdict,
+      modelDefer,
+    ).kind;
   }
   return emitted;
 }
@@ -93,7 +98,7 @@ describe("A — ban wall / block boundary / uncovered duty deny → soft tier (a
   });
 
   it("denies in strict and auto, asks in default", () => {
-    for (const [mode, kind] of Object.entries(emitPerMode(parsed)) as Array<[Mode, Kind]>) {
+    for (const [mode, kind] of Object.entries(emitPerMode(parsed)) as Array<[BuiltinMode, Kind]>) {
       expect(kind, `${mode} must map a model deny by the soft ladder`).toBe(
         MODEL_DENY_LADDER[mode],
       );
@@ -150,7 +155,7 @@ describe("B — unestablished safety facts / costly-consequence confirms / duty 
 
   it.each(DANGER_DEFERRALS)("$name asks in default, denies in strict and auto", ({ output }) => {
     const emitted = emitPerMode(parseVerdictObject(output, 100));
-    for (const [mode, kind] of Object.entries(emitted) as Array<[Mode, Kind]>) {
+    for (const [mode, kind] of Object.entries(emitted) as Array<[BuiltinMode, Kind]>) {
       // auto has no ask path for danger: a danger confirmation denies
       // there rather than auto-passing.
       expect(kind, `${mode} must map a deny-leaned defer to deny`).toBe(DANGER_DEFER_LADDER[mode]);
@@ -179,7 +184,7 @@ describe("C — CWD read-only inspection / anchor-covered ordinary action → al
 
   it.each(ALLOW_OUTPUTS)("$name passes every mode", ({ output }) => {
     const emitted = emitPerMode(parseVerdictObject(output, 100));
-    for (const [mode, kind] of Object.entries(emitted) as Array<[Mode, Kind]>) {
+    for (const [mode, kind] of Object.entries(emitted) as Array<[BuiltinMode, Kind]>) {
       expect(kind, `${mode} must pass an allow unchanged`).toBe(ALLOW_LADDER[mode]);
     }
   });
@@ -204,7 +209,7 @@ describe("D — ordinary established action the anchor leaves uncovered → neut
 
   it("denies in strict, asks in default, passes in auto", () => {
     const emitted = emitPerMode(parsed);
-    for (const [mode, kind] of Object.entries(emitted) as Array<[Mode, Kind]>) {
+    for (const [mode, kind] of Object.entries(emitted) as Array<[BuiltinMode, Kind]>) {
       expect(kind, `${mode} must map a neutral defer to its ladder row`).toBe(
         NEUTRAL_DEFER_LADDER[mode],
       );

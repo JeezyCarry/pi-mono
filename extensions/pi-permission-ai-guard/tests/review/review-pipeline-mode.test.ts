@@ -238,6 +238,45 @@ describe("createReviewPipeline — mode", () => {
   });
 });
 
+describe("createReviewPipeline — custom mode", () => {
+  const customMode = {
+    allowThrough: "soft-deny",
+    denyFrom: "hard-deny",
+    onReviewFailure: "defer",
+  } as const;
+
+  it("disposes by its own cuts: a soft deny passes where default would ask", async () => {
+    const authorize = createReviewPipeline(
+      makePipeline({
+        config: { ...baseConfig, mode: "custom", customMode: { ...customMode } },
+        engine: makeEngine({
+          modelCall: makeFakeCompleteSimple([
+            { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
+          ]),
+        }),
+      }),
+    );
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "allow" });
+  });
+
+  it("a machinery failure follows the custom failure lane, never allow", async () => {
+    const { notifications, notify } = makeNotifySpy();
+    const authorize = createReviewPipeline(
+      makePipeline({
+        config: { ...baseConfig, mode: "custom", customMode: { ...customMode } },
+        notify,
+        engine: makeEngine({
+          modelCall: makeFakeCompleteSimple([{ type: "text", text: "not json" }]),
+        }),
+      }),
+    );
+    // onReviewFailure "defer": the failure interrupts the human with its
+    // classified cause, and never becomes an allow.
+    await expectVerdict(authorize, { value: "ls" }, { kind: "defer" });
+    expectNotices(notifications, { level: "warning", contains: ["review unavailable"] });
+  });
+});
+
 describe("createReviewPipeline — mode edges", () => {
   it("a benign-leaned defer asks in default mode — the intent question reaches the authorizer", async () => {
     const { notifications, notify } = makeNotifySpy();

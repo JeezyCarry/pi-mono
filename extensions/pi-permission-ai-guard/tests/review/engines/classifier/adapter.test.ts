@@ -16,6 +16,7 @@ import type { AuthorizerLog } from "@gotgenes/pi-permission-system";
 import { describe, expect, it } from "vitest";
 
 import { configSchema } from "#src/config/config-schema.ts";
+import { resolveModePolicy } from "#src/config/mode-policy.ts";
 import { createClassifierAdapter } from "#src/review/engines/classifier/adapter.ts";
 import type { ClassifierClientLike } from "#src/review/engines/classifier/client.ts";
 import {
@@ -208,11 +209,15 @@ describe("classifier adapter disposition", () => {
     expect(attempt.kind).toBe("answered");
     if (attempt.kind !== "answered") return;
     const outcome = attempt.result.outcome;
-    const mapped = applyVerdictMode("default", outcome.verdict, {
-      kind: outcome.deferKind,
-      reason: outcome.deferReason,
-      lean: outcome.lean,
-    });
+    const mapped = applyVerdictMode(
+      resolveModePolicy({ mode: "default", customMode: null }).policy,
+      outcome.verdict,
+      {
+        kind: outcome.deferKind,
+        reason: outcome.deferReason,
+        lean: outcome.lean,
+      },
+    );
     expect(mapped.kind).toBe("defer");
   });
 
