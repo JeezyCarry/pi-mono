@@ -9,8 +9,8 @@
  * consumed here as data.
  *
  * The doctrine stays local: hard-tier denies (only the deterministic screen's) are terminal in
- * every mode, and every model deny is soft; danger-leaned defers ask in default and lenient, deny
- * in strict, and DENY in permissive (the ladder has no ask path for danger); reviewer machinery
+ * every mode, and every model deny is soft; danger-leaned defers ask in default and deny
+ * in strict, and DENY in auto (the ladder has no ask path for danger); reviewer machinery
  * failures never map to allow in ANY mode (a broken reviewer must not rubber-stamp) — they deny
  * under the two extremes and defer under the remaining two; allow is never transformed.
  *
@@ -21,12 +21,7 @@
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 import type { Mode } from "#src/config/config-schema.ts";
-import {
-  MODE_TABLE,
-  type ModeEntry,
-  type Suspicion,
-  suspicionRank,
-} from "#src/config/mode-table.ts";
+import { MODE_TABLE, type Suspicion, suspicionBand } from "#src/config/mode-table.ts";
 import { isModelDefer } from "#src/model/machinery-kinds.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import type { ModelCallDeferKind, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
@@ -85,20 +80,6 @@ export function denyTier(authority: DenyAuthority): DenyTier {
 }
 
 /**
- * The machinery lane's target for a mode: deny under the two extremes
- * (`strict` — fail closed by doctrine; `permissive` — a broken reviewer
- * must not rubber-stamp), defer otherwise. Exported for the pipeline's
- * pre-call gates (no-target, model-unresolved, auth-failed,
- * transcript-error), which never hold a parsed verdict.
- *
- * @param mode - The effective mode.
- * @returns The machinery lane's target (never allow).
- */
-export function machineryTarget(mode: Mode): ModeEntry["machinery"] {
-  return MODE_TABLE[mode].machinery;
-}
-
-/**
  * Audit marker for a model defer the mode mapped to allow: the reviewer's
  * clarification request never reached the agent. Persisted as the decision
  * record's emittedReason so readers of the review log see what was
@@ -128,7 +109,7 @@ export function applyVerdictMode(
   // never on the suspicion line — map through the mode's machinery lane,
   // which never allows: a broken reviewer must not rubber-stamp.
   if (verdict.kind === "defer" && !isModelDefer(modelDefer?.kind)) {
-    return MODE_TABLE[policy].machinery === "deny"
+    return MODE_TABLE[policy].onReviewFailure === "deny"
       ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy) }
       : verdict;
   }
@@ -148,12 +129,12 @@ export function applyVerdictMode(
         : modelDefer?.lean === "deny"
           ? "defer-danger"
           : "defer-neutral";
-  const { acceptAtOrBelow, rejectAtOrAbove } = MODE_TABLE[policy].cuts;
-  const rank = suspicionRank(suspicion);
-  if (rank <= suspicionRank(acceptAtOrBelow)) {
+  const { cuts } = MODE_TABLE[policy];
+  const band = suspicionBand(cuts, suspicion);
+  if (band === "allow") {
     return { kind: "allow" };
   }
-  if (rank >= suspicionRank(rejectAtOrAbove)) {
+  if (band === "deny") {
     // A deny keeps its teaching reason; a rejected defer synthesizes one
     // (the model's clarification request, or the generic uncertainty copy).
     return verdict.kind === "deny"
@@ -202,7 +183,7 @@ export interface MappingDecision {
    * silent. Five kinds: a model deny that HOLDS or escalates (the host renders no
    * dialog for denials, so the notify line is the operator's only copy), a mapped
    * defer (the ask tail corrects the operator's read), the once-per-pipeline
-   * fail-open notice (the mode auto-approving against the model's explicit verdict
+   * fail-open notice (the mode allowing against the model's explicit verdict
    * or its neutral uncertainty), a model defer that emitted as defer (its reason,
    * which no dialog would show), and a machinery defer that emitted as defer (the
    * cause notice).

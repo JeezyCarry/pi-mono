@@ -14,7 +14,7 @@ import type { Mode } from "#src/config/config-schema.ts";
 import { screenCommand } from "#src/review/screen/screen.ts";
 import { applyVerdictMode } from "#src/review/verdict-rule.ts";
 
-const MODES: Mode[] = ["strict", "default", "lenient", "permissive"];
+const MODES: Mode[] = ["strict", "default", "auto"];
 const existing = AB_GROUPS.flatMap((g) => g.cases);
 const impact = IMPACT_GROUPS.flatMap((g) => g.cases);
 const all = [...existing, ...impact];

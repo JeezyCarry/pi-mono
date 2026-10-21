@@ -268,7 +268,8 @@ describe("config surface drift", () => {
     ]);
   });
 
-  it("the curated mode prose twins carry the final wording, not the superseded one", () => {
+  it("the curated mode prose carries the final wording, not the superseded one", () => {
+    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf-8");
     const zodSource = readFileSync(
       fileURLToPath(import.meta.resolve("#src/config/config-schema.ts")),
       "utf-8",
@@ -279,17 +280,18 @@ describe("config surface drift", () => {
     );
     const description = schemaJson.properties.mode.description;
     const stale = "you decide everything";
-    // Short enough to sit on one line of the zod comment block (the twins
-    // have different line-wrapping; only the phrase itself must not drift).
     const canonical = "judge every flag";
-    // One pair per curated surface: the twins drift independently unless
-    // each is pinned separately (this test exists because the mode prose
-    // once drifted this exact way).
+    // The two operator-facing surfaces restate the rows, so each is pinned
+    // separately: they drift independently unless both are checked (this
+    // test exists because the mode prose once drifted this exact way).
     expect(description).toContain(canonical);
     expect(description).not.toContain(stale);
-    expect(zodSource).toContain(canonical);
+    expect(readme).toContain(canonical);
+    expect(readme).not.toContain(stale);
+    // The code-side twins point at the README table instead of restating
+    // the rows, so there is no third copy left to drift.
+    expect(zodSource).toContain("README.md");
     expect(zodSource).not.toContain(stale);
-    expect(modeTableSource).toContain(canonical);
     expect(modeTableSource).not.toContain(stale);
   });
 });

@@ -4,7 +4,7 @@ Date: 2026-08-26
 
 ## Status
 
-Accepted
+Superseded by [ADR 0012](0012-mode-ladder-is-three-rungs.md) for the mode set: `lenient` was removed and `permissive` renamed to `auto`. The lean-routing doctrine below still holds; the cut lines now live in `README.md`'s mode table.
 
 ## Context
 

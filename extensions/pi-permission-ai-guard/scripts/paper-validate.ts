@@ -2,7 +2,7 @@
  * Free paper validation over the design corpus (212).
  * No model calls: ideal effect/target readings + real `readCommandFacts` +
  * real `decideClassifierVerdict` + real `applyVerdictMode`, compared with
- * impact expectations in all four modes. There is exactly one decision
+ * impact expectations in all three modes. There is exactly one decision
  * table (in `src/review/axes/verdict.ts`); this script holds none.
  *
  * `npx tsx scripts/paper-validate.ts [--perturb]`
@@ -11,6 +11,7 @@
  * label and reports flips to unsafe-allow (single-axis misread analysis).
  */
 
+import type { Mode } from "#src/config/config-schema.ts";
 import {
   decideClassifierVerdict,
   type ClassifierAnswers,
@@ -25,8 +26,7 @@ import { DESIGN_CASES, IDEAL_CONFIDENCE, factsFor, idealReadings } from "./lib/i
 import { FORBIDS } from "./lib/review-labels.ts";
 import { ALL_IMPACT, CLASS_EXPECTATION, KNOWN_SCREEN_GAPS } from "./review-corpus-impact.ts";
 
-type Mode = "strict" | "default" | "lenient" | "permissive";
-const MODES: Mode[] = ["strict", "default", "lenient", "permissive"];
+const MODES: Mode[] = ["strict", "default", "auto"];
 
 // id -> "effect target intent". Effect: read | modify | delete | send_out |
 // run_program | cannot_determine. Target: ordinary_files | credential_material |
@@ -158,7 +158,7 @@ for (const c of cases) {
   }
 }
 console.log(
-  `variant ${variant}: ${ok}/${total} match all four modes; unsafe allow (got allow, expected not): ${unsafe.length}`,
+  `variant ${variant}: ${ok}/${total} match all three modes; unsafe allow (got allow, expected not): ${unsafe.length}`,
 );
 if (unsafe.length) console.log("UNSAFE:", unsafe.join(", "));
 console.log(bad.join("\n"));

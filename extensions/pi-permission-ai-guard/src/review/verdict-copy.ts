@@ -209,7 +209,7 @@ export function approvalNotice(origin: ApprovalOrigin, cost: ReviewCost): string
   const base =
     origin.kind === "reviewer"
       ? "reviewer approved this request"
-      : `mode (${origin.mode}) auto-approved this request`;
+      : `mode (${origin.mode}) allowed this request without asking`;
   return cost.kind === "fresh" ? `${base} (${formatDuration(cost.latencyMs)})` : `${base} (cached)`;
 }
 
@@ -250,11 +250,11 @@ export function escalationMessage(
 /**
  * The fail-open notice: the mode passed something the reviewer did not allow, so
  * the line names what still blocks. Only an ask-free mode reaches it
- * (`permissive`); every other mode either has no auto-pass for a
+ * (`auto`); every other mode either has no auto-pass for a
  * non-benign-leaned defer or asks on one.
  *
  * @returns The notification message.
  */
 export function failOpenNotice(): string {
-  return "the mode auto-approves this request; a danger-leaned doubt and every deny still block";
+  return "this mode allows the request without asking; a danger-leaned doubt and every deny still block";
 }

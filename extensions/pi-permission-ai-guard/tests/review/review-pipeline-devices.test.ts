@@ -574,7 +574,7 @@ describe("createReviewPipeline — machinery failures trip the breaker (strict)"
 });
 
 describe("createReviewPipeline — review follow-ups (cache-hit mapping + total tier)", () => {
-  it("permissive denies a cached soft deny on both passes, the audit reason intact", async () => {
+  it("auto denies a cached soft deny on both passes, the audit reason intact", async () => {
     const { log, debugCalls } = makeRecordingLog();
     const { notifications, notify } = makeNotifySpy();
     let modelCalls = 0;
@@ -586,12 +586,12 @@ describe("createReviewPipeline — review follow-ups (cache-hit mapping + total 
     };
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "permissive", cache: { maxEntries: 8 } },
+        config: { ...baseConfig, mode: "auto", cache: { maxEntries: 8 } },
         notify,
         engine: makeEngine({ modelCall }),
       }),
     );
-    // First pass: the soft deny denies in permissive (its reject line sits
+    // First pass: the soft deny denies in auto (its reject line sits
     // at defer-danger, above soft-deny) and is cached as a model deny.
     const first = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), log);
     expect(first).toEqual({ kind: "deny", reason: withAgentInstruction("unsafe", "content") });
@@ -616,11 +616,11 @@ describe("createReviewPipeline — review follow-ups (cache-hit mapping + total 
     const makeAuthorize = () =>
       createReviewPipeline(
         makePipeline({
-          config: { ...baseConfig, mode: "permissive", cache: { maxEntries: 8 } },
+          config: { ...baseConfig, mode: "auto", cache: { maxEntries: 8 } },
           notify,
           engine: makeEngine({
             modelCall: makeFakeCompleteSimple([
-              // The neutral model defer is the row permissive still maps to
+              // The neutral model defer is the row auto still maps to
               // allow (a soft deny now denies there), so it is what fires
               // the fail-open notice.
               { type: "text", text: '{"verdict":"defer"}' },
@@ -667,7 +667,7 @@ describe("createReviewPipeline — review follow-ups (cache-hit mapping + total 
     expect(breaker.trippedTier({ consecutive: 1, total: 200, verdict: "deny" })).toBeDefined();
   });
 
-  it("permissive keeps a cached hard deny terminal (missing riskLevel is hard)", async () => {
+  it("auto keeps a cached hard deny terminal (missing riskLevel is hard)", async () => {
     let modelCalls = 0;
     const { notifications, notify } = makeNotifySpy();
     const modelCall = async () => {
@@ -678,7 +678,7 @@ describe("createReviewPipeline — review follow-ups (cache-hit mapping + total 
     };
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "permissive", cache: { maxEntries: 8 } },
+        config: { ...baseConfig, mode: "auto", cache: { maxEntries: 8 } },
         engine: makeEngine({ modelCall }),
         notify,
       }),

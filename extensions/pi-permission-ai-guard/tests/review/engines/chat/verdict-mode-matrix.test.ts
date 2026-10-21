@@ -49,33 +49,25 @@ function emitPerMode(outcome: ReviewOutcome): ModeKinds {
   return emitted;
 }
 
-/** A model deny is soft whatever its riskLevel: default and lenient ask the human. */
+/** A model deny is soft whatever its riskLevel: default asks the human. */
 const MODEL_DENY_LADDER: ModeKinds = {
   strict: "deny",
   default: "defer",
-  lenient: "defer",
-  permissive: "deny",
+  auto: "deny",
 };
-/** The danger defer lane: permissive has no ask path for danger, so it denies. */
-const DANGER_DEFER_LADDER: ModeKinds = {
-  strict: "deny",
-  default: "defer",
-  lenient: "defer",
-  permissive: "deny",
-};
+/** The danger defer lane: auto has no ask path for danger, so it denies. */
+const DANGER_DEFER_LADDER: ModeKinds = MODEL_DENY_LADDER;
 /** Allow is never transformed on any rung. */
 const ALLOW_LADDER: ModeKinds = {
   strict: "allow",
   default: "allow",
-  lenient: "allow",
-  permissive: "allow",
+  auto: "allow",
 };
-/** The neutral defer: permissive auto-passes a benign/neutral doubt. */
+/** The neutral defer: auto auto-passes a benign/neutral doubt. */
 const NEUTRAL_DEFER_LADDER: ModeKinds = {
   strict: "deny",
   default: "defer",
-  lenient: "defer",
-  permissive: "allow",
+  auto: "allow",
 };
 
 describe("A — ban wall / block boundary / uncovered duty deny → soft tier (a model never hard-denies)", () => {
@@ -100,7 +92,7 @@ describe("A — ban wall / block boundary / uncovered duty deny → soft tier (a
     expect(parsed.riskLevel).toBe("critical");
   });
 
-  it("denies in strict and permissive, asks in default and lenient", () => {
+  it("denies in strict and auto, asks in default", () => {
     for (const [mode, kind] of Object.entries(emitPerMode(parsed)) as Array<[Mode, Kind]>) {
       expect(kind, `${mode} must map a model deny by the soft ladder`).toBe(
         MODEL_DENY_LADDER[mode],
@@ -156,19 +148,14 @@ describe("B — unestablished safety facts / costly-consequence confirms / duty 
     expect(parsed.lean).toBe("deny");
   });
 
-  it.each(DANGER_DEFERRALS)(
-    "$name asks in default and lenient, denies in strict and permissive",
-    ({ output }) => {
-      const emitted = emitPerMode(parseVerdictObject(output, 100));
-      for (const [mode, kind] of Object.entries(emitted) as Array<[Mode, Kind]>) {
-        // Permissive has no ask path for danger: a danger confirmation denies
-        // there rather than auto-passing.
-        expect(kind, `${mode} must map a deny-leaned defer to deny`).toBe(
-          DANGER_DEFER_LADDER[mode],
-        );
-      }
-    },
-  );
+  it.each(DANGER_DEFERRALS)("$name asks in default, denies in strict and auto", ({ output }) => {
+    const emitted = emitPerMode(parseVerdictObject(output, 100));
+    for (const [mode, kind] of Object.entries(emitted) as Array<[Mode, Kind]>) {
+      // auto has no ask path for danger: a danger confirmation denies
+      // there rather than auto-passing.
+      expect(kind, `${mode} must map a deny-leaned defer to deny`).toBe(DANGER_DEFER_LADDER[mode]);
+    }
+  });
 });
 
 describe("C — CWD read-only inspection / anchor-covered ordinary action → allow, untransformed", () => {
@@ -215,7 +202,7 @@ describe("D — ordinary established action the anchor leaves uncovered → neut
     expect(parsed.lean).toBeUndefined();
   });
 
-  it("denies in strict, asks in default and lenient, passes in permissive", () => {
+  it("denies in strict, asks in default, passes in auto", () => {
     const emitted = emitPerMode(parsed);
     for (const [mode, kind] of Object.entries(emitted) as Array<[Mode, Kind]>) {
       expect(kind, `${mode} must map a neutral defer to its ladder row`).toBe(

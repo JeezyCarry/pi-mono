@@ -11,11 +11,11 @@ export const LINK_NAME = "ai-guard";
  * ladder, strictest first. Only the deterministic screen hard-denies; a
  * model deny is always soft, whatever `riskLevel` it reports — that field is
  * an audit label and never picks the tier. The mode maps the model's deny
- * and its own uncertainty against the ladder. The ctrl+alt+g cycle
- * visits `default`, `lenient`, and `permissive`; only `strict` is set
- * explicitly (`/ai-guard mode strict`).
+ * and its own uncertainty against the ladder. The ctrl+alt+g cycle visits
+ * `default` and `auto`; only `strict` is set explicitly (`/ai-guard mode
+ * strict`).
  */
-export const MODE_VALUES = ["strict", "default", "lenient", "permissive"] as const;
+export const MODE_VALUES = ["strict", "default", "auto"] as const;
 
 /** How the link disposes model deny/defer verdicts (see the `mode` field comment). */
 export type Mode = (typeof MODE_VALUES)[number];
@@ -261,21 +261,10 @@ const configBaseSchema = z.object({
   classifier: classifierThresholdsSchema.default(CLASSIFIER_THRESHOLD_DEFAULTS),
 
   // How the link disposes the reviewer's non-allow verdicts (the leniency
-  // ladder, strictest first). Only the deterministic screen hard-denies: a
-  // model deny is soft whatever riskLevel it reports, and riskLevel is an
-  // audit label that never picks the tier. The model's own uncertainty is
-  // split by its lean field (benign-leaned doubts, neutral doubts,
-  // danger-leaned doubts):
-  // - "strict": everything denies — the reviewer's allow is the only pass.
-  // - "default": you judge every flag — every model deny and every
-  //   unresolved doubt (any lean) asks; only the screen's deny blocks.
-  // - "lenient": benign doubts pass; neutral doubts, danger-leaned doubts,
-  //   and every model deny ask.
-  // - "permissive": benign and neutral doubts pass; danger-leaned doubts
-  //   and every deny deny (permissive has no ask path for danger).
-  // Reviewer machinery failures never map to allow in any mode: they deny
-  // under "strict" and "permissive" (a broken reviewer must not rubber-
-  // stamp), and defer under the other two.
+  // ladder, strictest first): two cut lines on `SUSPICION_ORDER`, per-mode
+  // blurbs in `MODE_BLURBS`, reviewer-failure targets in each mode's
+  // `onReviewFailure`. The per-mode rows live in `README.md`'s mode table,
+  // the one operator-facing authority — this comment only points at it.
   mode: z.enum(MODE_VALUES).default("default"),
 
   // Ambient (review-loop) notification threshold. Levels mirror the TUI's

@@ -181,7 +181,7 @@ describe("notify skeleton — builder-rendered lines", () => {
       uncertainDenyReason("strict"),
       withAgentInstruction("secrets in the command", "content"),
       approvalNotice({ kind: "reviewer" }, { kind: "fresh", latencyMs: 1200 }),
-      approvalNotice({ kind: "mode", mode: "lenient" }, { kind: "cached" }),
+      approvalNotice({ kind: "mode", mode: "auto" }, { kind: "cached" }),
       escalationMessage({ kind: "deny", reason: "secrets in the command" }, "high", "denied"),
       escalationMessage({ kind: "deny", reason: "secrets in the command" }, undefined, "asked"),
       failOpenNotice(),

@@ -94,7 +94,7 @@ export class CircuitBreaker {
   /**
    * Record a deny-EQUIVALENT — a denial the agent experienced although the
    * model never pronounced one: machinery failures denied by the strict /
-   * permissive lanes (the reviewer could not even produce a verdict), and
+   * auto lanes (the reviewer could not even produce a verdict), and
    * strict's model-defer→deny mapping (a wavering reviewer becomes a
    * denial stream). Deny-equivalents credit the RECOVERABLE tier only, so
    * a broken or persistently uncertain reviewer can trip the
@@ -165,7 +165,7 @@ export function consumeTrip(breaker: CircuitBreaker, cb: CircuitBreakerConfig): 
  * The model lane's per-ask accounting step: record the model's real
  * verdict, then credit the recoverable tier when the emitted verdict was
  * a machinery denial — the reviewer never produced a verdict (strict and
- * permissive deny machinery; a broken reviewer must still be able to trip
+ * auto deny machinery; a broken reviewer must still be able to trip
  * the breaker like a miscalibrated one). The two-tier doctrine lives
  * beside the breaker: model denies feed both tiers, machinery failures
  * feed consecutive only, mapped verdicts don't change what was recorded.

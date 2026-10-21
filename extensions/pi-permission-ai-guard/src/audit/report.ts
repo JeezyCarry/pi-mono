@@ -132,7 +132,7 @@ export function buildReportCandidates(
     if (refused(e)) {
       group.refused = true;
     } else if (e.verdict === "defer" && e.emittedVerdict === "allow") {
-      // A mode auto-approved the ask: the operator never saw it, so it is not
+      // A mode allowed the ask without asking: the operator never saw it, so it is not
       // an occurrence. Unlike a refusal it does not disqualify the group.
       continue;
     } else {

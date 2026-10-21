@@ -95,7 +95,7 @@ export interface EnumSettingSpec {
   readonly cycleValues?: readonly string[];
   /**
    * A value that renders in warning red in the FOOTER status fragment —
-   * e.g. the mode whose mapping auto-approves what the reviewer didn't.
+   * e.g. the mode whose mapping allows what the reviewer didn't.
    * The command surfaces (menu label, picker entry, change notification)
    * stay plain text. Emphasizing is presentation-only: matching and
    * persistence always use the value's plain text.
@@ -276,7 +276,7 @@ export class RuntimeSettings {
       if (first === undefined) return;
       const current = this.#effective(spec);
       // An effective value outside the cycle subset (e.g. `strict` or
-      // `permissive`) anchors to the subset's start on the next press.
+      // `auto`) anchors to the subset's start on the next press.
       const index = current === undefined ? -1 : values.indexOf(current);
       const next = values[index + 1] ?? first;
       this.#apply(spec, next, ctx);
@@ -299,8 +299,8 @@ export class RuntimeSettings {
 
   /**
    * Sync the footer status line with the effective settings. Only
-   * deviations render: the value itself (`lenient`), with `(session)` while
-   * an override is active (`lenient (session)`). A spec whose effective value
+   * deviations render: the value itself (`auto`), with `(session)` while
+   * an override is active (`auto (session)`). A spec whose effective value
    * is its {@link EnumSettingSpec.hiddenValue} contributes nothing, and an
    * all-hidden result clears the line — the shipped baseline (`default`)
    * never occupies a footer row.

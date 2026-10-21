@@ -34,9 +34,9 @@ describe("effectiveOverride — the per-field rule", () => {
   });
 
   it("an absent key falls back to the config value", () => {
-    const config = configSchema.parse({ provider: "t", model: "m", mode: "lenient" });
-    expect(effectiveOverride({}, config, "mode")).toBe("lenient");
-    expect(effectiveOverride({ notifyLevel: "error" }, config, "mode")).toBe("lenient");
+    const config = configSchema.parse({ provider: "t", model: "m", mode: "strict" });
+    expect(effectiveOverride({}, config, "mode")).toBe("strict");
+    expect(effectiveOverride({ notifyLevel: "error" }, config, "mode")).toBe("strict");
   });
 
   it("an undefined override is not a value — the config still wins (undefined-present tolerance)", () => {
@@ -53,7 +53,7 @@ describe("effectiveOverride — the per-field rule", () => {
     // can genuinely be absent — a reader before the config loads.
     const config = makeConfig();
     expect(effectiveOverride({}, config, "notifyLevel")).toBe("info");
-    const absent = effectiveOverride({ mode: "permissive" }, undefined, "notifyLevel");
+    const absent = effectiveOverride({ mode: "auto" }, undefined, "notifyLevel");
     expect(absent).toBeUndefined();
   });
 });
@@ -69,9 +69,9 @@ describe("effectiveConfig — the save-snapshot projection", () => {
   it("skips undefined override keys — a reset never shadows the config into the saved layer", () => {
     // The bug this projection exists to make impossible: a stale
     // `mode: undefined` key writing config.mode away as undefined.
-    const config = configSchema.parse({ provider: "t", model: "m", mode: "lenient" });
+    const config = configSchema.parse({ provider: "t", model: "m", mode: "strict" });
     const effective = effectiveConfig(config, { mode: undefined });
-    expect(effective.mode).toBe("lenient");
+    expect(effective.mode).toBe("strict");
   });
 
   it("carries every non-override config field untouched (hole snapshot, not a sparse delta)", () => {

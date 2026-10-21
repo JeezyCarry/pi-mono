@@ -131,7 +131,7 @@ describe("breaker accounting steps", () => {
 
   it("accountModelOutcome records real denies into both tiers regardless of the emitted mapping", () => {
     const s = new CircuitBreaker();
-    // permissive maps a soft deny to allow — the recording keeps the model's deny.
+    // auto maps a soft deny to allow — the recording keeps the model's deny.
     accountModelOutcome(s, "deny", { kind: "allow" }, undefined);
     expect(s.trippedTier({ consecutive: 1, total: 20, verdict: "deny" })).toBeDefined();
     expect(s.trippedTier({ consecutive: 2, total: 1, verdict: "deny" })).toBeDefined();

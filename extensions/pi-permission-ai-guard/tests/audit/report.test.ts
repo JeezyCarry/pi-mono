@@ -152,7 +152,7 @@ describe("buildReportCandidates", () => {
   });
 
   it("excludes groups whose mode escalated a defer into an allow", () => {
-    // The reviewer declined to decide and the mode auto-approved: the operator
+    // The reviewer declined to decide and the mode allowed without asking: the operator
     // never saw it, so a rule from such a group would allow what the reviewer
     // refused to judge.
     const entries = [

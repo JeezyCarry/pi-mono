@@ -93,9 +93,9 @@
     },
     "mode": {
       "type": "string",
-      "enum": ["strict", "default", "lenient", "permissive"],
+      "enum": ["strict", "default", "auto"],
       "default": "default",
-      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Only the deterministic screen hard-denies: a model deny is soft whatever riskLevel it reports, and riskLevel is an audit label that never picks the tier. The model's own uncertainty is split by its lean (benign-leaned, neutral, danger-leaned): 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger (soft denies and every unresolved doubt ask); 'lenient' — benign doubts pass, neutral doubts, danger-leaned doubts, and soft denies ask; 'permissive' — benign and neutral doubts pass, danger-leaned doubts and every deny deny (permissive has no ask path for danger, so a danger confirmation blocks rather than auto-approving). Reviewer machinery failures never map to allow: they deny under strict and permissive, and defer otherwise."
+      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Only the deterministic screen hard-denies: a model deny is soft whatever riskLevel it reports, and riskLevel is an audit label that never picks the tier. The model's own uncertainty is split by its lean (benign-leaned, neutral, danger-leaned): 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger, so soft denies and every unresolved doubt ask; 'auto' — no prompt is ever raised, benign and neutral doubts pass, danger-leaned doubts and every deny deny. 'auto' is not the yolo mode of Codex, Claude Code, or Gemini CLI: those neither ask nor block, while auto still blocks every deny and every danger-leaned doubt. Reviewer machinery failures never map to allow: they deny under strict and auto, and defer under default."
     },
     "notifyLevel": {
       "type": "string",
@@ -106,7 +106,7 @@
     "notifyApprovals": {
       "type": "boolean",
       "default": false,
-      "description": "Opt in to info-level notices when AI Guard emits an allow (fresh or cached). Fresh reviews carry their total review cost in a duration tail; cache replays say (cached). Mapped allows name the mode (`mode (permissive) auto-approved`); path and external_directory families are excluded because the host caps their allows to defer. Subject to notifyLevel; commands and targets are never shown."
+      "description": "Opt in to info-level notices when AI Guard emits an allow (fresh or cached). Fresh reviews carry their total review cost in a duration tail; cache replays say (cached). Mapped allows name the mode (`mode (auto) allowed without asking`); path and external_directory families are excluded because the host caps their allows to defer. Subject to notifyLevel; commands and targets are never shown."
     },
     "circuitBreaker": {
       "type": "object",

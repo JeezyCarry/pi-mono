@@ -92,13 +92,13 @@ describe("opt-in approval notices", () => {
         config: {
           ...baseConfig,
           notifyApprovals: true,
-          mode: "permissive",
+          mode: "auto",
           cache: { maxEntries: 8 },
         },
         notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
-            // A neutral model defer is the row permissive still loosens to
+            // A neutral model defer is the row auto still loosens to
             // allow (a soft deny now denies there) — the mode-mapped voice.
             { type: "text", text: '{"verdict":"defer","reason":"which one?"}' },
           ]),
@@ -112,7 +112,7 @@ describe("opt-in approval notices", () => {
     expect(notifications[0]![0]).toBe(failOpenNotice());
     expect(notifications[0]![1]).toBe("warning");
     // The approval notice names the mode and a cost, whatever the latency was.
-    expect(notifications[1]![0]).toContain("permissive");
+    expect(notifications[1]![0]).toContain("auto");
     expect(notifications[1]![0]).toMatch(/[\d.]+m?s/);
     expect(notifications[1]![1]).toBe("info");
     // Defers are never cached: the repeated ask re-calls the model and maps
@@ -123,7 +123,7 @@ describe("opt-in approval notices", () => {
     });
     expect(notifications).toHaveLength(3);
     expect(notifications.at(-1)).toEqual([
-      expect.stringMatching(/^mode \(permissive\) auto-approved this request \([\d.]+m?s\)$/),
+      expect.stringMatching(/^mode \(auto\) allowed this request without asking \([\d.]+m?s\)$/),
       "info",
     ]);
   });

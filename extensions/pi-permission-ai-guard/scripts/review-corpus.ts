@@ -14,7 +14,7 @@
  */
 
 export type VerdictKind = "allow" | "deny" | "defer";
-export type Mode = "strict" | "default" | "lenient" | "permissive";
+export type { Mode } from "#src/config/config-schema.ts";
 
 export interface AbCase {
   id: string;

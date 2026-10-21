@@ -41,7 +41,7 @@ The directional inclination on a defer (`allow`, `deny`, or omitted). A routing 
 _Avoid_: treating the lean as the verdict
 
 **Mode**:
-The leniency ladder for non-allow verdicts, strictest first: `strict`, `default`, `lenient`, `permissive`.
+The leniency ladder for non-allow verdicts, strictest first: `strict`, `default`, `auto`.
 
 **Hard deny / Soft deny**:
 The deny split by authority. A screen deny is hard — no mode lifts it. A model deny is soft — it maps against the ladder like any other doubt. The model's self-reported risk level is audit evidence and never picks the tier.
@@ -75,4 +75,4 @@ The blind, per-case statement of what actually happens if the command runs: the 
 The expectation bucket a case lands in by its impact record alone: `harmless`, `likely_fine`, `unclear`, `needs_human`, `screen_only`.
 
 **Consequence**:
-The scoring headline: how many cases end a run with the same user-visible result their impact record requires, counted across all four modes.
+The scoring headline: how many cases end a run with the same user-visible result their impact record requires, counted across all three modes.

@@ -24,28 +24,23 @@ describe("MODE_TABLE", () => {
 
   it("never maps machinery failures to allow in any mode", () => {
     for (const mode of MODE_VALUES) {
-      expect(MODE_TABLE[mode].machinery).not.toBe("allow");
+      expect(MODE_TABLE[mode].onReviewFailure).not.toBe("allow");
     }
   });
 });
 
 describe("derived cycle facts", () => {
-  it("the casual cycle visits default, lenient, and permissive, in ladder order", () => {
-    expect(CYCLE_MODE_VALUES).toEqual(["default", "lenient", "permissive"]);
-  });
-
-  it("exactly one value renders in warning red, and it is permissive", () => {
-    expect(EMPHASIZED_MODE).toBe("permissive");
-    expect(MODE_VALUES.filter((m) => MODE_TABLE[m].facts.emphasize)).toEqual(["permissive"]);
+  it("the casual cycle visits default then auto, in ladder order", () => {
+    expect(CYCLE_MODE_VALUES).toEqual(["default", "auto"]);
   });
 
   it("the cycle description is generated from the cycle values", () => {
-    expect(CYCLE_DESCRIPTION).toBe("default → lenient → permissive");
+    expect(CYCLE_DESCRIPTION).toBe("default → auto");
   });
 
   it("the casual cycle never includes strict (the fail-closed automation rung)", () => {
     expect(CYCLE_MODE_VALUES).not.toContain("strict");
-    // permissive joined the cycle by operator choice — the red footer
+    // auto joined the cycle by operator choice — the red footer
     // emphasis is the guardrail that makes the stop visible.
   });
 });
@@ -71,7 +66,7 @@ describe("modeWarnings", () => {
   };
 
   it("warns on the two extremes combined with a breaker forced to defer", () => {
-    for (const mode of ["strict", "permissive"] as const) {
+    for (const mode of ["strict", "auto"] as const) {
       const config = {
         ...base,
         mode,
@@ -101,5 +96,21 @@ describe("modeWarnings", () => {
         circuitBreaker: { consecutive: 3, total: 20, verdict: "defer" as const },
       }),
     ).toEqual([]);
+  });
+
+  it("the red value is derived: the one cycled mode with no ask band", () => {
+    expect(EMPHASIZED_MODE).toBe("auto");
+    expect(CYCLE_MODE_VALUES).toContain(EMPHASIZED_MODE);
+    // The defining property, observed through the ladder's own warning:
+    // an ask-free mode paired with a deferring breaker warns, a mode with
+    // an ask band stays silent — so the red value is the cycled mode that
+    // never asks, whichever literal it happens to be.
+    const breakerDefer = { consecutive: 3, total: 20, verdict: "defer" as const };
+    const warned = (mode: (typeof MODE_VALUES)[number]): boolean =>
+      modeWarnings({ ...base, mode, circuitBreaker: breakerDefer }).length > 0;
+    expect(warned(EMPHASIZED_MODE!)).toBe(true);
+    expect(CYCLE_MODE_VALUES.filter((m) => m !== EMPHASIZED_MODE).map(warned)).toEqual(
+      CYCLE_MODE_VALUES.filter((m) => m !== EMPHASIZED_MODE).map(() => false),
+    );
   });
 });

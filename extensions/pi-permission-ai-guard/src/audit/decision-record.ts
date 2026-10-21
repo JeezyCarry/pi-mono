@@ -469,9 +469,9 @@ export const DecisionRecord = {
  * verdict to a different emitted kind. The record's `verdict` keeps the
  * MODEL's judgment (with its reason and riskLevel); `emittedVerdict` names
  * what the link actually returned, and `mode` names which mode
- * mapped it (the default/lenient lanes route flags to human review,
- * the strict lane tightens uncertainty to denial, permissive denies every
- * deny and every danger-leaned doubt, lenient passes only benign-leaned
+ * mapped it (the default lane routes flags to human review, the strict
+ * lane tightens uncertainty to denial, auto denies every deny and every
+ * danger-leaned doubt, and passes only benign-leaned
  * uncertainty — the annotation covers every direction).
  *
  * @param record - The decision record for the model or cache-hit gate.

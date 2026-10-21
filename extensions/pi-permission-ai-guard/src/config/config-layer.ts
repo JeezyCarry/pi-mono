@@ -7,7 +7,7 @@
  *
  * Fail-safe: a malformed file is skipped with a recorded issue, an invalid
  * merged config yields `{ config: undefined }` (no registration — a config
- * error degrades to no auto-review, never to a wrong deny), and a save
+ * error degrades to no reviewer at all, never to a wrong deny), and a save
  * never writes an invalid snapshot.
  */
 
@@ -54,12 +54,12 @@ export type ConfigOutcome =
   | "loaded"
   /** No config anywhere (issues empty); distinct from a broken file. */
   | "none"
-  /** Config exists but unusable (issues explain why); fail-safe, no auto-review. */
+  /** Config exists but unusable (issues explain why); fail-safe, no reviewer. */
   | "failed";
 
 /** Result of loading and validating the layered config. */
 export interface LoadConfigResult {
-  /** Validated config, or absent if loading failed (fail-safe: no auto-review). */
+  /** Validated config, or absent if loading failed (fail-safe: no reviewer). */
   config?: AiGuardConfig;
   /** All issues encountered (malformed files, schema violations). */
   issues: ConfigIssue[];
@@ -916,12 +916,58 @@ function retiredSpellingIssues(
 }
 
 /**
+ * The retired mode values, rewritten in place before validation.
+ *
+ * `permissive` only changed its name — it is now `auto`, same cuts, same
+ * on-review-failure target. `lenient` was removed: its one distinguishing
+ * rung (a benign-leaned doubt passing) is expressible as a custom mode, so
+ * the value falls back to the resting mode and the issue points there.
+ */
+const RETIRED_MODE_VALUES: Readonly<Record<string, { to: string; message: string }>> = {
+  permissive: {
+    to: "auto",
+    message: 'mode "permissive" was renamed to "auto"; it behaves the same',
+  },
+  lenient: {
+    to: "default",
+    message:
+      'mode "lenient" was removed; running "default" instead. Its old distinguishing rung (a benign-leaned doubt passing) will be expressible as a custom mode; until then "default" asks on it',
+  },
+};
+
+/**
+ * Rewrite a retired `mode` value and report it.
+ *
+ * @param merged - The merged raw config, rewritten in place.
+ * @param issues - The issue accumulator.
+ * @param global - The global layer read (for the issue's source path).
+ * @param project - The project layer read (for the issue's source path).
+ */
+function migrateModeValue(
+  merged: Record<string, unknown>,
+  issues: ConfigIssue[],
+  global: LayerReadResult,
+  project: LayerReadResult,
+): void {
+  const value = merged.mode;
+  if (typeof value !== "string") return;
+  const retired = RETIRED_MODE_VALUES[value];
+  if (retired === undefined) return;
+  merged.mode = retired.to;
+  issues.push({
+    path: "mode",
+    message: retired.message,
+    sourcePath: retiredSpellingSourcePath("mode", global, project),
+  });
+}
+
+/**
  * Load the layered config: global then project (`config.jsonc` wins),
  * deep-merged (project overrides), `${VAR}` refs expanded per layer,
  * validated against the zod schema. The project layer is skipped when
  * untrusted — a present-but-ignored file is named as an issue so the
  * fail-safe notice doesn't claim no config exists. Fail-safe throughout:
- * an unusable layer degrades to no auto-review, never to a wrong deny.
+ * an unusable layer degrades to no reviewer, never to a wrong deny.
  *
  * @param env - Paths and project trust for layer resolution.
  * @param vars - The variable source for env-ref expansion.
@@ -972,6 +1018,12 @@ export function loadAiGuardConfig(
     global.value && project.value
       ? deepMerge(global.value, project.value)
       : (global.value ?? project.value ?? {});
+
+  // A retired mode value is rewritten before validation: `permissive` only
+  // changed its name, while `lenient` was removed and falls back to the
+  // resting mode. Both report a named migration issue, so the enum's
+  // generic rejection never reaches the operator.
+  migrateModeValue(merged, issues, global, project);
 
   // A retired spelling fails the load even where zod would strip it silently
   // (an unknown top-level key is dropped, not rejected): the operator's

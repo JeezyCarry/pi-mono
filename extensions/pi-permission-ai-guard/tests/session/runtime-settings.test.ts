@@ -11,7 +11,7 @@ import { type Mock, describe, expect, it, vi } from "vitest";
 import type { LogEntry } from "#src/audit/decision-log-reader.ts";
 import type { SaveConfigFn } from "#src/config/config-layer.ts";
 import { MODE_VALUES, configSchema } from "#src/config/config-schema.ts";
-import { MODE_BLURBS } from "#src/config/mode-table.ts";
+import { CYCLE_MODE_VALUES, EMPHASIZED_MODE, MODE_BLURBS } from "#src/config/mode-table.ts";
 import type { SessionOverrides } from "#src/config/session-overrides.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import type { BreakerTier } from "#src/review/circuit-breaker.ts";
@@ -56,8 +56,8 @@ const SPECS: readonly EnumSettingSpec[] = [
     values: [...MODE_VALUES],
     description: "how denials and uncertainty are disposed",
     hiddenValue: "default",
-    cycleValues: ["default", "lenient", "permissive"],
-    highlightValue: "permissive",
+    cycleValues: CYCLE_MODE_VALUES,
+    highlightValue: EMPHASIZED_MODE,
     optionDetails: MODE_BLURBS,
   },
 ];
@@ -160,12 +160,12 @@ describe("RuntimeSettings — command", () => {
   it("the direct form applies a value: override + persist + notify + footer", async () => {
     const { settings, overrides, appendEntry, notify } = makeSettings();
     const ctx = makeUiCtx();
-    await settings.command.handler("mode lenient", ctx);
+    await settings.command.handler("mode strict", ctx);
 
-    expect(overrides.mode).toBe("lenient");
-    expect(appendEntry).toHaveBeenCalledWith("ai-guard-setting", { mode: "lenient" });
-    expectNotified(notify, { level: "info", contains: ["lenient", "session"] });
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "lenient (session)");
+    expect(overrides.mode).toBe("strict");
+    expect(appendEntry).toHaveBeenCalledWith("ai-guard-setting", { mode: "strict" });
+    expectNotified(notify, { level: "info", contains: ["strict", "session"] });
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "strict (session)");
   });
 
   it("reset clears the override, persists null, and shows the config default", async () => {
@@ -185,9 +185,7 @@ describe("RuntimeSettings — command", () => {
     appendEntry.mockImplementation(() => {
       throw new Error("session file is read-only");
     });
-    await expect(settings.command.handler("mode lenient", makeUiCtx())).rejects.toThrow(
-      "read-only",
-    );
+    await expect(settings.command.handler("mode auto", makeUiCtx())).rejects.toThrow("read-only");
     expect(overrides.mode).toBeUndefined();
   });
 
@@ -199,7 +197,7 @@ describe("RuntimeSettings — command", () => {
 
     expect(overrides.mode).toBeUndefined();
     expect(appendEntry).not.toHaveBeenCalled();
-    expectNotified(notify, { level: "error", contains: ["yolo", "lenient"] });
+    expectNotified(notify, { level: "error", contains: ["yolo", "auto"] });
     expect(notify).toHaveBeenCalledWith(
       'unknown command "surfaces" (mode, save-config, breaker, report, denied)',
       "error",
@@ -209,7 +207,7 @@ describe("RuntimeSettings — command", () => {
   it("without an active session warns instead of crashing", async () => {
     const { settings, notify } = makeSettings({}, { noSession: true });
     const ctx = makeUiCtx();
-    await settings.command.handler("mode lenient", ctx);
+    await settings.command.handler("mode auto", ctx);
     expect(notify).toHaveBeenCalledWith("no active session (config not loaded)", "warning");
   });
 
@@ -414,8 +412,8 @@ describe("RuntimeSettings — command", () => {
     );
     expect(overrides.mode).toBeUndefined();
 
-    await settings.command.handler("mode lenient", noUi);
-    expect(overrides.mode).toBe("lenient");
+    await settings.command.handler("mode auto", noUi);
+    expect(overrides.mode).toBe("auto");
   });
 });
 
@@ -429,8 +427,7 @@ describe("RuntimeSettings — completions", () => {
     expect(completions("mode ")).toEqual([
       { value: "strict", label: "strict" },
       { value: "default", label: "default" },
-      { value: "lenient", label: "lenient" },
-      { value: "permissive", label: "permissive" },
+      { value: "auto", label: "auto" },
       { value: "reset", label: "reset" },
     ]);
     // Save verbs complete at the TOP level, not inside a setting.
@@ -498,28 +495,26 @@ describe("RuntimeSettings — shortcut", () => {
     const { settings, overrides } = makeSettings();
     const ctx = makeUiCtx();
 
-    // The cycle visits the casual subset (default → lenient →
-    // permissive), one press loosens one notch, and the wrap returns to
-    // default — only strict stays reachable via the command.
+    // The cycle visits the casual subset (default → auto), one press
+    // loosens one notch, and the wrap returns to default — only strict
+    // stays reachable via the command.
     settings.shortcut.handler(ctx);
-    expect(overrides.mode).toBe("lenient");
-    settings.shortcut.handler(ctx);
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("auto");
     settings.shortcut.handler(ctx);
     expect(overrides.mode).toBe("default");
   });
 
   it("cycles from an override, one notch looser", () => {
-    const { settings, overrides } = makeSettings({ mode: "lenient" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     settings.shortcut.handler(makeUiCtx());
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("default");
   });
 
   it("a value outside the cycle subset anchors to the subset start", () => {
     const { settings, overrides } = makeSettings({ mode: "strict" });
     settings.shortcut.handler(makeUiCtx());
     expect(overrides.mode).toBe("default");
-    const { settings: s2, overrides: o2 } = makeSettings({ mode: "permissive" });
+    const { settings: s2, overrides: o2 } = makeSettings({ mode: "auto" });
     s2.shortcut.handler(makeUiCtx());
     expect(o2.mode).toBe("default");
   });
@@ -540,7 +535,7 @@ describe("RuntimeSettings — restore + footer", () => {
   });
 
   it("restore with no entries clears any stale override", () => {
-    const { settings, overrides } = makeSettings({ mode: "lenient" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     settings.restore({ getBranch: () => [] });
     expect(overrides.mode).toBeUndefined();
   });
@@ -553,13 +548,10 @@ describe("RuntimeSettings — restore + footer", () => {
   });
 
   it("syncFooter renders the highlighted value in warning red", () => {
-    const { settings } = makeSettings({ mode: "permissive" });
+    const { settings } = makeSettings({ mode: "auto" });
     const ctx = makeUiCtx();
     settings.syncFooter(ctx);
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(
-      "ai-guard",
-      "\x1b[1;31mpermissive (session)\x1b[0m",
-    );
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "\x1b[1;31mauto (session)\x1b[0m");
   });
 
   it("syncFooter hides the default mode — the line clears instead of showing the baseline", () => {
@@ -608,7 +600,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
       created: false,
       changed: true,
     }));
-    const { settings, notify } = makeSettings({ mode: "lenient" }, { saveConfig });
+    const { settings, notify } = makeSettings({ mode: "auto" }, { saveConfig });
     const ctx = makeUiCtx();
 
     await settings.command.handler("save-config global", ctx);
@@ -618,7 +610,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
     expect(saveConfig).toHaveBeenCalledTimes(1);
     const [target, config] = saveConfig.mock.calls[0]!;
     expect(target).toBe("global");
-    expect(config.mode).toBe("lenient"); // override won over the snapshot
+    expect(config.mode).toBe("auto"); // override won over the snapshot
     expect(config.provider).toBe("test"); // other fields intact
     expectNotified(notify, { level: "info", contains: ["cfg-global.json"] });
   });
@@ -696,7 +688,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
       created: false,
       changed: true,
     }));
-    const { settings, overrides } = makeSettings({ mode: "lenient" }, { saveConfig });
+    const { settings, overrides } = makeSettings({ mode: "auto" }, { saveConfig });
     const ctx = makeUiCtx();
 
     await settings.command.handler("mode reset", ctx); // deletes the override
@@ -707,7 +699,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
   });
 
   it("reset deletes the override key outright (present ⇒ defined invariant)", () => {
-    const { settings, overrides } = makeSettings({ mode: "lenient" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     const ctx = makeUiCtx();
     void settings.command.handler("mode reset", ctx);
     expect("mode" in overrides).toBe(false);
@@ -799,34 +791,34 @@ describe("RuntimeSettings — save to config layer actions", () => {
 });
 
 describe("RuntimeSettings — picker stays plain for the highlighted value", () => {
-  it("applies a plain permissive pick and notifies at warning level, undecorated", async () => {
+  it("applies a plain auto pick and notifies at warning level, undecorated", async () => {
     const { settings, overrides, notify } = makeSettings();
-    const ctx = makeUiCtx("permissive — benign and neutral doubts pass; danger and denials block");
+    const ctx = makeUiCtx("auto — benign and neutral doubts pass; danger and denials block");
     await settings.command.handler("mode", ctx);
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("auto");
     // The command surface is plain text — the warning-red emphasis is
     // footer-only. The severity bump stays.
-    expectNotified(notify, { level: "warning", contains: ["permissive", "session"] });
+    expectNotified(notify, { level: "warning", contains: ["auto", "session"] });
   });
 });
 
 describe("RuntimeSettings — settings-menu labels stay plain", () => {
   it("renders the mode label undecorated and resolves a plain pick", async () => {
-    const { settings, overrides } = makeSettings({ mode: "permissive" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     const menuOptions: string[][] = [];
     let calls = 0;
     const ctx = makeUiCtx();
     ctx.ui.select.mockImplementation(async (_title, options) => {
       if (calls++ === 0) {
         menuOptions.push(options);
-        return "mode — permissive (session)";
+        return "mode — auto (session)";
       }
-      return "permissive";
+      return "auto";
     });
     await settings.command.handler("", ctx);
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("auto");
     // The menu label is plain — the warning-red emphasis is footer-only.
-    expect(menuOptions[0]![0]).toBe("mode — permissive (session)");
+    expect(menuOptions[0]![0]).toBe("mode — auto (session)");
   });
 
   it("the menu lists every entry — settings, actions, and the read-only panels alike", async () => {

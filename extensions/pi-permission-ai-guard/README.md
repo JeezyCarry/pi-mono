@@ -8,7 +8,7 @@ It is a consumer of [`@gotgenes/pi-permission-system`](https://github.com/gotgen
 
 Each model review call sends **only stripped context** (user messages + tool call names), not the full transcript. Assistant text and tool results, the token-heaviest parts, are discarded, with minimal impact on verdict quality.
 
-Two structural choices distinguish the reviewer from a plain classifier. The verdict **lean never feeds back** into the model's own context (each review is stateless, so an agent cannot anchor the reviewer toward its own history), and `strict` is **lean-inert** (it denies every non-allow). `permissive` is ask-free instead: the lean decides between allow and deny there, so a danger-leaned doubt blocks rather than auto-flowing into an allow. This answers the classifier drift in Anthropic's [auto-mode writeup](https://www.anthropic.com/engineering/claude-code-auto-mode), where consent-shaped evidence in history was the top failure mode: structure instead of prompt-tuning.
+Two structural choices distinguish the reviewer from a plain classifier. The verdict **lean never feeds back** into the model's own context (each review is stateless, so an agent cannot anchor the reviewer toward its own history), and `strict` is **lean-inert** (it denies every non-allow). `auto` is ask-free instead: the lean decides between allow and deny there, so a danger-leaned doubt blocks rather than auto-flowing into an allow. This answers the classifier drift in Anthropic's [auto-mode writeup](https://www.anthropic.com/engineering/claude-code-auto-mode), where consent-shaped evidence in history was the top failure mode: structure instead of prompt-tuning.
 
 ## How it works
 
@@ -107,7 +107,7 @@ Chain facts that shape how this link behaves:
 | `instructions`    | string\|object\|null                                                    | `null`                                    | Custom safety rules. String = broadcast append to both lanes. Object = per-lane slots (`chat.rules`, `classifier.background` + `classifier.questions`, ids: `ban`, `effect`, `target`, `intent`); `chat.replace: true` swaps the chat built-in rules instead of appending (the classifier lane is append-only). `null` = built-ins |
 | `classifier`      | object                                                                  | see below                                 | Classifier verdict thresholds — pure policy, no transport knobs                                                                                                                                                                                                                                                                    |
 | `fallbacks`       | array                                                                   | `[]`                                      | Ordered backup reviewers in either lane, each with `provider`, `model`, and optional `timeoutMs` and `temperature`                                                                                                                                                                                                                 |
-| `mode`            | `"strict"\|"default"\|"lenient"\|"permissive"`                          | `"default"`                               | Leniency ladder for non-allow verdicts (see below)                                                                                                                                                                                                                                                                                 |
+| `mode`            | `"strict"\|"default"\|"auto"`                                           | `"default"`                               | Leniency ladder for non-allow verdicts (see below)                                                                                                                                                                                                                                                                                 |
 | `notifyLevel`     | `"info"\|"warning"\|"error"\|"off"`                                     | `"info"`                                  | Ambient-notify threshold — the minimum review-loop notify level that still notifies; command feedback is never gated                                                                                                                                                                                                               |
 | `notifyApprovals` | boolean                                                                 | `false`                                   | Show a notice when AI Guard approves a request; requires `notifyLevel: "info"`                                                                                                                                                                                                                                                     |
 | `circuitBreaker`  | object                                                                  | `{consecutive:3,total:20,verdict:"deny"}` | Circuit breaker config (see below)                                                                                                                                                                                                                                                                                                 |
@@ -250,16 +250,16 @@ allow  <  defer (lean: allow)  <  defer (neutral)  <  defer (lean: deny)  <  den
 
 Each mode is two cut lines on that order — an auto-pass band, an ask band, a terminal-deny band. The full matrix:
 
-| Verdict ↓ (suspicion ↑)         | `strict` | `default` | `lenient` | `permissive` |
-| ------------------------------- | -------- | --------- | --------- | ------------ |
-| `allow`                         | allow    | allow     | allow     | allow        |
-| `defer` + `lean: allow`         | deny     | ask       | allow     | allow        |
-| `defer` (neutral)               | deny     | ask       | ask       | allow        |
-| `defer` + `lean: deny`          | deny     | ask       | ask       | deny         |
-| `deny` (model, any `riskLevel`) | deny     | ask       | ask       | deny         |
-| `deny` (deterministic screen)   | deny     | deny      | deny      | deny         |
+| Verdict ↓ (suspicion ↑)         | `strict` | `default` | `auto` |
+| ------------------------------- | -------- | --------- | ------ |
+| `allow`                         | allow    | allow     | allow  |
+| `defer` + `lean: allow`         | deny     | ask       | allow  |
+| `defer` (neutral)               | deny     | ask       | allow  |
+| `defer` + `lean: deny`          | deny     | ask       | deny   |
+| `deny` (model, any `riskLevel`) | deny     | ask       | deny   |
+| `deny` (deterministic screen)   | deny     | deny      | deny   |
 
-The reading per mode: `strict` — the reviewer's allow is the only pass (full fail-closed automation); `default` — you judge every flag except the screen's hard blocks (the resting mode and the onboarding posture — watch the reviewer work, then loosen); `lenient` — neutral doubts, deny-leaning doubts, and soft denies ask you (only benign-leaned doubts pass); `permissive` — only benign and neutral doubts pass; a deny-leaning doubt or a deny is blocked, because permissive has no ask path (a danger confirmation never auto-flows into an allow). `lean` routes a defer between the middle rungs (it moves `lenient` between ask and allow, and `permissive` between allow and deny); it never appears in dialogs or notify lines (the ask is the human's judgment moment) — it lives in the `ai_guard.decision` audit record.
+The reading per mode: `strict` — the reviewer's allow is the only pass (full fail-closed automation); `default` — you judge every flag except the screen's hard blocks (the resting mode and the onboarding posture — watch the reviewer work, then loosen); `auto` — no prompt is ever raised: only benign and neutral doubts pass; a deny-leaning doubt or a deny is blocked, because auto has no ask path (a danger confirmation never auto-flows into an allow). `auto` is not the yolo mode of Codex (`--yolo`), Claude Code (`bypassPermissions`), or Gemini CLI (`yolo`): those neither ask nor block, while `auto` still blocks every deny and every danger-leaned doubt. `lean` routes a defer between the middle rungs (in `auto` it decides between allow and deny); it never appears in dialogs or notify lines (the ask is the human's judgment moment) — it lives in the `ai_guard.decision` audit record.
 
 The classifier lane reaches the same five verdicts through its decision table, so the mode matrix above applies unchanged. What the table emits depends on the readings ([Policy](docs/policy.md) lists the rows):
 
@@ -275,15 +275,15 @@ The classifier lane reaches the same five verdicts through its decision table, s
 
 An escalating fact lifts a `plain` base to `guard`, so a named request still asks. A `block` base defers leaning deny with `riskLevel: critical`.
 
-A model deny never binds: it is soft whatever its `riskLevel`, so `default` and `lenient` ask you and `strict` and `permissive` deny. Only the deterministic screen (`src/review/screen/` — a closed list of literal, unambiguous commands such as `rm -rf /`, raw device writes, `mkfs`, setuid chmod, force-push to a protected branch, reverse shells, `curl | sh`) hard-denies, in every mode, before any model call.
+A model deny never binds: it is soft whatever its `riskLevel`, so `default` asks you and `strict` and `auto` deny. Only the deterministic screen (`src/review/screen/` — a closed list of literal, unambiguous commands such as `rm -rf /`, raw device writes, `mkfs`, setuid chmod, force-push to a protected branch, reverse shells, `curl | sh`) hard-denies, in every mode, before any model call.
 
 Rules that hold in every mode:
 
-- Reviewer machinery failures (model unresolved, auth failed, transcript errors, timeouts, unparseable or empty replies, no review target) **never map to allow**; they deny under `strict` and `permissive`, defer under the other two. A machinery deny stays silent (the deny reason reaches the agent); a machinery-forced defer notifies its classified cause (`reviewer could not complete the review (empty-reply), deferring to you`), on every occurrence.
-- A model deny that holds or escalates notifies in every mode (`reviewer denied this request (risk high); <reason>`), because the host renders no dialog for denials; the notify line is the operator's only copy. A mode-softened deny adds `, asking you to decide instead`. `lenient` passes benign-leaned defers silently and fires a one-time fail-open notice (`lenient auto-approves uncertainty; soft denials still ask`) on the first neutral defer. Reasons go out whole; the audit record keeps the full text.
+- Reviewer machinery failures (model unresolved, auth failed, transcript errors, timeouts, unparseable or empty replies, no review target) **never map to allow**; they deny under `strict` and `auto`, and defer under `default`. A machinery deny stays silent (the deny reason reaches the agent); a machinery-forced defer notifies its classified cause (`reviewer could not complete the review (empty-reply), deferring to you`), on every occurrence.
+- A model deny that holds or escalates notifies in every mode (`reviewer denied this request (risk high); <reason>`), because the host renders no dialog for denials; the notify line is the operator's only copy. A mode-softened deny adds `, asking you to decide instead`. `auto` passes benign-leaned defers silently and neutral ones with a one-time fail-open notice (`this mode allows the request without asking; a danger-leaned doubt and every deny still block`), fired the first time it passes a doubt the reviewer did not resolve to allow. Reasons go out whole; the audit record keeps the full text.
 - The lean never caches: defers are never stored, so an identical benign defer re-reviews every time.
 - A link's `deny` is final — it short-circuits the chain and never reaches a prompt. A `defer` falls through to the interactive permission prompt (the denying terminal in headless sessions — headless mode collapses every defer to deny).
-- `strict`'s one exception: a breaker forced to `defer` still reaches the human (the reviewer-untrusted escape valve); headless sessions resolve those defers to deny either way. `permissive`'s first mapped allow surfaces a one-time notice; the footer renders the value in warning red.
+- `strict`'s one exception: a breaker forced to `defer` still reaches the human (the reviewer-untrusted escape valve); headless sessions resolve those defers to deny either way. `auto`'s first mapped allow surfaces a one-time notice; the footer renders the value in warning red.
 
 Set `"notifyApprovals": true` to see when AI Guard approves a request. Fresh reviews show their total cost (`reviewer approved this request (1.2s)`; mode-mapped allows name the mode), cache replays say `(cached)`. Notices never include the command or target. Off by default.
 
@@ -300,9 +300,9 @@ Effective config layers, in precedence order: **session overrides** (the control
 - `/ai-guard breaker reset` — clear both trip tiers. Pure counter reset: cache and overrides untouched; reviews resume immediately.
 - `/ai-guard report` — suggest permission-rule fragments for repeatedly-reviewed asks (same ask 3+ times, one context, no denies) — copy-paste evidence, never an applied rule.
 - `/ai-guard denied` — browse this session's model denies; pick one to see its full reason.
-- `ctrl+alt+g` — cycle `default → lenient → permissive → default`. Only `strict` stays out of casual reach.
+- `ctrl+alt+g` — cycle `default → auto → default`. Only `strict` stays out of casual reach.
 
-The footer shows deviations from the baseline only (`off · lenient (session)`) and renders `permissive` in warning red, so a silenced pane stays visible. Overrides persist per session in pi's session file (never model context): resume restores them, `/tree` navigation re-derives from the active branch, and a fresh session starts from the config default.
+The footer shows deviations from the baseline only (`off · auto (session)`) and renders `auto` in warning red, so a silenced pane stays visible. Overrides persist per session in pi's session file (never model context): resume restores them, `/tree` navigation re-derives from the active branch, and a fresh session starts from the config default.
 
 ### Circuit breaker
 
@@ -318,7 +318,7 @@ Counter rules: trips and cache hits are never counted as model denials; the brea
 A tripped breaker's forced verdict **bypasses the verdict-rule mapping** (the explicit breaker config is more specific than the general mode):
 
 - `verdict: "deny"` (default): the trip forces a deny (with a breaker reason the agent can act on) — in `strict` mode the session keeps running uninterrupted, fail-closed.
-- `verdict: "defer"`: the trip defers to the human — in `strict` mode this **interrupts on purpose**: the breaker tripping means the reviewer itself is untrusted (a deny storm — miscalibrated or prompt-injected), and this is the designed escape valve. A notification explains the interruption; headless sessions degrade to deny (no human is present). The config loader warns about the `strict` + `defer` and `permissive` + `defer` combinations up front.
+- `verdict: "defer"`: the trip defers to the human — in `strict` mode this **interrupts on purpose**: the breaker tripping means the reviewer itself is untrusted (a deny storm — miscalibrated or prompt-injected), and this is the designed escape valve. A notification explains the interruption; headless sessions degrade to deny (no human is present). The config loader warns about the `strict` + `defer` and `auto` + `defer` combinations up front.
 
 ### Verdict cache
 
