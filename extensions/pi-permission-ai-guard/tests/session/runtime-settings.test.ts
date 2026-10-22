@@ -285,7 +285,7 @@ describe("RuntimeSettings — command", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
     expect(overrides.mode).toBe("strict");
   });
@@ -321,7 +321,7 @@ describe("RuntimeSettings — command", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
     expect(overrides.notifyLevel).toBe("off");
     expect(appendEntry).toHaveBeenCalledWith("ai-guard-setting", { notifyLevel: "off" });
@@ -387,7 +387,7 @@ describe("RuntimeSettings — command", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
     expect(menuCtx.ui.select).toHaveBeenCalledWith(
       "notify level — current: notify level — warning (session)",
@@ -483,7 +483,7 @@ describe("RuntimeSettings — completions", () => {
         label: "breaker — clear both trip tiers (cache and overrides untouched)",
       },
       { value: "report", label: "report — suggest permission rules for repeated asks" },
-      { value: "denied", label: "denied — browse this session's model denies" },
+      { value: "denied", label: "denied — browse this session's denials" },
     ]);
   });
 
@@ -889,7 +889,7 @@ describe("RuntimeSettings — settings-menu labels stay plain", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
   });
 });
@@ -952,10 +952,10 @@ describe("RuntimeSettings — report command", () => {
 });
 
 describe("RuntimeSettings — denied command", () => {
-  it("notifies when the session has no model denies", async () => {
+  it("notifies when the session has no denials", async () => {
     const { settings, notify } = makeSettings();
     await settings.command.handler("denied", makeUiCtx());
-    expect(notify).toHaveBeenCalledWith("no model-gate denies in this session", "info");
+    expect(notify).toHaveBeenCalledWith("no denials in this session", "info");
   });
 
   it("picks from the standard list and opens the overlay detail with the reason whole", async () => {
@@ -1060,7 +1060,7 @@ describe("RuntimeSettings — denied command", () => {
 
     // Session 1: no denies yet.
     await settings.command.handler("denied", makeUiCtx());
-    expect(notify).toHaveBeenCalledWith("no model-gate denies in this session", "info");
+    expect(notify).toHaveBeenCalledWith("no denials in this session", "info");
 
     // Session 2: the lifecycle recreated the array — same wiring, new array.
     liveHistory = [

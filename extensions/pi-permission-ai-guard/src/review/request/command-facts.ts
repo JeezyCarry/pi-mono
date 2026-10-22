@@ -53,6 +53,7 @@ export interface CommandFacts {
   readonly recursive: boolean;
   readonly publishesArtifact: boolean;
   readonly sensitivePathName: boolean;
+  /** Reads only paths that publish host facts — a fixed Unix list today. */
   readonly publicSystemPath: boolean;
   readonly rewritesHistory: boolean;
   readonly rawCopy: boolean;

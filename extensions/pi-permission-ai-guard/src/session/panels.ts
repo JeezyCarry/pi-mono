@@ -1,7 +1,7 @@
 /**
  * The read-only audit panels: `/ai-guard report` (repeated same-context
  * asks, with copy-paste rule fragments) and `/ai-guard denied` (this
- * session's model-gate denies). Both are browse surfaces over data the
+ * session's denials). Both are browse surfaces over data the
  * settings surface does not own — the permission-review log's tail and the
  * session's deny history — so they live beside it rather than inside it:
  * the list rides the host's standard `ui.select` (the shared
@@ -32,7 +32,7 @@ export interface PanelReaders {
    * Returns undefined when the log cannot be read.
    */
   readDecisionLog: () => LogEntry[] | undefined;
-  /** This session's model-gate deny history (empty when no session). */
+  /** This session's deny history (empty when no session). */
   readDenyHistory: () => readonly DenyRecord[];
 }
 
@@ -118,7 +118,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
 }
 
 /**
- * The denied panel: this session's model-gate denies, most recent first —
+ * The denied panel: this session's denials, most recent first —
  * what the reviewer itself refused. Read-only memory, no log dependency
  * (the panel is session-scoped by construction).
  *
@@ -128,7 +128,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
 export async function openDeniedPanel(deps: PanelDeps, ctx: AiGuardUiContext): Promise<void> {
   const history = deps.readDenyHistory();
   if (history.length === 0) {
-    deps.notify("no model-gate denies in this session", "info");
+    deps.notify("no denials in this session", "info");
     return;
   }
   if (!ctx.hasUI) {

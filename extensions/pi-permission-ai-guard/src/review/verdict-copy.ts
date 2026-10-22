@@ -256,5 +256,5 @@ export function escalationMessage(
  * @returns The notification message.
  */
 export function failOpenNotice(): string {
-  return "this mode allows the request without asking; a danger-leaned doubt and every deny still block";
+  return "this mode allows the request without asking; a reviewer deny, or a doubt it leaned toward denying, still blocks";
 }

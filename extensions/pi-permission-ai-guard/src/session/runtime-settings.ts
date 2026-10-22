@@ -510,8 +510,8 @@ export class RuntimeSettings {
       },
       {
         name: "denied",
-        completionLabel: "denied — browse this session's model denies",
-        menuRows: () => [{ label: "browse model denies", args: [] }],
+        completionLabel: "denied — browse this session's denials",
+        menuRows: () => [{ label: "browse denials", args: [] }],
         run: (_args, ctx) => openDeniedPanel(this.#panelDeps(), ctx),
       },
     ];

@@ -122,7 +122,7 @@ interface SessionState extends SessionInputs {
   circuitBreaker: CircuitBreaker;
   /** Per-session verdict cache — avoids re-reviewing identical commands. */
   verdictCache: VerdictCache;
-  /** Per-session model-gate denies (the /ai-guard denied panel's data). */
+  /** Per-session denials (the /ai-guard denied panel's data). */
   denyHistory: DenyRecord[];
 }
 

@@ -359,7 +359,7 @@ export function matchCommandRule(words: readonly string[]): HardRuleHit | null {
     if (args.some((word) => word === "--help" || word === "--version")) return null;
     return {
       rule: "mkfs",
-      reason: "creating a filesystem destroys the device's contents and is never allowed",
+      reason: "formatting a device destroys its contents and is never allowed",
     };
   }
   if (name === "chmod") return setuidChmod(args);
@@ -446,7 +446,7 @@ export function forkBombHit(): HardRuleHit {
   return {
     rule: "fork-bomb",
     reason:
-      "calling a function that backgrounds a pipeline of itself replicates until the machine halts and is never allowed",
+      "calling a function that backgrounds a pipeline of itself replicates without bound and is never allowed",
   };
 }
 

@@ -52,16 +52,15 @@ import { withAgentInstruction } from "./verdict-copy.ts";
 import { applyVerdictMode, type ModelDeferInfo } from "./verdict-rule.ts";
 
 /**
- * How many model-gate denials the session keeps for its denied panel. The panel
- * shows the newest handful; the cap bounds memory in a long session.
+ * How many denials the session keeps for its denied panel. The panel shows the
+ * newest handful; the cap bounds memory in a long session.
  */
 const DENY_HISTORY_MAX = 50;
 
 /**
- * One model-gate deny recorded for the session's denied panel — what the
- * reviewer itself judged dangerous (mapping artifacts and machinery
- * denials are not recorded; the panel answers "what did the reviewer
- * refuse").
+ * One deny recorded for the session's denied panel — a screen hit or a
+ * reviewer deny (mode mappings and machinery denials are not recorded; the
+ * panel answers "what refused this request").
  */
 export interface DenyRecord {
   /** The ask's request id. */
@@ -70,7 +69,7 @@ export interface DenyRecord {
   surface: string;
   /** The reviewed value. */
   target: string;
-  /** The model's deny reason (the teaching reason, un-instructed). */
+  /** The deny reason, un-instructed (the screen's or the reviewer's). */
   reason: string | undefined;
   /** The model-assessed risk level, when the model supplied one. */
   riskLevel: string | undefined;
@@ -97,7 +96,7 @@ export interface ReviewPipelineDeps {
   verdictCache: VerdictCache;
   /** Session-scoped runtime overrides (/ai-guard, ctrl+alt+g); consulted before config. */
   overrides: SessionOverrides;
-  /** Session model-gate deny log (the /ai-guard denied panel's data). */
+  /** Session deny log (the /ai-guard denied panel's data). */
   denyHistory: DenyRecord[];
   /**
    * Human notification for verdicts that escalate to the user — REQUIRED:
@@ -192,7 +191,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
       surface,
       target: normalizeAndRedactText(target),
     };
-    // The denied panel's data: what the reviewer refused (a screen hit or a
+    // The denied panel's data: what refused the request (a screen hit or a
     // model deny; mode mappings and machinery denials are absent by
     // design). The reason is the un-instructed teaching text, and the target
     // rides through the record's redacted form — a credential in the command
