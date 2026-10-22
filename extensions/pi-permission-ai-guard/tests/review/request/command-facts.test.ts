@@ -9,6 +9,7 @@ import {
   type CommandFacts,
   type FactsContext,
 } from "#src/review/request/command-facts.ts";
+import { SHELL_INTERPRETERS, STDIN_IS_PROGRAM } from "#src/review/request/shell-names.ts";
 
 // Facts are computed against a fixed workspace and home, with the module's only
 // filesystem lookup (`realpath`, §5.2) injected. The identity resolver claims
@@ -798,6 +799,45 @@ describe("bundled short flags", () => {
     expect(facts("rm -R dist").recursive).toBe(true);
     // A long flag is not a bundle, and a digit ends the flag run.
     expect(facts("sed --expression=x f.txt").commandEffect).toBe("read");
+  });
+});
+
+describe("shell names", () => {
+  it("descends into every shell's -c operand and heredoc body", () => {
+    // The walker's set and the screen's are one list now (shell-names.ts), so
+    // this pins the descent half of what the screen test pins as denial.
+    for (const shell of SHELL_INTERPRETERS) {
+      // A per-shell record so a future name names its own failure.
+      expect({ shell, scope: facts(`${shell} -c 'rm -rf /'`).pathScope }).toEqual({
+        shell,
+        scope: "outside",
+      });
+      expect({ shell, scope: facts(`${shell} <<'EOF'\nrm -rf /\nEOF`).pathScope }).toEqual({
+        shell,
+        scope: "outside",
+      });
+    }
+  });
+
+  it("leaves a non-shell alone: a `-c` string there is data", () => {
+    // `git -c`, `npm|docker -c` and `python3 -c` all take data or another
+    // language; reading them as shell would invent facts for words that run
+    // nothing (or run something this reader cannot parse).
+    for (const name of ["mytool", "python3", "git", "npm", "docker", "busybox", "pwsh"]) {
+      expect({ name, scope: facts(`${name} -c 'rm -rf /'`).pathScope }).toEqual({
+        name,
+        scope: "none",
+      });
+    }
+  });
+
+  it("keeps stdin-as-program a superset of the shells", () => {
+    for (const shell of SHELL_INTERPRETERS) {
+      expect({ shell, stdinIsProgram: STDIN_IS_PROGRAM.has(shell) }).toEqual({
+        shell,
+        stdinIsProgram: true,
+      });
+    }
   });
 });
 
