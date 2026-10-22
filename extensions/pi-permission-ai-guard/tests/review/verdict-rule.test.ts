@@ -26,7 +26,6 @@ import {
   type DenyAuthority,
   type ModelDeferInfo,
   applyVerdictMode,
-  denyTier,
   resolveMapping,
 } from "#src/review/verdict-rule.ts";
 import { OPERATOR_COPY_SHAPE } from "#test/operator-copy.ts";
@@ -158,13 +157,6 @@ describe("applyVerdictMode — mapping table", () => {
       expect(applyVerdictMode(pol(policy), verdict, modelDefer, authority)).toEqual(expected);
     },
   );
-});
-
-describe("denyTier", () => {
-  it("makes only the screen hard", () => {
-    expect(denyTier("screen")).toBe("hard");
-    expect(denyTier("model")).toBe("soft");
-  });
 });
 
 describe("model deny authority invariant", () => {

@@ -2,8 +2,10 @@
  * The deterministic base tier: a pure function of `CommandFacts` alone.
  *
  * This is the code's half of the policy. It never consults a model reading, so
- * it is the trusted baseline the model may only tighten. The classifier lane's
- * own dual-reader table still lives in `axes/verdict.ts`; the wiring retires it.
+ * it is the trusted baseline the model may only tighten. The lane's live table
+ * lives in `axes/verdict.ts`; `scripts/alignment-diff.ts` runs both and reports
+ * where the shared core already reproduces the live verdict — the comparison is
+ * the point, so the live table is not retired.
  */
 
 import type { CommandFacts } from "#src/review/request/command-facts.ts";

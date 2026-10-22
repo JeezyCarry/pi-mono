@@ -1,8 +1,8 @@
 /**
- * The closed v1 hard-deny rules: operations no context makes right. Each rule
- * reads one literal-word simple command (or one pipeline) and fires only when
- * every word it inspects is a plain literal; a variable, substitution or any
- * other shape never matches, so the screen can only deny what the text
+ * The closed hard-deny rules: operations no context makes right. A rule reads
+ * one literal-word simple command, pipeline, or redirect write, and fires only
+ * when every word it inspects is a plain literal; a variable, substitution or
+ * any other shape never matches, so the screen can only deny what the text
  * demonstrably says. The set is closed on purpose: adding a rule is a code
  * change with its own match and never-match tests, not a configuration.
  */
@@ -81,13 +81,26 @@ function recursiveTargetOfSystemRoot(args: readonly string[]): string | null {
   return hit ?? null;
 }
 
-function recursiveRemoveOfSystemRoot(args: readonly string[]): HardRuleHit | null {
-  const hit = recursiveTargetOfSystemRoot(args);
+/**
+ * The one recursive-root rule: `rm` and the deleter family share the protected
+ * roots and the rule id. `rm` needs an explicit recursive flag, while a deleter
+ * is recursive by definition.
+ *
+ * @param name - The command's basename.
+ * @param args - Its literal words after the name.
+ * @returns The hit, or null.
+ */
+function recursiveRootDelete(name: string, args: readonly string[]): HardRuleHit | null {
+  const needsFlag = name === "rm";
+  if (!needsFlag && !RECURSIVE_DELETERS.has(name)) return null;
+  const hit = needsFlag
+    ? recursiveTargetOfSystemRoot(args)
+    : (args.find((word) => !word.startsWith("-") && isProtectedRoot(word)) ?? null);
   return hit === null
     ? null
     : {
         rule: "rm-system-root",
-        reason: "recursively deleting a system root or the home directory is never allowed",
+        reason: `recursively deleting ${hit} with ${name} is never allowed`,
       };
 }
 
@@ -169,7 +182,9 @@ function writeOntoDevice(name: string, args: readonly string[]): HardRuleHit | n
   if (!DEVICE_WRITERS.has(name)) return null;
   const operands = args.filter((word) => !word.startsWith("-"));
   if (operands.length === 0) return null;
-  // `tee` writes to every operand; the copiers write to the last one only.
+  // `tee` writes to every operand; the copiers write to the last one only. A
+  // target named through `-t`/`--target-directory=` reads as a flag value the
+  // last-operand rule misses — model lane, like any option-shaped target.
   const targets = name === "tee" ? operands : operands.slice(-1);
   if (!targets.some((word) => isBlockDevicePath(word))) return null;
   return {
@@ -296,17 +311,6 @@ export function matchRedirectRule(write: RedirectWrite): HardRuleHit | null {
   return null;
 }
 
-function recursiveDeleteOfSystemRoot(name: string, args: readonly string[]): HardRuleHit | null {
-  if (!RECURSIVE_DELETERS.has(name)) return null;
-  const hit = args.find((word) => !word.startsWith("-") && isProtectedRoot(word));
-  return hit === undefined
-    ? null
-    : {
-        rule: "rm-system-root",
-        reason: `recursively deleting a system root with ${name} is never allowed`,
-      };
-}
-
 function forcePushToProtectedBranch(args: readonly string[]): HardRuleHit | null {
   if (args[0] !== "push") return null;
   const rest = args.slice(1);
@@ -348,7 +352,7 @@ export function matchCommandRule(words: readonly string[]): HardRuleHit | null {
   const [head, ...args] = unwrap(words);
   if (head === undefined) return null;
   const name = baseName(head);
-  if (name === "rm") return recursiveRemoveOfSystemRoot(args);
+  if (name === "rm") return recursiveRootDelete(name, args);
   if (name === "dd") return rawDeviceWrite(args);
   if (/^mkfs(\.|$)/.test(name)) {
     // A help or version request runs nothing.
@@ -363,7 +367,7 @@ export function matchCommandRule(words: readonly string[]): HardRuleHit | null {
   if (name === "kill") return killAllProcesses(args);
   if (name === "git") return forcePushToProtectedBranch(args);
   return (
-    recursiveDeleteOfSystemRoot(name, args) ??
+    recursiveRootDelete(name, args) ??
     diskWipeTool(name, args) ??
     writeOntoDevice(name, args) ??
     partitionTool(name, args) ??
@@ -371,12 +375,6 @@ export function matchCommandRule(words: readonly string[]): HardRuleHit | null {
   );
 }
 
-/**
- * Match one pipeline against the rules.
- *
- * @param stages - The literal words of each stage.
- * @returns The hit, or null.
- */
 /**
  * Interpreters that execute their stdin as a program when given no script
  * file — the download piped into them runs, exactly like `curl … | sh`.
@@ -391,6 +389,12 @@ const STDIN_INTERPRETERS: ReadonlySet<string> = new Set([
   "ruby",
 ]);
 
+/**
+ * Match one pipeline against the rules.
+ *
+ * @param stages - The literal words of each stage.
+ * @returns The hit, or null.
+ */
 export function matchPipelineRule(stages: PipelineWords): HardRuleHit | null {
   const names = stages.map((words) => (words === null ? null : baseName(unwrap(words)[0] ?? "")));
   const lastShell = names.findLastIndex((name) => name !== null && SHELL_INTERPRETERS.has(name));
@@ -429,6 +433,21 @@ export function matchPipelineRule(stages: PipelineWords): HardRuleHit | null {
     }
   }
   return null;
+}
+
+/**
+ * A called function that backgrounds a pipeline of itself. The walker only
+ * records this at a call site inside the same text, so the replication is
+ * proven rather than defined.
+ *
+ * @returns The deny hit for the shape.
+ */
+export function forkBombHit(): HardRuleHit {
+  return {
+    rule: "fork-bomb",
+    reason:
+      "calling a function that backgrounds a pipeline of itself replicates until the machine halts and is never allowed",
+  };
 }
 
 /**

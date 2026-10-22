@@ -9,11 +9,12 @@
  * {@link ../config/mode-policy.ts!ModePolicy} — this module never indexes
  * the table by a mode name.
  *
- * The doctrine stays local: hard-tier denies (only the deterministic screen's) are terminal in
- * every mode, and every model deny is soft; danger-leaned defers ask in default and deny
- * in strict, and DENY in auto (the ladder has no ask path for danger); reviewer machinery
- * failures never map to allow in ANY mode (a broken reviewer must not rubber-stamp) — they deny
- * under the two extremes and defer under the remaining two; allow is never transformed.
+ * The doctrine stays local: a hard-tier deny (only the deterministic screen's) is
+ * terminal in every mode, and every model deny is soft, so the ladder maps it like
+ * any other doubt; danger-leaned defers ask in `default` and deny in `strict` and
+ * `auto` (neither has an ask path for danger); reviewer machinery failures never map
+ * to allow in any mode (a broken reviewer must not rubber-stamp) — they deny under
+ * `strict` and `auto` and defer under `default`; allow is never transformed.
  *
  * Pure functions: the fresh-model path and the cache-hit path both run
  * the mapping, so a cached verdict maps identically to a fresh one.
@@ -59,27 +60,11 @@ export interface ModelDeferInfo {
 }
 
 /**
- * The two deny tiers the ladder splits a deny into — hard (terminal in
- * every mode) and soft (mapped by the mode's cut lines).
- */
-type DenyTier = "hard" | "soft";
-
-/**
  * Who issued a deny. Authority, not the model's self-reported severity,
  * decides the tier: a model can misread a command, so its deny never binds
  * a human who can see the command; only the deterministic screen binds.
  */
 export type DenyAuthority = "screen" | "model";
-
-/**
- * Which mapping tier a deny falls into.
- *
- * @param authority - Who issued the deny.
- * @returns `"hard"` for the screen, `"soft"` for the model.
- */
-export function denyTier(authority: DenyAuthority): DenyTier {
-  return authority === "screen" ? "hard" : "soft";
-}
 
 /**
  * Audit marker for a model defer the mode mapped to allow: the reviewer's
@@ -121,17 +106,14 @@ export function applyVerdictMode(
       ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy.mode) }
       : verdict;
   }
-  // Everything else sits on the suspicion line: a deny by its tier (a
-  // hard-tier deny is terminal in every mode — the one judgment the ladder
-  // never loosens), a model defer by its lean. The lean is the reviewer's
-  // directional inclination, an audit-and-routing fact: it selects the
-  // defer lane, never surfaces to the human, and a deny-leaned defer can
-  // at best ask (never allow).
+  // Everything else sits on the suspicion line: a deny is soft (the hard rung
+  // returned above — only the screen sits there), a model defer by its lean.
+  // The lean is the reviewer's directional inclination, an audit-and-routing
+  // fact: it selects the defer lane, never surfaces to the human, and a
+  // deny-leaned defer can at best ask (never allow).
   const suspicion: Suspicion =
     verdict.kind === "deny"
-      ? denyTier(authority) === "hard"
-        ? "hard-deny"
-        : "soft-deny"
+      ? "soft-deny"
       : modelDefer?.lean === "allow"
         ? "defer-benign"
         : modelDefer?.lean === "deny"

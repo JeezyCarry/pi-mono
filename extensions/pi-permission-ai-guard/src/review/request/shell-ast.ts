@@ -210,24 +210,12 @@ export function readsProgramFromStdin(words: readonly string[]): boolean {
 
 /** What a command text provably runs. */
 export interface ShellShape {
-  /** Every simple command reachable through `;`, `&&`, `||`, pipes and compound commands. */
+  /** Every simple command the text runs, nested program texts included. */
   readonly commands: readonly LiteralWords[];
-  /** Every pipeline of two or more stages. */
+  /** Every pipeline of two or more stages, nested program texts included. */
   readonly pipelines: readonly PipelineWords[];
-  /**
-   * Stdin sources on literal simple commands: heredoc bodies and `< file`.
-   * A source only becomes readable program text when `readsProgramFromStdin`
-   * holds for its command; anything else is data and stays unread.
-   */
-  readonly stdinSources: readonly StdinSource[];
-  /** Writes to a literal target, on literal simple commands. */
+  /** Writes to a literal target, nested program texts included. */
   readonly redirects: readonly RedirectWrite[];
-  /**
-   * Program text an argument carries: an interpreter's `-c` string and the
-   * words `eval` assembles. Each is read as shell text in turn, the same way
-   * a heredoc body on an interpreter's stdin is.
-   */
-  readonly inlinePrograms: readonly string[];
   /**
    * Called functions whose body pipes the function into itself in the
    * background — the fork bomb's shape, independent of the name chosen. A
@@ -298,8 +286,14 @@ function simpleWords(cmd: SimpleCommand): LiteralWords {
   return out;
 }
 
+/** A walked text: the {@link ShellShape} plus the program texts it carries. */
+interface WalkedText extends ShellShape {
+  readonly stdinSources: readonly StdinSource[];
+  readonly inlinePrograms: readonly string[];
+}
+
 /** The collector every walk step appends to. */
-interface Shape {
+interface Walked extends WalkedText {
   readonly commands: LiteralWords[];
   readonly pipelines: PipelineWords[];
   readonly stdinSources: StdinSource[];
@@ -399,7 +393,7 @@ function walkArith(expr: ArithExpr | undefined, out: Shape): void {
 }
 
 // A `[[ … ]]` test's operands are words, and a word can hold a substitution.
-function walkTest(expr: TestExpr | undefined, out: Shape): void {
+function walkTest(expr: TestExpr | undefined, out: Walked): void {
   if (expr === undefined) return;
   switch (expr.type) {
     case "BinaryTest":
@@ -491,7 +485,7 @@ function nestedBodies(cmd: Command): readonly (readonly Statement[] | undefined)
 }
 
 // Descend into an assignment's value: `FOO=$(…)` runs before the command does.
-function walkAssignment(assign: Assignment, out: Shape): void {
+function walkAssignment(assign: Assignment, out: Walked): void {
   walkWordParts(assign.value?.parts, out);
   for (const elem of assign.array?.elems ?? []) {
     walkWordParts(elem.index?.parts, out);
@@ -523,7 +517,7 @@ function stripTimeFlags(words: readonly Word[] | undefined): readonly Word[] | u
   return words.slice(i);
 }
 
-function walkSimpleCommand(cmd: SimpleCommand, out: Shape): void {
+function walkSimpleCommand(cmd: SimpleCommand, out: Walked): void {
   const words = simpleWords(cmd);
   out.commands.push(words);
   if (words !== null) {
@@ -628,7 +622,7 @@ function walkSimpleCommand(cmd: SimpleCommand, out: Shape): void {
   }
 }
 
-function walkCommand(cmd: Command, out: Shape): void {
+function walkCommand(cmd: Command, out: Walked): void {
   switch (cmd.type) {
     case "SimpleCommand":
       walkSimpleCommand(cmd, out);
@@ -806,13 +800,84 @@ function heredocText(body: Word): string | null {
   return out.join("");
 }
 
+// Whether the words name a shell interpreter (after wrappers), so its stdin
+// program reads as shell.
+function runsShellOnStdin(words: readonly string[]): boolean {
+  const bare = unwrap(words);
+  return SHELL_INTERPRETERS.has(baseName(bare[0] ?? ""));
+}
+
 /**
- * Read the commands a shell text runs.
+ * The program texts a shape carries, read as further simple commands: stdin
+ * on an interpreter (heredoc bodies and script files when no script-file
+ * argument follows) and program arguments (`-c` strings, `eval` words). Only
+ * stdin that is the program is read — anything else is data and stays unread,
+ * so a `cat <<EOF` payload can never match a rule. Each level's own inline
+ * programs join the worklist, so a heredoc carrying a `bash -c '…'` is
+ * followed one level deeper. Every level consumes strictly smaller text, so
+ * the list always runs dry.
+ *
+ * @param shape - The outer shape's stdin sources and inline programs.
+ * @returns The collected inner commands, pipelines, redirects, and flags.
+ */
+function collectProgramTexts(shape: WalkedText): ShellShape {
+  const out: LiteralWords[] = [];
+  const pipelines: PipelineWords[] = [];
+  const redirects: RedirectWrite[] = [];
+  const selfPipedFunctions: string[] = [];
+  let executesFetch = false;
+  const queue: string[] = [];
+  for (const source of shape.stdinSources) {
+    if (!readsProgramFromStdin(source.words)) continue;
+    // Only a shell runs its stdin as shell: a `python3 <<EOF` body is
+    // Python, and reading it as shell would misjudge foreign code.
+    if (!runsShellOnStdin(source.words)) continue;
+    if (source.op === "<") continue;
+    if (source.text !== "") queue.push(source.text);
+  }
+  queue.push(...shape.inlinePrograms);
+  for (const text of queue) {
+    const inner = walkText(text);
+    if (inner === null) continue;
+    out.push(...inner.commands);
+    pipelines.push(...inner.pipelines);
+    redirects.push(...inner.redirects);
+    selfPipedFunctions.push(...inner.selfPipedFunctions);
+    executesFetch = executesFetch || inner.executesFetch;
+    // A nested program text is followed one level deeper.
+    queue.push(...inner.inlinePrograms);
+  }
+  return {
+    commands: [...shape.commands, ...out],
+    pipelines: [...shape.pipelines, ...pipelines],
+    redirects: [...shape.redirects, ...redirects],
+    selfPipedFunctions: [...shape.selfPipedFunctions, ...selfPipedFunctions],
+    executesFetch: executesFetch || shape.executesFetch,
+  };
+}
+
+/**
+ * Read everything a shell text runs: the outer commands plus every carried
+ * program text, in one list each. A caller that needs less is holding too
+ * much; the intermediates stay inside.
  *
  * @param command - The full shell command text.
  * @returns The shape, or null when the text does not parse.
  */
 export function readShellShape(command: string): ShellShape | null {
+  const walked = walkText(command);
+  return walked === null ? null : collectProgramTexts(walked);
+}
+
+/**
+ * The walk itself: the text's own commands plus the program texts it carries,
+ * unexpanded. Internal — {@link readShellShape} is the interface, and a caller
+ * that stopped here would miss everything a carried program runs.
+ *
+ * @param command - The shell command text.
+ * @returns The walked shape, or null when the text does not parse.
+ */
+function walkText(command: string): WalkedText | null {
   let program;
   try {
     program = parse(command).ast;
@@ -820,7 +885,7 @@ export function readShellShape(command: string): ShellShape | null {
     return null;
   }
   if (!program) return null;
-  const out: Shape = {
+  const out: Walked = {
     commands: [],
     pipelines: [],
     stdinSources: [],

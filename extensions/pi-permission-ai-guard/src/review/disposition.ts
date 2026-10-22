@@ -23,9 +23,11 @@
  * (see the log-stream doctrine in decision-record.ts). One writer, one place where the "never
  * demote reviewer judgment" rule is enforced.
  *
- * The pure deciding rules stay where they are (`resolveMapping` /
- * `applyVerdictMode` in verdict-rule): this module performs, it does not
- * decide. Gates declare verdict + facts; the ritual lives here.
+ * The ladder's deciding rules stay in verdict-rule (`resolveMapping` /
+ * `applyVerdictMode`); this module applies their outcome — the machinery lane's
+ * consequence (breaker credit, deny copy), the record annotation, the notice,
+ * and the agent instruction. Gates declare verdict + facts; the ritual lives
+ * here.
  */
 
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";

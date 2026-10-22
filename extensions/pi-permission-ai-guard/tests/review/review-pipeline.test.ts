@@ -298,10 +298,7 @@ describe("createReviewPipeline — verdicts", () => {
     const verdict = await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
     expect(verdict.kind).toBe("deny");
     expect(verdict).toMatchObject({
-      reason: withAgentInstruction(
-        "recursively deleting a system root or the home directory is never allowed",
-        "content",
-      ),
+      reason: withAgentInstruction("recursively deleting / with rm is never allowed", "content"),
     });
     expect(modelCall).not.toHaveBeenCalled();
   });
@@ -537,7 +534,7 @@ describe("createReviewPipeline — deny history (the /ai-guard denied panel's da
     expect(denyHistory).toHaveLength(1);
     expect(denyHistory[0]).toMatchObject({
       target: "rm -rf /",
-      reason: "recursively deleting a system root or the home directory is never allowed",
+      reason: "recursively deleting / with rm is never allowed",
       riskLevel: "critical",
     });
   });

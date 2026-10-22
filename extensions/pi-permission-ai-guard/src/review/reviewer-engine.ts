@@ -19,7 +19,7 @@ import type { ReviewOutcome } from "#src/model/model-verdict.ts";
 import type { ReviewRequestContext } from "#src/review/request/review-request.ts";
 import type { StrippedTranscript } from "#src/review/request/transcript-stripper.ts";
 
-/** What an engine needs from the pipeline per ask (no engine reaches past this). */
+/** What an engine receives from the pipeline per ask. */
 export interface EngineCallContext extends AuditCorrelation {
   /** The stripped transcript (prompt material + cache fingerprint source). */
   transcript: StrippedTranscript;
