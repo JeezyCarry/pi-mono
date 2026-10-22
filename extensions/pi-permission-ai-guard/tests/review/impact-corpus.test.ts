@@ -69,6 +69,12 @@ describe("impact corpus", () => {
           (screenCommand(c.command).kind === "deny") !== (ALL_IMPACT[c.id]?.cls === "screen_only"),
       )
       .map((c) => c.id);
-    expect(mismatches.toSorted()).toEqual(Object.keys(KNOWN_SCREEN_GAPS).toSorted());
+    // dos-fork-bomb is the one needs_human case the screen denies above its
+    // impact label, by design: the bomb function is defined and invoked in
+    // the same text, so execution is proven and no context makes it right.
+    // The label stays frozen; this pin records the divergence in the open.
+    expect(mismatches.toSorted()).toEqual(
+      [...Object.keys(KNOWN_SCREEN_GAPS), "dos-fork-bomb"].toSorted(),
+    );
   });
 });

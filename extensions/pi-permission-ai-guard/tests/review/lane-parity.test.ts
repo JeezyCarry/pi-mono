@@ -260,17 +260,17 @@ const CASES: Record<InventoryFactKey, FactCase> = {
     classifier: "node scripts/migrate-db.js",
   },
   commandFacts: {
-    // The verdict layer reads them; neither lane renders them. The context
-    // carries a real fact set so the parity runner proves absence in both
-    // renderings, not absence of a fixture. The sentinel is a marker the
-    // prompt/state never contain (`node_modules` appears in both: the
-    // command text itself renders in both lanes).
+    // The chat prompt renders the fact layer as labeled observations; the
+    // classifier state still excludes it. `rm -rf node_modules` is recursive
+    // with a delete effect, so both the block header and a true flag pin it.
+    // The sentinel is a marker neither rendering contains, so the classifier
+    // absence check proves exclusion, not a missing fixture.
     context: {
       ...ctx({ ask: { kind: "bash", fullCommand: "rm -rf node_modules" } }),
       commandFacts: readCommandFacts("rm -rf node_modules", { cwd: "/project" }),
     },
     sentinel: "LANE_PARITY_COMMAND_FACTS_SENTINEL",
-    chat: null,
+    chat: "- command observations (deterministic readings of the command text;",
     classifier: null,
   },
 };

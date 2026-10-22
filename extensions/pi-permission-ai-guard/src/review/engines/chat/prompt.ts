@@ -20,6 +20,7 @@
  * 3. Permission request (the exact ask being reviewed)
  */
 
+import type { CommandFacts } from "#src/review/request/command-facts.ts";
 import type { ReviewRequestContext } from "#src/review/request/review-request.ts";
 import type { StrippedTranscript } from "#src/review/request/transcript-stripper.ts";
 import {
@@ -208,6 +209,34 @@ Reply with ONLY one JSON object: no markdown or other text.
  */
 const REVIEW_TRIGGER = "Assess the permission request above and respond with your JSON verdict.";
 
+// Boolean command observations, rendered only when established true. The
+// label is the whole signal: every value is code-constant, so no redaction
+// pass is needed and none is applied.
+type BooleanCommandFact = {
+  [K in keyof CommandFacts]: CommandFacts[K] extends boolean ? K : never;
+}[keyof CommandFacts];
+
+const COMMAND_OBSERVATION_FLAGS: ReadonlyArray<readonly [string, BooleanCommandFact]> = [
+  ["names build output", "namedBuildOutput"],
+  ["recursive", "recursive"],
+  ["publishes artifact", "publishesArtifact"],
+  ["names a sensitive path", "sensitivePathName"],
+  ["targets a public system path", "publicSystemPath"],
+  ["rewrites history", "rewritesHistory"],
+  ["raw device copy", "rawCopy"],
+  ["binds all interfaces", "allInterfaces"],
+  ["dumps environment", "dumpsEnvironment"],
+  ["installs persistence", "installsPersistence"],
+  ["grants beyond owner", "grantsBeyondOwner"],
+  ["sends data", "sendsData"],
+  ["expands a secret-named variable", "secretVariable"],
+  ["carries a literal auth token", "headerToken"],
+  ["sends an unreadable auth value", "authHeaderExpansion"],
+  ["routine dev command", "routineDevCommand"],
+  ["uses a shell socket", "socketRedirection"],
+  ["unbounded spawn", "unboundedSpawn"],
+];
+
 /**
  * Build the "Permission request" section.
  *
@@ -289,6 +318,25 @@ function buildPermissionRequestSection(request: ReviewRequestContext): string {
           `  - ${encodeActionTextForPrompt(normalizeAndRedactText(name))}: ${encodeActionTextForPrompt(normalizeAndRedactText(text))}`,
         );
       }
+    }
+  }
+
+  // Command observations: the snapshot's deterministic fact layer, rendered
+  // as an explicit field list. Observations of the command text only — not
+  // safety conclusions, not authorization. Every line is an established
+  // reading; a missing line states nothing either way. Null for non-bash
+  // entries, so the block is simply absent there.
+  if (request.commandFacts) {
+    const facts = request.commandFacts;
+    lines.push(
+      "- command observations (deterministic readings of the command text; observations, not safety conclusions or authorization):",
+    );
+    lines.push(`  - parsed: ${facts.parsed ? "yes" : "no"}`);
+    lines.push(`  - path scope: ${facts.pathScope}`);
+    lines.push(`  - network: ${facts.network}`);
+    lines.push(`  - command effect: ${facts.commandEffect}`);
+    for (const [label, key] of COMMAND_OBSERVATION_FLAGS) {
+      if (facts[key]) lines.push(`  - ${label}: yes`);
     }
   }
 

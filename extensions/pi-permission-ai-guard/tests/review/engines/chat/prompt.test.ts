@@ -6,6 +6,7 @@ import { configSchema, EXTENSION_ID, LINK_NAME } from "#src/config/config-schema
 import { buildReviewPrompt, buildReviewSystemPrompt } from "#src/review/engines/chat/prompt.ts";
 import { parseVerdictObject } from "#src/review/engines/chat/verdict-parser.ts";
 import type { AskContext } from "#src/review/request/ask.ts";
+import { readCommandFacts } from "#src/review/request/command-facts.ts";
 import { stripTranscript } from "#src/review/request/transcript-stripper.ts";
 import { EXCLUSION } from "#test/review/engines/shared.ts";
 
@@ -306,6 +307,72 @@ describe("buildReviewPrompt", () => {
     expect(prompt).toContain(
       "Assess the permission request above and respond with your JSON verdict",
     );
+  });
+
+  const TRANSCRIPT = {
+    trustedIntent: ["clean up build output"],
+    toolCalls: [],
+    strippedCount: 0,
+  };
+
+  it("renders the command observations the snapshot carries", () => {
+    const command = "rm -rf node_modules";
+    const prompt = buildReviewPrompt(TRANSCRIPT, {
+      target: command,
+      ask: makeAsk({ value: command, fullCommand: command }),
+      commandFacts: readCommandFacts(command, { cwd: "/project" }),
+    });
+
+    expect(prompt).toContain(
+      "- command observations (deterministic readings of the command text; observations, not safety conclusions or authorization):",
+    );
+    // Closed-set values render verbatim.
+    expect(prompt).toContain("  - command effect: delete");
+    expect(prompt).toContain("  - path scope: inside");
+    expect(prompt).toContain("  - network: none");
+    expect(prompt).toContain("  - parsed: yes");
+    // Only established true flags appear, each with its own label.
+    expect(prompt).toContain("  - recursive: yes");
+    expect(prompt).toContain("  - names build output: yes");
+    expect(prompt).not.toContain("  - publishes artifact");
+    expect(prompt).not.toContain("  - installs persistence");
+  });
+
+  it("renders unreadable text as its own reading, never as a clean one", () => {
+    const command = "(((";
+    const prompt = buildReviewPrompt(TRANSCRIPT, {
+      target: command,
+      ask: makeAsk({ value: command, fullCommand: command }),
+      commandFacts: readCommandFacts(command, { cwd: "/project" }),
+    });
+
+    expect(prompt).toContain("  - parsed: no");
+    expect(prompt).toContain("  - command effect: unknown");
+    expect(prompt).toContain("  - path scope: unknown");
+  });
+
+  it("names a secret-named variable without rendering the command text", () => {
+    const command = "echo $GITHUB_TOKEN";
+    const prompt = buildReviewPrompt(TRANSCRIPT, {
+      target: command,
+      ask: makeAsk({ value: command, fullCommand: command }),
+      commandFacts: readCommandFacts(command, { cwd: "/project" }),
+    });
+
+    expect(prompt).toContain("  - expands a secret-named variable: yes");
+    // Every rendered value is code-constant, so the block introduces no new
+    // text: the only occurrence of the variable is the command line itself.
+    expect(prompt.match(/GITHUB_TOKEN/g)).toHaveLength(1);
+    expect(prompt).not.toContain("secret-named variable: yes (");
+  });
+
+  it("omits the observation block when the snapshot carries no facts", () => {
+    const prompt = buildReviewPrompt(TRANSCRIPT, {
+      target: "ls",
+      ask: makeAsk({ value: "ls", fullCommand: "ls" }),
+    });
+
+    expect(prompt).not.toContain("command observations");
   });
 
   it("handles empty trusted intent", () => {

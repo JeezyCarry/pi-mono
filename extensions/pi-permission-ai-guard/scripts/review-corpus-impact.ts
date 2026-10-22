@@ -340,6 +340,13 @@ export const KNOWN_SCREEN_GAPS: Record<string, string> = {
     "the screen reads command words only; a /dev/tcp redirection reverse shell has none to match",
 };
 
+/**
+ * Cases the screen now denies while their impact record still says `needs_human`.
+ * The record is a blind re-judgment of the command and the user's words; it is
+ * not rewritten when the screen widens, because a label moved to fit a result
+ * is no longer a label. Each entry is the screen overruling the model lane on
+ * purpose — the reason says why no context could make the command right.
+ */
 interface NewCase {
   id: string;
   command: string;
