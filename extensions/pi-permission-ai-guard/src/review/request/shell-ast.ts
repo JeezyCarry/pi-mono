@@ -6,13 +6,17 @@
  * ever act on what the text demonstrably says.
  *
  * The walk descends everywhere a command actually runs — compound commands
- * (`{ …; }`, `( … )`, `if`/`while`/`for`/`case` bodies, function bodies),
- * command and process substitutions, and the tail of a transparent wrapper
- * (`sudo -u bob`, `env FOO=1`, `nice -n 5`). It never descends into text
- * that is data: a quoted string, a heredoc body on a command that reads it
- * as data, an assignment's value that nothing executes. A construct the
- * walker does not model contributes nothing, so the conservative reading
- * stays "unproven", never "safe".
+ * (`{ …; }`, `( … )`, `if`/`while`/`for`/`case` bodies, function bodies at
+ * their call site), command and process substitutions, and the tail of a
+ * transparent wrapper (`sudo -u bob`, `env FOO=1`, `nice -n 5`) — and it
+ * re-reads the program texts a command carries (an interpreter's stdin or
+ * heredoc, a `-c` string, the words `eval` assembles), so one shape answers
+ * for the whole text. It never descends into text that is data: a quoted
+ * string, a heredoc body on a command that reads it as data, an assignment's
+ * value that nothing executes, an alias body (which only expands in a shell
+ * that enables expansion before reading the line). A construct the walker
+ * does not model contributes nothing, so the conservative reading stays
+ * "unproven", never "safe".
  */
 import {
   parse,
@@ -309,24 +313,20 @@ interface Walked extends WalkedText {
    * effect for the calls that follow it, as the shell resolves it.
    */
   readonly defined: Map<string, readonly Statement[]>;
-  /** Alias name to the literal text the text itself assigns it. */
-  readonly aliases: Map<string, string>;
-  /** The command text being read: node positions slice it for raw spellings. */
-  readonly source: string;
   readonly expanding: Set<string>;
 }
 
-function walkStatement(stmt: Statement, out: Shape): void {
+function walkStatement(stmt: Statement, out: Walked): void {
   walkCommand(stmt.command, out);
 }
 
 // Walk every statement in a list (a compound command's body), in order.
-function walkBody(body: readonly Statement[] | undefined, out: Shape): void {
+function walkBody(body: readonly Statement[] | undefined, out: Walked): void {
   for (const stmt of body ?? []) walkStatement(stmt, out);
 }
 
 // Descend into the command subcommands a word runs.
-function walkWordParts(parts: readonly WordPart[] | undefined, out: Shape): void {
+function walkWordParts(parts: readonly WordPart[] | undefined, out: Walked): void {
   for (const part of parts ?? []) {
     if (part.type === "CmdSubst" || part.type === "ProcSubst") {
       walkBody(part.stmts, out);
@@ -351,30 +351,8 @@ function walkWordParts(parts: readonly WordPart[] | undefined, out: Shape): void
   }
 }
 
-/**
- * A node's raw source spelling. The documented unit is bytes, but the parser
- * emits UTF-16 code units under multibyte text, so both slicings are tried
- * and either match counts. Nodes built outside the parser carry no span;
- * without one there is nothing to prove quoting with.
- *
- * @param source - The command text the node was parsed from.
- * @param node - The node whose span to read.
- * @returns The raw spelling, or null when the span is absent.
- */
-function rawText(
-  source: string,
-  node: { pos?: { offset: number }; end?: { offset: number } },
-): string | null {
-  if (node.pos === undefined || node.end === undefined) return null;
-  const { offset: from } = node.pos;
-  const { offset: to } = node.end;
-  const byUnits = source.slice(from, to);
-  if (byUnits.length > 0) return byUnits;
-  return Buffer.from(source).subarray(from, to).toString();
-}
-
 // An arithmetic expression's variables may be substitutions.
-function walkArith(expr: ArithExpr | undefined, out: Shape): void {
+function walkArith(expr: ArithExpr | undefined, out: Walked): void {
   if (expr === undefined) return;
   switch (expr.type) {
     case "ParamExp":
@@ -543,29 +521,11 @@ function walkSimpleCommand(cmd: SimpleCommand, out: Walked): void {
   // A call to a function defined earlier in the same text runs that body, so
   // the body is part of the action. The name is marked while expanding, which
   // stops a recursive definition from looping.
-  // `alias name='…'` assigns literal text this same command text can call.
-  // The head and the assignments are read from the raw words: an assignment
-  // word is two parts (`name=` + quoted body), so it never survives the
-  // single-word literal fold that `words` requires.
-  const firstRaw = (cmd.words ?? [])[0];
-  const rawHead = firstRaw === undefined ? null : staticText(firstRaw);
-  if (rawHead !== null && baseName(rawHead) === "alias") {
-    for (const word of (cmd.words ?? []).slice(1)) {
-      const text = staticText(word);
-      const at = text?.indexOf("=") ?? -1;
-      if (text === null || at <= 0) continue;
-      out.aliases.set(text.slice(0, at), text.slice(at + 1));
-    }
-  }
-  if (rawHead !== null && baseName(rawHead) === "unalias") {
-    for (const word of (cmd.words ?? []).slice(1)) {
-      const text = staticText(word);
-      if (text === null) continue;
-      // `unalias -a` clears every alias.
-      if (text === "-a") out.aliases.clear();
-      else out.aliases.delete(text);
-    }
-  }
+  // An `alias` body is deliberately not read: a real shell expands an alias
+  // only when the definition precedes the line being read (a same-line
+  // `alias x='…'; x` never fires) and only with expansion enabled, neither of
+  // which the text can prove. Such a call reads as an unproven command and goes
+  // to the model lane.
   if (words !== null) {
     const head = unwrap(words)[0];
     const body = head === undefined ? undefined : out.defined.get(head);
@@ -573,27 +533,6 @@ function walkSimpleCommand(cmd: SimpleCommand, out: Walked): void {
       if (isSelfPiped(head, body)) out.selfPipedFunctions.push(head);
       out.expanding.add(head);
       for (const stmt of body) walkStatement(stmt, out);
-      out.expanding.delete(head);
-    }
-    // An alias body is literal text the shell re-reads as a command line, so
-    // it is read the same way. Unparseable text contributes nothing. Any
-    // quoting of the head (`\\x`, `'x'`, `"x"`) suppresses the expansion: the
-    // parser normalizes the value, but every node carries its source span, so
-    // the raw spelling decides. A bare literal's raw text is its value.
-    const headWord = (cmd.words ?? [])[0];
-    const bareHead =
-      headWord !== undefined &&
-      headWord.parts.length === 1 &&
-      headWord.parts[0]?.type === "Literal" &&
-      rawText(out.source, headWord) === (headWord.parts[0] as { value: string }).value;
-    const aliased = head === undefined || !bareHead ? undefined : out.aliases.get(head);
-    if (aliased !== undefined && head !== undefined && !out.expanding.has(head)) {
-      out.expanding.add(head);
-      try {
-        for (const stmt of parse(aliased).ast.body) walkStatement(stmt as Statement, out);
-      } catch {
-        // Unreadable alias body: contributes nothing, never "safe".
-      }
       out.expanding.delete(head);
     }
   }
@@ -894,8 +833,6 @@ function walkText(command: string): WalkedText | null {
     inlinePrograms: [],
     executesFetch: false,
     defined: new Map(),
-    aliases: new Map(),
-    source: command,
     expanding: new Set(),
   };
   for (const stmt of program.body) walkStatement(stmt as Statement, out);
