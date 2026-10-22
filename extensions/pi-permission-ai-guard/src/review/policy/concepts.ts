@@ -24,7 +24,7 @@ export type Presence = "confirmed" | "absent" | "unknown";
  * truth). The type argument rejects a bad member at compile time; it cannot
  * catch an omission, so a new member has to be added here too.
  */
-export const PRESENCES: ReadonlySet<string> = new Set<Presence>(["confirmed", "absent", "unknown"]);
+const PRESENCES: ReadonlySet<string> = new Set<Presence>(["confirmed", "absent", "unknown"]);
 
 /**
  * Type guard: is `value` one of the presences?

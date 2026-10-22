@@ -11,6 +11,8 @@ import { contentText, type TextContent } from "@earendil-works/pi-ai";
  * - RedactSecrets: scrub common credential patterns
  * - TruncateMiddle: head+tail string truncation
  * - IsObjectRecord: type guard for non-array objects
+ * - BundledFlagHas: short-flag bundle letter test over command words
+ * - BaseName: last slash segment of a command word
  * - ShortHash: stable hash for cache keys / log correlation
  * - SafeStringify: JSON.stringify via try/catch (config snapshots, log data)
  */
@@ -106,9 +108,6 @@ const URL_USERINFO_PATTERN = /([a-z][a-z0-9+.-]{0,31}:\/\/)[^/\s?#]*@/gi;
 
 /** A run of whitespace — how every collapsed-text site splits and joins. */
 export const WHITESPACE_RUN = /\s+/g;
-
-/** Wording a provider uses when a call timed out or was cut short. */
-export const TIMEOUT_PHRASE = /timed out|timeout|aborted/i;
 
 /** The wider abort wording — see {@link classifyAbortish}. */
 const ABORTISH_PHRASE = /timeout|abort/i;
@@ -252,6 +251,38 @@ export function normalizeAndRedactText(text: string): string {
  */
 export function encodeActionTextForPrompt(text: string): string {
   return JSON.stringify(redactSecrets(stripZeroWidthChars(text)));
+}
+
+/**
+ * The last segment of a slash-separated path: `rm` for `/bin/rm`, and the word
+ * unchanged when it carries no slash. Command words are compared by this, so
+ * `/usr/bin/rm` and `rm` are the same command.
+ *
+ * @param path - The word or path.
+ * @returns The segment after the last `/` (empty for a trailing slash).
+ */
+export function baseName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+/**
+ * Whether a bundled short-flag word carries one of the letters: `-rf` has
+ * `r` and `f`, `-xec` has `e`. Long flags (`--recursive`) never match, and
+ * the scan stops at the first non-letter (`-1e` has nothing) — exactly the
+ * `/^-[a-zA-Z]*[letters]/` shape, without rebuilding the regex per call.
+ *
+ * @param word - The command word.
+ * @param letters - The flag letters to look for (literal ASCII letters).
+ * @returns True when the word is a short-flag bundle containing one of them.
+ */
+export function bundledFlagHas(word: string, letters: string): boolean {
+  if (!word.startsWith("-") || word.startsWith("--")) return false;
+  for (let i = 1; i < word.length; i++) {
+    const c = word[i] ?? "";
+    if (c < "A" || (c > "Z" && c < "a") || c > "z") return false;
+    if (letters.includes(c)) return true;
+  }
+  return false;
 }
 
 /**

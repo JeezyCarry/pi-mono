@@ -1,3 +1,7 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -771,5 +775,51 @@ describe("IMDS host is restricted-network, not a credential flag", () => {
     // Row 8, never blocks via Row 1.
     expect(facts("curl http://169.254.169.254/latest/meta-data/iam/").network).toBe("restricted");
     expect(facts("curl http://10.0.0.5:8080/admin/export").network).toBe("restricted");
+  });
+});
+
+describe("bundled short flags", () => {
+  it("read the same facts as the spelled-out flags", () => {
+    // The flag tables match a letter anywhere in a short bundle, so `-Ei` and
+    // `-E -i` must classify alike; a regression here would silently drop a
+    // modify/delete reading.
+    expect(facts("sed -Ei 's/a/b/' f.txt").commandEffect).toBe("modify");
+    expect(facts("sed -E -i 's/a/b/' f.txt").commandEffect).toBe("modify");
+    expect(facts("git clean -fdx").rewritesHistory).toBe(true);
+    expect(facts("git clean -f -d -x").rewritesHistory).toBe(true);
+    expect(facts("rm -rf dist").recursive).toBe(true);
+    expect(facts("rm -r -f dist").recursive).toBe(true);
+    // One single-letter positive per letter of a multi-letter set: the
+    // all-letters rows above also pass a narrowed set (`fdx` → `fx`), so only
+    // these pin each letter's own membership.
+    expect(facts("git clean -f").rewritesHistory).toBe(true);
+    expect(facts("git clean -d").rewritesHistory).toBe(true);
+    expect(facts("git clean -x").rewritesHistory).toBe(true);
+    expect(facts("rm -R dist").recursive).toBe(true);
+    // A long flag is not a bundle, and a digit ends the flag run.
+    expect(facts("sed --expression=x f.txt").commandEffect).toBe("read");
+  });
+});
+
+describe("module boundary", () => {
+  it("the fact reader never imports the screen's walker", () => {
+    // Two independent readers over the same AST on purpose: the facts answer
+    // "what does this do", the shape answers "what does this run". Sharing one
+    // would couple a safety rule to a fact table's vocabulary.
+    // Enumerated, not listed: a new module in the family is scanned without
+    // anyone remembering to add it here.
+    const facade = fileURLToPath(import.meta.resolve("#src/review/request/command-facts.ts"));
+    const family = readdirSync(`${dirname(facade)}/command-facts`)
+      .filter((entry) => entry.endsWith(".ts"))
+      .map((entry) => `${dirname(facade)}/command-facts/${entry}`);
+    for (const path of [facade, ...family]) {
+      const name = path.slice(path.lastIndexOf("/") + 1);
+      const text = readFileSync(path, "utf8");
+      // A per-file assertion so a future import names its own failure.
+      expect({ file: name, importsWalker: text.includes("shell-ast") }).toEqual({
+        file: name,
+        importsWalker: false,
+      });
+    }
   });
 });

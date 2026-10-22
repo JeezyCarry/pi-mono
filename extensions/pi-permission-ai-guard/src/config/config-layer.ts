@@ -268,6 +268,34 @@ interface LayerReadResult {
 }
 
 /**
+ * Report every key zod would drop silently, one level deep: a typo in a
+ * safety-relevant name (`surfaces`, `modes`) would otherwise leave the
+ * operator running the default they meant to change. Never fails the layer.
+ *
+ * @param value - The object to scan.
+ * @param allowed - The keys it may carry.
+ * @param prefix - Path prefix for the reported issue (empty at the top level).
+ * @param sourcePath - The layer file the object came from.
+ * @param issues - The issue sink.
+ */
+function reportUnknownKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  prefix: string,
+  sourcePath: string,
+  issues: ConfigIssue[],
+): void {
+  for (const key of Object.keys(value)) {
+    if (allowed.has(key)) continue;
+    issues.push({
+      path: prefix === "" ? key : `${prefix}.${key}`,
+      message: `unknown key \`${key}\`; ignored (check for a typo)`,
+      sourcePath,
+    });
+  }
+}
+
+/**
  * Read one config layer: locate the file (`config.jsonc` wins),
  * parse it as tolerant JSONC, and expand `${VAR}` refs in its string
  * leaves. Any failure pushes a file-attributed issue and resolves as
@@ -323,27 +351,13 @@ function readLayer(
   // zod drops unknown top-level keys silently; a typo in a safety-relevant
   // name (`surfaces`, `modes`) would otherwise leave the operator running the
   // default they meant to change. Report it — never fail the layer.
-  for (const key of Object.keys(parsed.value)) {
-    // A retired spelling gets its own named migration from the merged-shape
-    // pass; calling it a typo here would be wrong and a second message.
-    if (CONFIG_TOP_LEVEL_KEYS.has(key) || RETIRED_TOP_LEVEL_KEYS.has(key)) continue;
-    issues.push({
-      path: key,
-      message: `unknown key \`${key}\`; ignored (check for a typo)`,
-      sourcePath: path,
-    });
-  }
+  // A retired spelling gets its own named migration from the merged-shape
+  // pass; calling it a typo here would be wrong and a second message.
+  reportUnknownKeys(parsed.value, KNOWN_TOP_LEVEL_KEYS, "", path, issues);
   for (const [block, allowed] of NESTED_CONFIG_KEYS) {
     const value = parsed.value[block];
     if (!isObjectRecord(value)) continue;
-    for (const key of Object.keys(value)) {
-      if (allowed.has(key)) continue;
-      issues.push({
-        path: `${block}.${key}`,
-        message: `unknown key \`${key}\`; ignored (check for a typo)`,
-        sourcePath: path,
-      });
-    }
+    reportUnknownKeys(value, allowed, block, path, issues);
   }
   return { value: parsed.value, sourcePath: path, outcome: "loaded" };
 }
@@ -818,25 +832,15 @@ interface RetiredSpelling {
   claimedTopLevelKey?: string;
 }
 
-/**
- * The top-level key that still carries the old name, whatever its value.
- * zod strips a key the schema no longer knows, so judging the shape first
- * would let a malformed value (a bare `42`, or a project layer overriding
- * with `null`) take the thresholds down without a word.
- *
- * @param key - The retired key name.
- * @param merged - The merged raw config.
- * @returns The key itself when present, otherwise nothing.
- */
-function presentKey(key: string): (merged: Record<string, unknown>) => string[] {
-  return (merged) => (Object.hasOwn(merged, key) ? [key] : []);
-}
-
 /** The retired spellings, each detected by its own shape rather than by absence. */
 const RETIRED_SPELLINGS: readonly RetiredSpelling[] = [
   {
     replacement: "`typesafe` was renamed; move its thresholds to `classifier`",
-    paths: presentKey("typesafe"),
+    // Present, whatever its value: zod strips a key the schema no longer
+    // knows, so judging the shape first would let a malformed value (a bare
+    // `42`, or a project layer overriding with `null`) take the thresholds
+    // down without a word.
+    paths: (merged) => (Object.hasOwn(merged, "typesafe") ? ["typesafe"] : []),
     claimedTopLevelKey: "typesafe",
   },
   {
@@ -871,14 +875,14 @@ const RETIRED_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(
 );
 
 /**
- * Report every retired spelling the merged input still carries, each as a
- * named migration issue attributed to the layer that wrote it.
- *
- * @param merged - The merged raw config.
- * @param global - The global layer read (for notice attribution).
- * @param project - The project layer read (for notice attribution).
- * @returns The migration issues, in table order.
+ * Top-level keys that are not typos: the live keys plus the retired ones
+ * (a retired spelling gets its own migration issue, never a typo report).
  */
+const KNOWN_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
+  ...CONFIG_TOP_LEVEL_KEYS,
+  ...RETIRED_TOP_LEVEL_KEYS,
+]);
+
 /**
  * The file that owns the retired leaf: whichever layer's OWN value still
  * carries the full dotted path. Deep merge splits ownership inside a
@@ -909,6 +913,15 @@ function retiredSpellingSourcePath(
   return owner?.sourcePath ?? layerThatWrote(path.split(".")[0] ?? path, global, project);
 }
 
+/**
+ * Report every retired spelling the merged input still carries, each as a
+ * named migration issue attributed to the layer that wrote it.
+ *
+ * @param merged - The merged raw config.
+ * @param global - The global layer read (for notice attribution).
+ * @param project - The project layer read (for notice attribution).
+ * @returns The migration issues, in table order.
+ */
 function retiredSpellingIssues(
   merged: Record<string, unknown>,
   global: LayerReadResult,

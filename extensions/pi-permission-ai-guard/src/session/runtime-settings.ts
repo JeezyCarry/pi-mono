@@ -68,6 +68,29 @@ import {
 } from "./session-settings-store.ts";
 
 /**
+ * A value tagged with the layer it came from: the session's override or the
+ * merged config. Every surface that shows a setting spells the source the same
+ * way.
+ *
+ * @param value - The rendered value.
+ * @param override - Whether a session override is in effect.
+ * @returns The value with its source suffix.
+ */
+function sourceTag(value: string, override: boolean): string {
+  return `${value} (${override ? "session" : "config"})`;
+}
+
+/**
+ * The session-only suffix: the footer shows config values untagged.
+ *
+ * @param value - The rendered value.
+ * @returns The value with its session suffix.
+ */
+function sessionTag(value: string): string {
+  return `${value} (session)`;
+}
+
+/**
  * An enum-valued session setting overriding its same-named config field.
  * `name` must be a key of BOTH `SessionOverrides` and `AiGuardConfig`
  * (compile-checked) so the spec's reads and writes are real fields.
@@ -330,7 +353,7 @@ export class RuntimeSettings {
       const override = this.#readOverride(spec);
       const effective = this.#effective(spec) ?? "";
       if (effective === spec.hiddenValue) continue;
-      const fragment = override ? `${effective} (session)` : effective;
+      const fragment = override ? sessionTag(effective) : effective;
       fragments.push(this.#isHighlighted(spec, effective) ? highlightText(fragment) : fragment);
     }
     ctx.ui.setStatus(FOOTER_KEY, fragments.length > 0 ? fragments.join(" · ") : undefined);
@@ -530,7 +553,7 @@ export class RuntimeSettings {
     // Plain text — the warning-red emphasis is footer-only.
     const value = override ?? this.#effective(spec);
     const word = this.#displayWord(spec);
-    return override ? `${word} — ${value} (session)` : `${word} — ${value} (config)`;
+    return sourceTag(`${word} — ${value}`, Boolean(override));
   }
 
   /**
@@ -792,12 +815,12 @@ export class RuntimeSettings {
     const effective = this.#effective(spec);
     const word = this.#displayWord(spec);
     if (value === undefined) {
-      this.#deps.notify(`${word} = ${effective} (config)`, "info");
+      this.#deps.notify(sourceTag(`${word} = ${effective}`, false), "info");
     } else {
       // Selecting the highlighted value deserves a warning-level notice
       // (plain text — the emphasis is footer-only).
       const highlighted = this.#isHighlighted(spec, value);
-      this.#deps.notify(`${word} = ${value} (session)`, highlighted ? "warning" : "info");
+      this.#deps.notify(sourceTag(`${word} = ${value}`, true), highlighted ? "warning" : "info");
     }
     this.syncFooter(ctx);
   }

@@ -11,12 +11,26 @@
  */
 
 import type { LogEntry } from "#src/audit/decision-log-reader.ts";
-import { buildReportCandidates } from "#src/audit/report.ts";
+import {
+  DEFAULT_MIN_OCCURRENCES,
+  type ReportCandidate,
+  buildReportCandidates,
+} from "#src/audit/report.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import type { DenyRecord } from "#src/review/review-pipeline.ts";
 import type { AiGuardUiContext } from "#src/session/command/ui-context.ts";
 
 import { type RecordDetail, showRecordDetail } from "./record-detail.ts";
+
+/**
+ * One candidate's list line: how often, what, on which surface.
+ *
+ * @param c - The candidate.
+ * @returns The label.
+ */
+function suggestionLabel(c: ReportCandidate): string {
+  return `${c.occurrences}× ${c.target} (${c.surface})`;
+}
 
 /**
  * What the panels read. Kept apart from
@@ -89,7 +103,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
   // detail for the picked suggestion.
   const top = candidates.slice(0, 10);
   for (const c of top.slice(0, 5)) {
-    deps.notify(`${c.occurrences}× ${c.target} (${c.surface})`, "info");
+    deps.notify(suggestionLabel(c), "info");
   }
   if (!ctx.hasUI) {
     deps.notify("pass a picker-capable UI to browse the suggested rule fragments", "info");
@@ -99,7 +113,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
     ctx,
     "ai-guard report — pick a suggestion to view its rule",
     top,
-    (c) => `${c.occurrences}× ${c.target} (${c.surface})`,
+    suggestionLabel,
   );
   if (!picked) return;
   const detail: RecordDetail = {
@@ -108,7 +122,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
     body: [
       {
         kind: "text",
-        text: "reviewed 3+ times with no terminal deny — confirm and paste into pi-permission-system config",
+        text: `reviewed ${DEFAULT_MIN_OCCURRENCES}+ times with no terminal deny — confirm and paste into pi-permission-system config`,
         tone: "muted",
       },
       { kind: "emphasis", text: picked.suggestedRule },

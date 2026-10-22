@@ -78,7 +78,7 @@ describe("readDecisionLog", () => {
   });
 });
 
-describe("readLogLines (the explicit-path entry — the log-stats script's seam)", () => {
+describe("readLogLines (the explicit-path entry)", () => {
   it("parses an explicit path's tail exactly like the home-resolving entry", () => {
     const body = '{"event":"a"}\n{"event":"b"}\nnot json\n{"event":"c"}';
     expect(readLogLines("/any/path.jsonl", { readTailLines: seam(body) })).toEqual([

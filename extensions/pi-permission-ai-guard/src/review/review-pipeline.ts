@@ -22,6 +22,7 @@ import {
   CACHE_LOOKUP_EVENT,
   COVERAGE_EVENT,
   DECISION_EVENT,
+  DECISION_GATES,
   MODEL_REPLY_EVENT,
   SHORT_CIRCUIT_EVENT,
 } from "#src/audit/events.ts";
@@ -133,7 +134,7 @@ export function createReviewPipeline(deps: ReviewPipelineDeps): Authorizer["auth
     // decision-record.ts) — `record.gate` carries the choice, so no caller
     // re-derives it.
     const emitRecord = (record: DecisionRecordEntry): void => {
-      if (record.gate === "cache-hit" || record.gate === "policy-decided") {
+      if (record.gate === DECISION_GATES.cacheHit || record.gate === DECISION_GATES.policyDecided) {
         log.debug(DECISION_EVENT, record);
       } else {
         log.review(DECISION_EVENT, record);

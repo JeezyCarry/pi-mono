@@ -263,10 +263,11 @@ const configBaseSchema = z.object({
 
   // Transcript stripping: how much context to keep for the model review.
   transcript: transcriptSchema
-    // Spelled out because zod 4's `.default()` does NOT re-parse the value
-    // through the inner schema (only `prefault` does): `.default({})` would
-    // reach consumers with every field above undefined.
-    .default({ maxUserMessages: 5, maxToolCalls: 10, maxCharsPerEntry: 1000 }),
+    // `prefault` runs the empty object through the inner schema, so the
+    // defaults above stay the only place those numbers are written. (zod 4's
+    // `.default()` does not re-parse — `.default({})` would reach consumers
+    // with every field undefined.)
+    .prefault({}),
 
   // Surfaces to review. Glob-style patterns where `*` matches any
   // character sequence:
@@ -315,8 +316,8 @@ const configBaseSchema = z.object({
   // (resets on trip so the model gets another chance); `total` is a hard
   // session cap (never resets, so once tripped it stays tripped).
   circuitBreaker: circuitBreakerSchema
-    // Spelled out for the same zod-4 reason as `transcript` above.
-    .default({ consecutive: 3, total: 20, verdict: "deny" }),
+    // `prefault`, for the same zod-4 reason as `transcript` above.
+    .prefault({}),
 
   // Verdict cache (session-level LRU). 0 disables; only commands that reach
   // the model (policy "ask") are cached. contextHash from trusted intent
@@ -324,8 +325,8 @@ const configBaseSchema = z.object({
   // repeated commands (git status, ls, pnpm test) hit the cache on the second
   // call — zero model cost, zero latency.
   cache: cacheSchema
-    // Spelled out for the same zod-4 reason as `transcript` above.
-    .default({ maxEntries: 128 }),
+    // `prefault`, for the same zod-4 reason as `transcript` above.
+    .prefault({}),
 });
 
 /** The config shape itself. `reasoning`/`maxTokens` are ignored in classifier mode. */

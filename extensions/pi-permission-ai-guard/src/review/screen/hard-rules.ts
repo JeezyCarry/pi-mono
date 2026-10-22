@@ -7,13 +7,13 @@
  * change with its own match and never-match tests, not a configuration.
  */
 import {
-  baseName,
   DOWNLOADERS,
-  SHELL_INTERPRETERS,
   unwrap,
   type PipelineWords,
   type RedirectWrite,
 } from "#src/review/request/shell-ast.ts";
+import { SHELL_INTERPRETERS } from "#src/review/request/shell-names.ts";
+import { baseName, bundledFlagHas } from "#src/utils.ts";
 
 /** A rule hit: the rule's stable id and the reason shown to the agent. */
 export interface HardRuleHit {
@@ -332,7 +332,7 @@ function forcePushToProtectedBranch(args: readonly string[]): HardRuleHit | null
 
 function reverseShell(name: string, args: readonly string[]): HardRuleHit | null {
   const netcat =
-    ["nc", "ncat", "netcat"].includes(name) && args.some((word) => /^-[a-zA-Z]*[ec]/.test(word));
+    ["nc", "ncat", "netcat"].includes(name) && args.some((word) => bundledFlagHas(word, "ec"));
   const socat = name === "socat" && args.some((word) => /^(EXEC|SYSTEM):/i.test(word));
   return netcat || socat
     ? {

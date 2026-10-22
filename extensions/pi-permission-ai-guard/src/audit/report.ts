@@ -31,7 +31,7 @@
 import { REDACTED_PLACEHOLDER, WHITESPACE_RUN } from "#src/utils.ts";
 
 import type { LogEntry } from "./decision-log-reader.ts";
-import { DECISION_EVENT } from "./events.ts";
+import { DECISION_EVENT, DECISION_GATES } from "./events.ts";
 
 /**
  * A report candidate: one (surface, target) group that passed the
@@ -106,7 +106,9 @@ export function buildReportCandidates(
   // occurrence, and it disqualifies the group below (held here rather than
   // trusted from upstream's terminal-deny records). `emittedVerdict` carries
   // the refusal a mode escalated out of a defer.
-  const modelGates = entries.filter((e) => e.event === DECISION_EVENT && e.gate === "model");
+  const modelGates = entries.filter(
+    (e) => e.event === DECISION_EVENT && e.gate === DECISION_GATES.model,
+  );
 
   // Terminal denies by requestId — an operator refusal disqualifies the group.
   const deniedRequestIds = new Set(

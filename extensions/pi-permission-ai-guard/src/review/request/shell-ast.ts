@@ -32,6 +32,9 @@ import {
   type WordPart,
 } from "@aliou/sh";
 
+import { SHELL_INTERPRETERS, STDIN_IS_PROGRAM } from "#src/review/request/shell-names.ts";
+import { baseName } from "#src/utils.ts";
+
 /** The words of one simple command; null when any word is not a plain literal. */
 export type LiteralWords = readonly string[] | null;
 
@@ -64,38 +67,8 @@ export interface RedirectWrite {
  */
 export const DOWNLOADERS: ReadonlySet<string> = new Set(["curl", "wget"]);
 
-export function baseName(word: string): string {
-  return word.slice(word.lastIndexOf("/") + 1);
-}
-
 /** Builtins that execute the program their arguments assemble. */
 const EXEC_BUILTINS: ReadonlySet<string> = new Set(["eval", "source", "."]);
-
-/** Shell interpreter names: the only ones whose `-c` strings run as shell. */
-export const SHELL_INTERPRETERS: ReadonlySet<string> = new Set([
-  "sh",
-  "bash",
-  "zsh",
-  "dash",
-  "ksh",
-]);
-
-/** Interpreter names whose stdin is a program rather than data. */
-export const STDIN_IS_PROGRAM: ReadonlySet<string> = new Set([
-  "sh",
-  "bash",
-  "zsh",
-  "dash",
-  "ksh",
-  "python",
-  "python3",
-  "node",
-  "perl",
-  "ruby",
-  "php",
-  "sqlite3",
-  "mysql",
-]);
 
 // Wrappers that run the words after them: the name is not the command, the
 // tail is. Each entry's option surface is a closed set, so an option taking a
@@ -205,7 +178,7 @@ export function unwrap(words: readonly string[]): readonly string[] {
  */
 export function readsProgramFromStdin(words: readonly string[]): boolean {
   const bare = unwrap(words);
-  const name = bare[0]?.slice(bare[0].lastIndexOf("/") + 1) ?? "";
+  const name = baseName(bare[0] ?? "");
   if (!STDIN_IS_PROGRAM.has(name)) return false;
   const args = bare.slice(1);
   if (args.includes("-c")) return false;
@@ -651,7 +624,7 @@ function walkCommand(cmd: Command, out: Walked): void {
 // cannot hide behind its quotes.
 function collectInlineProgram(words: readonly string[], out: string[]): void {
   const bare = unwrap(words);
-  const name = bare[0]?.slice(bare[0].lastIndexOf("/") + 1) ?? "";
+  const name = baseName(bare[0] ?? "");
   if (name === "eval") {
     if (bare.length > 1) out.push(bare.slice(1).join(" "));
     return;
