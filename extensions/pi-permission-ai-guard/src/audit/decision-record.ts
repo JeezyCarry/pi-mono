@@ -24,9 +24,11 @@ import type {
   PermissionState,
 } from "@gotgenes/pi-permission-system";
 
+import { DECISION_GATES } from "#src/audit/events.ts";
 import type { BreakerVerdict } from "#src/config/config-schema.ts";
 import { PRE_CALL_MACHINERY_KINDS, type PreCallMachineryKind } from "#src/model/machinery-kinds.ts";
 import type { ReviewOutcome, VerdictKind } from "#src/model/model-verdict.ts";
+import type { HardRuleHit } from "#src/review/screen/hard-rules.ts";
 import { normalizeAndRedactText, truncateMiddle } from "#src/utils.ts";
 
 /** The audit-log correlation slice every call context carries (log + request id). */
@@ -178,8 +180,8 @@ const CLEAN_VERDICT_OMITTED = "(clean verdict, rawReply omitted)";
 
 /**
  * Longest raw model reply the audit streams keep. The record is written to the
- * review log, and ADR 0010 bounds what the logs accumulate; mid-truncation
- * keeps the tail, so a defer stays replayable.
+ * review log, and MAX_RAW_REPLY_CHARS bounds what the logs accumulate;
+ * mid-truncation keeps the tail, so a defer stays replayable.
  */
 export const MAX_RAW_REPLY_CHARS = 2000;
 
@@ -221,6 +223,23 @@ function rawReplyForRecord(reviewOutcome: ReviewOutcome, preSanitized?: string):
   return CLEAN_VERDICT_OMITTED;
 }
 
+/**
+ * The record prefix for a gate that answered without calling the model: its
+ * name and the uncalled flag. Verdict and gate specifics follow at each call
+ * site — the silent gates share only this prefix.
+ *
+ * @param base - Shared decision-record context (the no-target gates build the
+ *   identity they have).
+ * @param gate - The gate name.
+ * @returns The record prefix.
+ */
+function uncalledGate(
+  base: Pick<DecisionBase, "requestId" | "surface" | "target">,
+  gate: string,
+): Pick<DecisionRecordEntry, "requestId" | "surface" | "target" | "gate" | "modelCalled"> {
+  return { ...base, gate, modelCalled: false };
+}
+
 export const DecisionRecord = {
   /**
    * Policy already decided (allow/deny) — the link defers.
@@ -231,9 +250,7 @@ export const DecisionRecord = {
    */
   policyDecided(base: DecisionBase, policy: PolicyGateFacts): DecisionRecordEntry {
     return {
-      ...base,
-      gate: "policy-decided",
-      modelCalled: false,
+      ...uncalledGate(base, DECISION_GATES.policyDecided),
       verdict: "defer",
       policyState: policy.state,
       policyOrigin: policy.origin,
@@ -246,6 +263,23 @@ export const DecisionRecord = {
   },
 
   /**
+   * The deterministic screen hard-denied — no model was called.
+   *
+   * @param base - Shared decision-record context.
+   * @param hit - The matched rule's stable id and the reason emitted.
+   * @returns A decision record for the screen gate.
+   */
+  screenDecided(base: DecisionBase, hit: HardRuleHit): DecisionRecordEntry {
+    return {
+      ...uncalledGate(base, DECISION_GATES.screen),
+      verdict: "deny",
+      rule: hit.rule,
+      reason: hit.reason,
+      riskLevel: "critical",
+    };
+  },
+
+  /**
    * Circuit breaker tripped — short-circuits to the breaker's verdict.
    *
    * @param base - Shared decision-record context.
@@ -254,12 +288,12 @@ export const DecisionRecord = {
    */
   breaker(base: DecisionBase, cbVerdict: BreakerVerdict): DecisionRecordEntry {
     return {
-      ...base,
-      gate: "circuit-breaker",
-      modelCalled: false,
+      ...uncalledGate(base, DECISION_GATES.circuitBreaker),
       verdict: cbVerdict,
       reason: cbVerdict === "deny" ? BREAKER_DENY_REASON : undefined,
-      deferKind: cbVerdict === "defer" ? "circuit-breaker" : null,
+      // The defer kind rides the same constant as the gate: one source for the
+      // wire string, so a drifted literal cannot blind a reader to this stage.
+      deferKind: cbVerdict === "defer" ? DECISION_GATES.circuitBreaker : null,
     };
   },
 
@@ -272,9 +306,7 @@ export const DecisionRecord = {
    */
   modelUnresolved(base: DecisionBase, modelId: string): DecisionRecordEntry {
     return {
-      ...base,
-      gate: PRE_CALL_MACHINERY_KINDS.modelUnresolved,
-      modelCalled: false,
+      ...uncalledGate(base, PRE_CALL_MACHINERY_KINDS.modelUnresolved),
       verdict: "defer",
       modelId,
       deferKind: PRE_CALL_MACHINERY_KINDS.modelUnresolved,
@@ -293,11 +325,7 @@ export const DecisionRecord = {
    */
   noTarget(requestId: string, surface: string | undefined): DecisionRecordEntry {
     return {
-      requestId,
-      surface,
-      target: undefined,
-      gate: PRE_CALL_MACHINERY_KINDS.noTarget,
-      modelCalled: false,
+      ...uncalledGate({ requestId, surface, target: undefined }, PRE_CALL_MACHINERY_KINDS.noTarget),
       verdict: "defer",
       deferKind: PRE_CALL_MACHINERY_KINDS.noTarget,
     };
@@ -313,11 +341,10 @@ export const DecisionRecord = {
    */
   internalError(requestId: string, surface: string | undefined): DecisionRecordEntry {
     return {
-      requestId,
-      surface,
-      target: undefined,
-      gate: PRE_CALL_MACHINERY_KINDS.internalError,
-      modelCalled: false,
+      ...uncalledGate(
+        { requestId, surface, target: undefined },
+        PRE_CALL_MACHINERY_KINDS.internalError,
+      ),
       verdict: "defer",
       deferKind: PRE_CALL_MACHINERY_KINDS.internalError,
     };
@@ -331,9 +358,7 @@ export const DecisionRecord = {
    */
   transcriptError(base: DecisionBase): DecisionRecordEntry {
     return {
-      ...base,
-      gate: PRE_CALL_MACHINERY_KINDS.transcriptError,
-      modelCalled: false,
+      ...uncalledGate(base, PRE_CALL_MACHINERY_KINDS.transcriptError),
       verdict: "defer",
       deferKind: PRE_CALL_MACHINERY_KINDS.transcriptError,
     };
@@ -349,9 +374,7 @@ export const DecisionRecord = {
    */
   authFailed(base: DecisionBase, modelId: string, error: string): DecisionRecordEntry {
     return {
-      ...base,
-      gate: PRE_CALL_MACHINERY_KINDS.authFailed,
-      modelCalled: false,
+      ...uncalledGate(base, PRE_CALL_MACHINERY_KINDS.authFailed),
       verdict: "defer",
       modelId,
       deferKind: PRE_CALL_MACHINERY_KINDS.authFailed,
@@ -368,9 +391,7 @@ export const DecisionRecord = {
    */
   cacheHit(base: DecisionBase, verdict: AuthorizerVerdict): DecisionRecordEntry {
     return {
-      ...base,
-      gate: "cache-hit",
-      modelCalled: false,
+      ...uncalledGate(base, DECISION_GATES.cacheHit),
       verdict: verdict.kind,
       // Persist the deny reason from the original model call so audit readers
       // can see why a cached deny was returned without looking up the earlier
@@ -397,7 +418,7 @@ export const DecisionRecord = {
     } = facts;
     return {
       ...base,
-      gate: "model",
+      gate: DECISION_GATES.model,
       modelCalled: true,
       modelId,
       latencyMs: reviewOutcome.latencyMs,
@@ -449,9 +470,9 @@ export const DecisionRecord = {
  * verdict to a different emitted kind. The record's `verdict` keeps the
  * MODEL's judgment (with its reason and riskLevel); `emittedVerdict` names
  * what the link actually returned, and `mode` names which mode
- * mapped it (the default/lenient lanes route flags to human review,
- * the strict lane tightens uncertainty to denial, permissive loosens both
- * flags and uncertainty to allow, lenient only its benign/neutral
+ * mapped it (the default lane routes flags to human review, the strict
+ * lane tightens uncertainty to denial, auto denies every deny and every
+ * danger-leaned doubt, and passes only benign-leaned
  * uncertainty — the annotation covers every direction).
  *
  * @param record - The decision record for the model or cache-hit gate.

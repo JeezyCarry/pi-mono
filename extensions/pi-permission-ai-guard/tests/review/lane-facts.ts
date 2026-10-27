@@ -129,4 +129,16 @@ export const LANE_CONTEXT_FACTS: Record<Exclude<keyof ReviewRequestContext, "ask
     chat: { rendered: true, name: "target", encode: "redact" },
     classifier: { rendered: true, name: "command", encode: "redact" },
   },
+  observedFacts: {
+    chat: { rendered: true, name: "observed facts", encode: "redact" },
+    classifier: { rendered: true, name: "observed_facts", encode: "redact" },
+  },
+  // Deterministic command facts: the verdict layer reads them for the
+  // cache key; the chat prompt also renders them as labeled observations
+  // (code-constant labels and closed-set values — never free text), while
+  // the classifier state still excludes them.
+  commandFacts: {
+    chat: { rendered: true, name: "command observations", encode: "verbatim" },
+    classifier: { rendered: false, reason: "verdict-layer only — never in the state" },
+  },
 };

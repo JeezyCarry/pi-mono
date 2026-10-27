@@ -5,10 +5,16 @@
  */
 
 /**
- * The shared exclusion pattern for the positive-inclusion convention: word
- * boundaries joined by whitespace runs, so a reflow-split exclusion ("is
- * followed by a newline then not") still trips it. Both lanes test against
+ * The shared exclusion pattern for the positive-inclusion convention: each
+ * alternative keeps its own word boundaries, and the spaces inside an
+ * alternative become whitespace runs, so a reflow-split exclusion ("is"
+ * followed by a newline then "not") still trips it. Both lanes test against
  * this one set.
  */
 const EXCLUSION_SHAPE = "is not|are not|never|not this|excluding|rather than|instead of";
-export const EXCLUSION = new RegExp(`\\b(?:${EXCLUSION_SHAPE.split("|").join("\\s+")})\\b`, "i");
+export const EXCLUSION = new RegExp(
+  `\\b(?:${EXCLUSION_SHAPE.split("|")
+    .map((phrase) => phrase.replace(/ /g, "\\s+"))
+    .join("|")})\\b`,
+  "i",
+);

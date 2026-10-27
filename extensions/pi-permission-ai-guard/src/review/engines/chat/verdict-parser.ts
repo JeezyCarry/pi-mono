@@ -14,8 +14,6 @@
  * this module: its answers are calibrated probabilities, not text.
  */
 
-import { parseJsonWithRepair } from "@earendil-works/pi-ai";
-
 import { MODEL_DEFER_KIND } from "#src/model/machinery-kinds.ts";
 import type {
   ReviewOutcome,
@@ -23,7 +21,8 @@ import type {
   VerdictKind,
   VerdictLean,
 } from "#src/model/model-verdict.ts";
-import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
+import { GENERIC_DENY_REASON, isRiskLevel } from "#src/model/model-verdict.ts";
+import { extractFirstJsonObject, type JsonObjectShape } from "#src/review/json-object.ts";
 import { isObjectRecord, normalizeAndRedactText, safeStringify } from "#src/utils.ts";
 
 /**
@@ -56,25 +55,8 @@ function parseLean(value: unknown): VerdictLean | undefined {
   return typeof value === "string" && isVerdictLean(value) ? value : undefined;
 }
 
-/**
- * The valid risk levels. The `RiskLevel` type argument rejects a bad member
- * at compile time; it cannot catch an omission, so a new level means
- * editing this line too.
- */
-const RISK_LEVELS: ReadonlySet<string> = new Set<RiskLevel>(["low", "medium", "high", "critical"]);
-
 /** The valid verdicts, derived from {@link VerdictKind} (the single source of truth). */
 const VERDICT_VALUES: ReadonlySet<string> = new Set<VerdictKind>(["allow", "deny", "defer"]);
-
-/**
- * Type guard: is `value` one of the risk levels?
- *
- * @param value - The string to test.
- * @returns True if `value` is a valid risk level (type-narrowed to `RiskLevel`).
- */
-function isRiskLevel(value: string): value is RiskLevel {
-  return RISK_LEVELS.has(value);
-}
 
 /**
  * Normalize a model-provided explanation for the permission UI or audit log.
@@ -105,147 +87,20 @@ function parseRiskLevel(value: unknown): RiskLevel | undefined {
 const VERDICT_KEY_PROBE = /["']?verdict["']?\s*[:=]/i;
 
 /**
- * Does a failed JSON fragment look like an attempted verdict object?
- *
- * Matches an unquoted-or-quoted `verdict` key followed by `:` or `=`
- * (e.g. `{verdict:`, `{"verdict":`, `{verdict=`), as opposed to unrelated
- * brace noise like `{var}` or `{bad}` (skip, keep scanning).
- *
- * @param fragment - The balanced-but-unparseable candidate substring.
- * @returns True if the fragment carries a `verdict` key (`:` or `=` form).
+ * The verdict lane's JSON shape: a `verdict` key marks an attempt, and two
+ * objects that declare *different* verdicts contradict each other. A reply
+ * that states one verdict twice (or a verdict plus unrelated JSON) keeps the
+ * first.
  */
-function looksLikeVerdictAttempt(fragment: string): boolean {
-  return VERDICT_KEY_PROBE.test(fragment);
-}
-
-/**
- * Find the next occurrence of `target` char outside string literals.
- *
- * @param text - The text to search.
- * @param from - Index to start searching from.
- * @param target - The character to find.
- * @returns The index of the next occurrence, or -1 if not found.
- */
-function findNextCharOutsideString(text: string, from: number, target: string): number {
-  let inString = false;
-  let escaped = false;
-  for (let i = from; i < text.length; i++) {
-    const ch = text.charAt(i);
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\" && inString) {
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (ch === target) return i;
-  }
-  return -1;
-}
-
-/**
- * From a `{` at `start`, extract the balanced `{...}` substring.
- * Returns null if unbalanced.
- *
- * @param text - The text to extract from.
- * @param start - Index of the opening `{`.
- * @returns The balanced `{...}` substring, or null if unbalanced.
- */
-function tryExtractBalanced(text: string, start: number): string | null {
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text.charAt(i);
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (ch === "\\" && inString) {
-      escaped = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-/**
- * Extract the first balanced JSON object from a string and return it parsed.
- * Tracks brace depth and respects string literals (including escaped quotes).
- *
- * If the first balanced object fails to parse, the recovery depends on whether
- * it looks like a verdict attempt:
- *
- * - A verdict-shaped fragment that cannot become an object stops the search and returns `null`,
- *   balanced or not: unquoted keys, a cut-off quote, or a lost closing brace. A broken verdict is
- *   never overridden by an unrelated later object (prevents a deny→allow flip when the model wraps
- *   a malformed deny and then includes an allow example in its reasoning).
- * - Non-verdict-shaped brace noise (e.g. `{var}`, `{bad}`, template/markdown fragments) keeps
- *   scanning — preserving recovery when the model mentions config syntax before the real verdict
- *   JSON.
- * - A reply stating two different verdicts also returns `null`: a self-contradictory reply must not
- *   let the first object decide the ask.
- *
- * Returns `null` if no parseable object is found.
- *
- * @param text - The text to search.
- * @returns The first parseable JSON object, or `null` if none is found (or the search
- *   short-circuits).
- */
-function extractFirstJsonObject(text: string): unknown | null {
-  let start = 0;
-  let found: unknown | null = null;
-  let foundVerdict: string | undefined;
-  while (start < text.length) {
-    const nextBrace = findNextCharOutsideString(text, start, "{");
-    if (nextBrace < 0) return found;
-    const candidate = tryExtractBalanced(text, nextBrace);
-    // A cut-off verdict never reaches the parse below, so catch it here: its lost
-    // closing brace must not let a later allow example decide the ask.
-    if (candidate === null && looksLikeVerdictAttempt(text.slice(nextBrace))) return null;
-    if (candidate !== null) {
-      try {
-        const parsed = parseJsonWithRepair(candidate);
-        const kind = verdictKindOf(parsed);
-        if (found === null) {
-          found = parsed;
-          foundVerdict = kind;
-        } else if (
-          // Two disagreeing verdicts make the reply self-contradictory, and
-          // letting the first win would let an allow printed before the real
-          // deny decide the ask. `null` means unresolved (a defer).
-          foundVerdict !== undefined &&
-          kind !== undefined &&
-          kind !== foundVerdict
-        ) {
-          return null;
-        }
-      } catch {
-        // A malformed verdict attempt defers rather than being overridden by
-        // an unrelated later object; other brace noise keeps scanning.
-        if (looksLikeVerdictAttempt(candidate)) return null;
-      }
-    }
-    start = nextBrace + 1;
-  }
-  return found;
-}
+const VERDICT_SHAPE: JsonObjectShape = {
+  looksLike: (fragment) => VERDICT_KEY_PROBE.test(fragment),
+  consider: (found, value) => {
+    if (found === null) return "adopt";
+    const prior = verdictKindOf(found);
+    const next = verdictKindOf(value);
+    return prior !== undefined && next !== undefined && next !== prior ? "reject" : "skip";
+  },
+};
 
 /**
  * The `verdict` string a parsed object declares, when it declares one.
@@ -320,7 +175,7 @@ export function parseVerdictObject(
  *   none is found.
  */
 export function parseTextFallback(text: string, latencyMs: number): ReviewOutcome {
-  const parsed = extractFirstJsonObject(text);
+  const parsed = extractFirstJsonObject(text, VERDICT_SHAPE);
   if (isObjectRecord(parsed)) {
     return parseVerdictObject(parsed, latencyMs);
   }

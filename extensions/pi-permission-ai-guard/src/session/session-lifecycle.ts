@@ -122,7 +122,7 @@ interface SessionState extends SessionInputs {
   circuitBreaker: CircuitBreaker;
   /** Per-session verdict cache — avoids re-reviewing identical commands. */
   verdictCache: VerdictCache;
-  /** Per-session model-gate denies (the /ai-guard denied panel's data). */
+  /** Per-session denials (the /ai-guard denied panel's data). */
   denyHistory: DenyRecord[];
 }
 
@@ -361,8 +361,8 @@ export class SessionLifecycle {
     if (!seed.load.config) {
       this.feedbackNotify(
         seed.load.outcome === "failed"
-          ? `config not applied (${formatConfigIssues(seed.load.issues)}); no auto-review until you fix it and restart the session`
-          : "no config found; no auto-review until you add one and restart the session",
+          ? `config not applied (${formatConfigIssues(seed.load.issues)}); the reviewer stays off until you fix it and restart the session`
+          : "no config found; the reviewer stays off until you add one and restart the session",
         "error",
       );
     }
@@ -436,7 +436,7 @@ export class SessionLifecycle {
       // Pool assembly: the single place the config fans out into the
       // ordered endpoint list (primary + fallbacks, any lane mix). An
       // unresolvable endpoint throws here → caught below → fail-safe
-      // session start (no auto-review), never a per-ask surprise.
+      // session start (the reviewer stays off), never a per-ask surprise.
       const config = session.load.config;
       // Host contract: the peer floor (pi >= 1.0) provides a registry with
       // `streamSimple`, `classify`, and `findOfType`. pi erases extension
@@ -483,7 +483,7 @@ export class SessionLifecycle {
         return;
       }
       this.feedbackNotify(
-        `failed to register the reviewer; no auto-review (${errorMessage(e)})`,
+        `failed to register the reviewer; review stays off (${errorMessage(e)})`,
         "error",
       );
     }

@@ -2,15 +2,20 @@ import { describe, expect, it } from "vitest";
 
 import {
   attempt,
+  baseName,
   bestEffort,
+  bundledFlagHas,
   cacheKey,
+  deepFreeze,
   encodeActionTextForPrompt,
+  errorClassName,
   isObjectRecord,
   normalizeAndRedactText,
   normalizeText,
   redactSecrets,
   textFromContent,
   truncateMiddle,
+  underscoresToWords,
 } from "#src/utils.ts";
 
 describe("cacheKey", () => {
@@ -265,6 +270,37 @@ describe("isObjectRecord", () => {
 
   it("returns false for Symbol", () => {
     expect(isObjectRecord(Symbol("id"))).toBe(false);
+  });
+});
+
+describe("deepFreeze", () => {
+  it("freezes nested records and arrays", () => {
+    const value = { a: { b: 1 }, c: [1, { d: 2 }] };
+    deepFreeze(value);
+    expect(Object.isFrozen(value)).toBe(true);
+    expect(Object.isFrozen(value.a)).toBe(true);
+    expect(Object.isFrozen(value.c)).toBe(true);
+    expect(Object.isFrozen(value.c[1])).toBe(true);
+  });
+
+  it("freezes a self-referencing object without stacking overflow", () => {
+    // A cyclic snapshot (an object that references itself) must terminate:
+    // the visited-set returns on the second sighting instead of recursing
+    // forever. The whole graph ends up frozen.
+    const cyclic: Record<string, unknown> = { name: "root" };
+    cyclic.self = cyclic;
+    cyclic.list = [cyclic];
+    expect(() => deepFreeze(cyclic)).not.toThrow();
+    expect(Object.isFrozen(cyclic)).toBe(true);
+    expect(Object.isFrozen(cyclic.self)).toBe(true);
+    expect(Object.isFrozen(cyclic.list)).toBe(true);
+  });
+
+  it("accepts shared (diamond) references without revisiting", () => {
+    const shared = { leaf: 1 };
+    const value = { left: shared, right: shared };
+    deepFreeze(value);
+    expect(Object.isFrozen(shared)).toBe(true);
   });
 });
 
@@ -588,5 +624,54 @@ describe("redactSecrets", () => {
     const out = redactSecrets(input);
     expect(out).not.toContain("npm_0123456789abcdef0123456789abcdef0123");
     expect(out).toContain("[REDACTED]");
+  });
+});
+
+describe("bundledFlagHas", () => {
+  it("finds the letter in a short-flag bundle", () => {
+    expect(bundledFlagHas("-rf", "rR")).toBe(true);
+    expect(bundledFlagHas("-Rf", "rR")).toBe(true);
+    expect(bundledFlagHas("-xec", "ec")).toBe(true);
+  });
+
+  it("never matches a long flag, a bare dash, or an operand", () => {
+    expect(bundledFlagHas("--recursive", "rR")).toBe(false);
+    expect(bundledFlagHas("--exec", "ec")).toBe(false);
+    expect(bundledFlagHas("-", "ec")).toBe(false);
+    expect(bundledFlagHas("recursive", "rR")).toBe(false);
+  });
+
+  it("stops at the first non-letter, like the regex it replaces", () => {
+    expect(bundledFlagHas("-1e", "ec")).toBe(false);
+    expect(bundledFlagHas("-e1", "ec")).toBe(true);
+  });
+});
+
+describe("underscoresToWords", () => {
+  it("renders an enum id as words", () => {
+    expect(underscoresToWords("resource_abuse_dos")).toBe("resource abuse dos");
+    expect(underscoresToWords("plain")).toBe("plain");
+  });
+});
+
+describe("errorClassName", () => {
+  it("names the class, never the message", () => {
+    expect(errorClassName(new TypeError("bearer ghp_secret"))).toBe("TypeError");
+    expect(errorClassName(new RangeError("x"))).toBe("RangeError");
+  });
+
+  it("returns a stable token for a non-error throw", () => {
+    expect(errorClassName("boom")).toBe("string");
+    expect(errorClassName(undefined)).toBe("undefined");
+    expect(errorClassName({ message: "secret" })).toBe("object");
+  });
+});
+
+describe("baseName", () => {
+  it("takes the last slash segment, or the word itself", () => {
+    expect(baseName("/bin/rm")).toBe("rm");
+    expect(baseName("rm")).toBe("rm");
+    expect(baseName("a/b/c")).toBe("c");
+    expect(baseName("")).toBe("");
   });
 });

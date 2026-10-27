@@ -7,7 +7,7 @@
  *
  * Fail-safe: a malformed file is skipped with a recorded issue, an invalid
  * merged config yields `{ config: undefined }` (no registration — a config
- * error degrades to no auto-review, never to a wrong deny), and a save
+ * error degrades to no reviewer at all, never to a wrong deny), and a save
  * never writes an invalid snapshot.
  */
 
@@ -36,6 +36,7 @@ import {
   configSchema,
   uncoveredInstructionLanes,
 } from "./config-schema.ts";
+import { resolveModePolicy } from "./mode-policy.ts";
 import { modeWarnings } from "./mode-table.ts";
 
 /** A single validation or read error from config loading. */
@@ -46,6 +47,13 @@ export interface ConfigIssue {
   message: string;
   /** File path that produced the issue, or undefined for merged-config errors. */
   sourcePath?: string;
+  /**
+   * How the finding rates. Absent is `error` — the pre-existing meaning: the
+   * load failed. `warning` is a notice on a config that still loads, and
+   * `error` from the mode resolver is a policy that was refused while the
+   * fallback rung ran, so the guard keeps working either way.
+   */
+  severity?: "error" | "warning";
 }
 
 /** How a config load resolved — assigned at each decision point, never derived. */
@@ -54,12 +62,12 @@ export type ConfigOutcome =
   | "loaded"
   /** No config anywhere (issues empty); distinct from a broken file. */
   | "none"
-  /** Config exists but unusable (issues explain why); fail-safe, no auto-review. */
+  /** Config exists but unusable (issues explain why); fail-safe, no reviewer. */
   | "failed";
 
 /** Result of loading and validating the layered config. */
 export interface LoadConfigResult {
-  /** Validated config, or absent if loading failed (fail-safe: no auto-review). */
+  /** Validated config, or absent if loading failed (fail-safe: no reviewer). */
   config?: AiGuardConfig;
   /** All issues encountered (malformed files, schema violations). */
   issues: ConfigIssue[];
@@ -260,6 +268,34 @@ interface LayerReadResult {
 }
 
 /**
+ * Report every key zod would drop silently, one level deep: a typo in a
+ * safety-relevant name (`surfaces`, `modes`) would otherwise leave the
+ * operator running the default they meant to change. Never fails the layer.
+ *
+ * @param value - The object to scan.
+ * @param allowed - The keys it may carry.
+ * @param prefix - Path prefix for the reported issue (empty at the top level).
+ * @param sourcePath - The layer file the object came from.
+ * @param issues - The issue sink.
+ */
+function reportUnknownKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  prefix: string,
+  sourcePath: string,
+  issues: ConfigIssue[],
+): void {
+  for (const key of Object.keys(value)) {
+    if (allowed.has(key)) continue;
+    issues.push({
+      path: prefix === "" ? key : `${prefix}.${key}`,
+      message: `unknown key \`${key}\`; ignored (check for a typo)`,
+      sourcePath,
+    });
+  }
+}
+
+/**
  * Read one config layer: locate the file (`config.jsonc` wins),
  * parse it as tolerant JSONC, and expand `${VAR}` refs in its string
  * leaves. Any failure pushes a file-attributed issue and resolves as
@@ -315,27 +351,13 @@ function readLayer(
   // zod drops unknown top-level keys silently; a typo in a safety-relevant
   // name (`surfaces`, `modes`) would otherwise leave the operator running the
   // default they meant to change. Report it — never fail the layer.
-  for (const key of Object.keys(parsed.value)) {
-    // A retired spelling gets its own named migration from the merged-shape
-    // pass; calling it a typo here would be wrong and a second message.
-    if (CONFIG_TOP_LEVEL_KEYS.has(key) || RETIRED_TOP_LEVEL_KEYS.has(key)) continue;
-    issues.push({
-      path: key,
-      message: `unknown key \`${key}\`; ignored (check for a typo)`,
-      sourcePath: path,
-    });
-  }
+  // A retired spelling gets its own named migration from the merged-shape
+  // pass; calling it a typo here would be wrong and a second message.
+  reportUnknownKeys(parsed.value, KNOWN_TOP_LEVEL_KEYS, "", path, issues);
   for (const [block, allowed] of NESTED_CONFIG_KEYS) {
     const value = parsed.value[block];
     if (!isObjectRecord(value)) continue;
-    for (const key of Object.keys(value)) {
-      if (allowed.has(key)) continue;
-      issues.push({
-        path: `${block}.${key}`,
-        message: `unknown key \`${key}\`; ignored (check for a typo)`,
-        sourcePath: path,
-      });
-    }
+    reportUnknownKeys(value, allowed, block, path, issues);
   }
   return { value: parsed.value, sourcePath: path, outcome: "loaded" };
 }
@@ -810,25 +832,15 @@ interface RetiredSpelling {
   claimedTopLevelKey?: string;
 }
 
-/**
- * The top-level key that still carries the old name, whatever its value.
- * zod strips a key the schema no longer knows, so judging the shape first
- * would let a malformed value (a bare `42`, or a project layer overriding
- * with `null`) take the thresholds down without a word.
- *
- * @param key - The retired key name.
- * @param merged - The merged raw config.
- * @returns The key itself when present, otherwise nothing.
- */
-function presentKey(key: string): (merged: Record<string, unknown>) => string[] {
-  return (merged) => (Object.hasOwn(merged, key) ? [key] : []);
-}
-
 /** The retired spellings, each detected by its own shape rather than by absence. */
 const RETIRED_SPELLINGS: readonly RetiredSpelling[] = [
   {
     replacement: "`typesafe` was renamed; move its thresholds to `classifier`",
-    paths: presentKey("typesafe"),
+    // Present, whatever its value: zod strips a key the schema no longer
+    // knows, so judging the shape first would let a malformed value (a bare
+    // `42`, or a project layer overriding with `null`) take the thresholds
+    // down without a word.
+    paths: (merged) => (Object.hasOwn(merged, "typesafe") ? ["typesafe"] : []),
     claimedTopLevelKey: "typesafe",
   },
   {
@@ -863,14 +875,14 @@ const RETIRED_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set(
 );
 
 /**
- * Report every retired spelling the merged input still carries, each as a
- * named migration issue attributed to the layer that wrote it.
- *
- * @param merged - The merged raw config.
- * @param global - The global layer read (for notice attribution).
- * @param project - The project layer read (for notice attribution).
- * @returns The migration issues, in table order.
+ * Top-level keys that are not typos: the live keys plus the retired ones
+ * (a retired spelling gets its own migration issue, never a typo report).
  */
+const KNOWN_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
+  ...CONFIG_TOP_LEVEL_KEYS,
+  ...RETIRED_TOP_LEVEL_KEYS,
+]);
+
 /**
  * The file that owns the retired leaf: whichever layer's OWN value still
  * carries the full dotted path. Deep merge splits ownership inside a
@@ -901,6 +913,15 @@ function retiredSpellingSourcePath(
   return owner?.sourcePath ?? layerThatWrote(path.split(".")[0] ?? path, global, project);
 }
 
+/**
+ * Report every retired spelling the merged input still carries, each as a
+ * named migration issue attributed to the layer that wrote it.
+ *
+ * @param merged - The merged raw config.
+ * @param global - The global layer read (for notice attribution).
+ * @param project - The project layer read (for notice attribution).
+ * @returns The migration issues, in table order.
+ */
 function retiredSpellingIssues(
   merged: Record<string, unknown>,
   global: LayerReadResult,
@@ -916,12 +937,58 @@ function retiredSpellingIssues(
 }
 
 /**
+ * The retired mode values, rewritten in place before validation.
+ *
+ * `permissive` only changed its name — it is now `auto`, same cuts, same
+ * on-review-failure target. `lenient` was removed: its one distinguishing
+ * rung (a benign-leaned doubt passing) is expressible as a custom mode, so
+ * the value falls back to the resting mode and the issue points there.
+ */
+const RETIRED_MODE_VALUES: Readonly<Record<string, { to: string; message: string }>> = {
+  permissive: {
+    to: "auto",
+    message: 'mode "permissive" was renamed to "auto"; it behaves the same',
+  },
+  lenient: {
+    to: "default",
+    message:
+      'mode "lenient" was removed; running "default" instead. Its old distinguishing rung (a benign-leaned doubt passing) will be expressible as a custom mode; until then "default" asks on it',
+  },
+};
+
+/**
+ * Rewrite a retired `mode` value and report it.
+ *
+ * @param merged - The merged raw config, rewritten in place.
+ * @param issues - The issue accumulator.
+ * @param global - The global layer read (for the issue's source path).
+ * @param project - The project layer read (for the issue's source path).
+ */
+function migrateModeValue(
+  merged: Record<string, unknown>,
+  issues: ConfigIssue[],
+  global: LayerReadResult,
+  project: LayerReadResult,
+): void {
+  const value = merged.mode;
+  if (typeof value !== "string") return;
+  const retired = RETIRED_MODE_VALUES[value];
+  if (retired === undefined) return;
+  merged.mode = retired.to;
+  issues.push({
+    path: "mode",
+    message: retired.message,
+    sourcePath: retiredSpellingSourcePath("mode", global, project),
+  });
+}
+
+/**
  * Load the layered config: global then project (`config.jsonc` wins),
  * deep-merged (project overrides), `${VAR}` refs expanded per layer,
  * validated against the zod schema. The project layer is skipped when
  * untrusted — a present-but-ignored file is named as an issue so the
  * fail-safe notice doesn't claim no config exists. Fail-safe throughout:
- * an unusable layer degrades to no auto-review, never to a wrong deny.
+ * an unusable layer degrades to no reviewer, never to a wrong deny.
  *
  * @param env - Paths and project trust for layer resolution.
  * @param vars - The variable source for env-ref expansion.
@@ -973,6 +1040,12 @@ export function loadAiGuardConfig(
       ? deepMerge(global.value, project.value)
       : (global.value ?? project.value ?? {});
 
+  // A retired mode value is rewritten before validation: `permissive` only
+  // changed its name, while `lenient` was removed and falls back to the
+  // resting mode. Both report a named migration issue, so the enum's
+  // generic rejection never reaches the operator.
+  migrateModeValue(merged, issues, global, project);
+
   // A retired spelling fails the load even where zod would strip it silently
   // (an unknown top-level key is dropped, not rejected): the operator's
   // thresholds must not quietly stop applying because the block was renamed.
@@ -1000,11 +1073,31 @@ export function loadAiGuardConfig(
     });
   }
 
+  // Resolve the configured mode into the policy the pipeline runs. An
+  // unusable `custom` row falls back to a built-in rung (repair, not
+  // refusal — failing the whole config would take the guard offline over
+  // a mode choice), and every finding becomes a loader issue with the
+  // layer that wrote the leaf, so the operator knows which file to fix.
+  // The ladder-owned surprise warnings read the RESOLVED cuts, never the
+  // table default — a `mode: "custom"` load warns about the custom pair.
+  const resolution = resolveModePolicy({
+    mode: parsed.data.mode,
+    customMode: parsed.data.customMode,
+  });
+  for (const finding of resolution.issues) {
+    issues.push({
+      path: finding.path,
+      message: finding.message,
+      severity: finding.severity,
+      sourcePath: layerThatWrote(finding.path, global, project),
+    });
+  }
+
   // Ladder-owned surprise warnings (e.g. the extremes plus a breaker
   // forced to defer — the reviewer-untrusted escape valve interrupts the
   // human): the JSONC layer asks the ladder module instead of carrying
   // ladder semantics itself.
-  issues.push(...modeWarnings(parsed.data));
+  issues.push(...modeWarnings(parsed.data, resolution.policy.cuts));
 
   return { config: parsed.data, issues, outcome: "loaded" };
 }

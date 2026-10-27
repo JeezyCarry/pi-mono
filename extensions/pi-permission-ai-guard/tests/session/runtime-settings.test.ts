@@ -10,7 +10,8 @@ import { type Mock, describe, expect, it, vi } from "vitest";
 
 import type { LogEntry } from "#src/audit/decision-log-reader.ts";
 import type { SaveConfigFn } from "#src/config/config-layer.ts";
-import { MODE_VALUES, configSchema } from "#src/config/config-schema.ts";
+import { configSchema } from "#src/config/config-schema.ts";
+import { selectableModes } from "#src/config/mode-policy.ts";
 import { MODE_BLURBS } from "#src/config/mode-table.ts";
 import type { SessionOverrides } from "#src/config/session-overrides.ts";
 import type { NotifyFn } from "#src/notice.ts";
@@ -50,14 +51,14 @@ function makeBranch(...data: unknown[]): SessionBranchReader {
   };
 }
 
+// Mirrors the extension's real spec: the values/cycle/highlight derivation
+// lives in RuntimeSettings (read from the loaded config), not in the spec.
 const SPECS: readonly EnumSettingSpec[] = [
   {
     name: "mode",
-    values: [...MODE_VALUES],
+    values: [...selectableModes({ mode: "default", customMode: null })],
     description: "how denials and uncertainty are disposed",
     hiddenValue: "default",
-    cycleValues: ["default", "lenient", "permissive"],
-    highlightValue: "permissive",
     optionDetails: MODE_BLURBS,
   },
 ];
@@ -84,6 +85,8 @@ interface MakeSettingsOptions {
   saveConfig?: SaveConfigFn;
   /** The session's deny-history records (default: empty). */
   denyHistory?: DenyRecord[];
+  /** Merged over the parsed session config (e.g. a customMode block). */
+  sessionConfig?: Record<string, unknown>;
   /** The report command's log-read stub (default: no log). */
   readDecisionLog?: () => LogEntry[] | undefined;
 }
@@ -103,7 +106,10 @@ function makeSettings(overridesInit: SessionOverrides = {}, options: MakeSetting
               load: {
                 config: options.noConfig
                   ? undefined
-                  : configSchema.parse({ provider: "test", model: "test" }),
+                  : {
+                      ...configSchema.parse({ provider: "test", model: "test" }),
+                      ...options.sessionConfig,
+                    },
                 issues: [],
                 outcome: (options.noConfig ? "failed" : "loaded") as "failed" | "loaded",
               },
@@ -160,12 +166,12 @@ describe("RuntimeSettings — command", () => {
   it("the direct form applies a value: override + persist + notify + footer", async () => {
     const { settings, overrides, appendEntry, notify } = makeSettings();
     const ctx = makeUiCtx();
-    await settings.command.handler("mode lenient", ctx);
+    await settings.command.handler("mode strict", ctx);
 
-    expect(overrides.mode).toBe("lenient");
-    expect(appendEntry).toHaveBeenCalledWith("ai-guard-setting", { mode: "lenient" });
-    expectNotified(notify, { level: "info", contains: ["lenient", "session"] });
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "lenient (session)");
+    expect(overrides.mode).toBe("strict");
+    expect(appendEntry).toHaveBeenCalledWith("ai-guard-setting", { mode: "strict" });
+    expectNotified(notify, { level: "info", contains: ["strict", "session"] });
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "strict (session)");
   });
 
   it("reset clears the override, persists null, and shows the config default", async () => {
@@ -185,9 +191,7 @@ describe("RuntimeSettings — command", () => {
     appendEntry.mockImplementation(() => {
       throw new Error("session file is read-only");
     });
-    await expect(settings.command.handler("mode lenient", makeUiCtx())).rejects.toThrow(
-      "read-only",
-    );
+    await expect(settings.command.handler("mode auto", makeUiCtx())).rejects.toThrow("read-only");
     expect(overrides.mode).toBeUndefined();
   });
 
@@ -199,7 +203,7 @@ describe("RuntimeSettings — command", () => {
 
     expect(overrides.mode).toBeUndefined();
     expect(appendEntry).not.toHaveBeenCalled();
-    expectNotified(notify, { level: "error", contains: ["yolo", "lenient"] });
+    expectNotified(notify, { level: "error", contains: ["yolo", "auto"] });
     expect(notify).toHaveBeenCalledWith(
       'unknown command "surfaces" (mode, save-config, breaker, report, denied)',
       "error",
@@ -209,7 +213,7 @@ describe("RuntimeSettings — command", () => {
   it("without an active session warns instead of crashing", async () => {
     const { settings, notify } = makeSettings({}, { noSession: true });
     const ctx = makeUiCtx();
-    await settings.command.handler("mode lenient", ctx);
+    await settings.command.handler("mode auto", ctx);
     expect(notify).toHaveBeenCalledWith("no active session (config not loaded)", "warning");
   });
 
@@ -281,7 +285,7 @@ describe("RuntimeSettings — command", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
     expect(overrides.mode).toBe("strict");
   });
@@ -317,7 +321,7 @@ describe("RuntimeSettings — command", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
     expect(overrides.notifyLevel).toBe("off");
     expect(appendEntry).toHaveBeenCalledWith("ai-guard-setting", { notifyLevel: "off" });
@@ -383,7 +387,7 @@ describe("RuntimeSettings — command", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
     expect(menuCtx.ui.select).toHaveBeenCalledWith(
       "notify level — current: notify level — warning (session)",
@@ -414,8 +418,8 @@ describe("RuntimeSettings — command", () => {
     );
     expect(overrides.mode).toBeUndefined();
 
-    await settings.command.handler("mode lenient", noUi);
-    expect(overrides.mode).toBe("lenient");
+    await settings.command.handler("mode auto", noUi);
+    expect(overrides.mode).toBe("auto");
   });
 });
 
@@ -429,8 +433,7 @@ describe("RuntimeSettings — completions", () => {
     expect(completions("mode ")).toEqual([
       { value: "strict", label: "strict" },
       { value: "default", label: "default" },
-      { value: "lenient", label: "lenient" },
-      { value: "permissive", label: "permissive" },
+      { value: "auto", label: "auto" },
       { value: "reset", label: "reset" },
     ]);
     // Save verbs complete at the TOP level, not inside a setting.
@@ -480,7 +483,7 @@ describe("RuntimeSettings — completions", () => {
         label: "breaker — clear both trip tiers (cache and overrides untouched)",
       },
       { value: "report", label: "report — suggest permission rules for repeated asks" },
-      { value: "denied", label: "denied — browse this session's model denies" },
+      { value: "denied", label: "denied — browse this session's denials" },
     ]);
   });
 
@@ -498,30 +501,70 @@ describe("RuntimeSettings — shortcut", () => {
     const { settings, overrides } = makeSettings();
     const ctx = makeUiCtx();
 
-    // The cycle visits the casual subset (default → lenient →
-    // permissive), one press loosens one notch, and the wrap returns to
-    // default — only strict stays reachable via the command.
+    // The cycle visits the casual subset (default → auto), one press
+    // loosens one notch, and the wrap returns to default — only strict
+    // stays reachable via the command.
     settings.shortcut.handler(ctx);
-    expect(overrides.mode).toBe("lenient");
-    settings.shortcut.handler(ctx);
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("auto");
     settings.shortcut.handler(ctx);
     expect(overrides.mode).toBe("default");
   });
 
   it("cycles from an override, one notch looser", () => {
-    const { settings, overrides } = makeSettings({ mode: "lenient" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     settings.shortcut.handler(makeUiCtx());
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("default");
   });
 
   it("a value outside the cycle subset anchors to the subset start", () => {
     const { settings, overrides } = makeSettings({ mode: "strict" });
     settings.shortcut.handler(makeUiCtx());
     expect(overrides.mode).toBe("default");
-    const { settings: s2, overrides: o2 } = makeSettings({ mode: "permissive" });
+    const { settings: s2, overrides: o2 } = makeSettings({ mode: "auto" });
     s2.shortcut.handler(makeUiCtx());
     expect(o2.mode).toBe("default");
+  });
+
+  it("a configured custom joins the cycle last and renders red", () => {
+    const customMode = {
+      allowThrough: "defer-neutral",
+      denyFrom: "defer-danger",
+      onReviewFailure: "deny",
+    };
+    const { settings, overrides } = makeSettings({}, { sessionConfig: { customMode } });
+    const ctx = makeUiCtx();
+
+    // default → auto → custom → default: the configured row is a stop,
+    // and only the last one.
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("auto");
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("custom");
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("default");
+
+    // The ask-free custom renders in warning red like the built-in rung.
+    settings.syncFooter(ctx);
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "\x1b[1;31mcustom (session)\x1b[0m");
+  });
+
+  it("an unconfigured custom is not offered, not cyclable, not restorable", async () => {
+    const { settings, overrides } = makeSettings();
+    const ctx = makeUiCtx();
+
+    // The direct form rejects it: there are no cuts behind the name.
+    await settings.command.handler("mode custom", ctx);
+    expect(overrides.mode).toBeUndefined();
+
+    // The cycle never lands on it.
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("auto");
+    settings.shortcut.handler(ctx);
+    expect(overrides.mode).toBe("default");
+
+    // A stale session-file entry for it restores as nothing.
+    settings.restore(makeBranch({ mode: "custom" }));
+    expect(overrides.mode).toBeUndefined();
   });
 
   it("without an active session warns instead of crashing", () => {
@@ -540,7 +583,7 @@ describe("RuntimeSettings — restore + footer", () => {
   });
 
   it("restore with no entries clears any stale override", () => {
-    const { settings, overrides } = makeSettings({ mode: "lenient" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     settings.restore({ getBranch: () => [] });
     expect(overrides.mode).toBeUndefined();
   });
@@ -553,13 +596,10 @@ describe("RuntimeSettings — restore + footer", () => {
   });
 
   it("syncFooter renders the highlighted value in warning red", () => {
-    const { settings } = makeSettings({ mode: "permissive" });
+    const { settings } = makeSettings({ mode: "auto" });
     const ctx = makeUiCtx();
     settings.syncFooter(ctx);
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith(
-      "ai-guard",
-      "\x1b[1;31mpermissive (session)\x1b[0m",
-    );
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "\x1b[1;31mauto (session)\x1b[0m");
   });
 
   it("syncFooter hides the default mode — the line clears instead of showing the baseline", () => {
@@ -608,7 +648,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
       created: false,
       changed: true,
     }));
-    const { settings, notify } = makeSettings({ mode: "lenient" }, { saveConfig });
+    const { settings, notify } = makeSettings({ mode: "auto" }, { saveConfig });
     const ctx = makeUiCtx();
 
     await settings.command.handler("save-config global", ctx);
@@ -618,7 +658,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
     expect(saveConfig).toHaveBeenCalledTimes(1);
     const [target, config] = saveConfig.mock.calls[0]!;
     expect(target).toBe("global");
-    expect(config.mode).toBe("lenient"); // override won over the snapshot
+    expect(config.mode).toBe("auto"); // override won over the snapshot
     expect(config.provider).toBe("test"); // other fields intact
     expectNotified(notify, { level: "info", contains: ["cfg-global.json"] });
   });
@@ -696,7 +736,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
       created: false,
       changed: true,
     }));
-    const { settings, overrides } = makeSettings({ mode: "lenient" }, { saveConfig });
+    const { settings, overrides } = makeSettings({ mode: "auto" }, { saveConfig });
     const ctx = makeUiCtx();
 
     await settings.command.handler("mode reset", ctx); // deletes the override
@@ -707,7 +747,7 @@ describe("RuntimeSettings — save to config layer actions", () => {
   });
 
   it("reset deletes the override key outright (present ⇒ defined invariant)", () => {
-    const { settings, overrides } = makeSettings({ mode: "lenient" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     const ctx = makeUiCtx();
     void settings.command.handler("mode reset", ctx);
     expect("mode" in overrides).toBe(false);
@@ -799,34 +839,34 @@ describe("RuntimeSettings — save to config layer actions", () => {
 });
 
 describe("RuntimeSettings — picker stays plain for the highlighted value", () => {
-  it("applies a plain permissive pick and notifies at warning level, undecorated", async () => {
+  it("applies a plain auto pick and notifies at warning level, undecorated", async () => {
     const { settings, overrides, notify } = makeSettings();
-    const ctx = makeUiCtx("permissive — only clear high-danger requests are blocked");
+    const ctx = makeUiCtx("auto — benign and neutral doubts pass; danger and denials block");
     await settings.command.handler("mode", ctx);
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("auto");
     // The command surface is plain text — the warning-red emphasis is
     // footer-only. The severity bump stays.
-    expectNotified(notify, { level: "warning", contains: ["permissive", "session"] });
+    expectNotified(notify, { level: "warning", contains: ["auto", "session"] });
   });
 });
 
 describe("RuntimeSettings — settings-menu labels stay plain", () => {
   it("renders the mode label undecorated and resolves a plain pick", async () => {
-    const { settings, overrides } = makeSettings({ mode: "permissive" });
+    const { settings, overrides } = makeSettings({ mode: "auto" });
     const menuOptions: string[][] = [];
     let calls = 0;
     const ctx = makeUiCtx();
     ctx.ui.select.mockImplementation(async (_title, options) => {
       if (calls++ === 0) {
         menuOptions.push(options);
-        return "mode — permissive (session)";
+        return "mode — auto (session)";
       }
-      return "permissive";
+      return "auto";
     });
     await settings.command.handler("", ctx);
-    expect(overrides.mode).toBe("permissive");
+    expect(overrides.mode).toBe("auto");
     // The menu label is plain — the warning-red emphasis is footer-only.
-    expect(menuOptions[0]![0]).toBe("mode — permissive (session)");
+    expect(menuOptions[0]![0]).toBe("mode — auto (session)");
   });
 
   it("the menu lists every entry — settings, actions, and the read-only panels alike", async () => {
@@ -849,7 +889,7 @@ describe("RuntimeSettings — settings-menu labels stay plain", () => {
       "save config",
       "reset circuit breaker",
       "report suggested rules",
-      "browse model denies",
+      "browse denials",
     ]);
   });
 });
@@ -912,10 +952,10 @@ describe("RuntimeSettings — report command", () => {
 });
 
 describe("RuntimeSettings — denied command", () => {
-  it("notifies when the session has no model denies", async () => {
+  it("notifies when the session has no denials", async () => {
     const { settings, notify } = makeSettings();
     await settings.command.handler("denied", makeUiCtx());
-    expect(notify).toHaveBeenCalledWith("no model-gate denies in this session", "info");
+    expect(notify).toHaveBeenCalledWith("no denials in this session", "info");
   });
 
   it("picks from the standard list and opens the overlay detail with the reason whole", async () => {
@@ -1020,7 +1060,7 @@ describe("RuntimeSettings — denied command", () => {
 
     // Session 1: no denies yet.
     await settings.command.handler("denied", makeUiCtx());
-    expect(notify).toHaveBeenCalledWith("no model-gate denies in this session", "info");
+    expect(notify).toHaveBeenCalledWith("no denials in this session", "info");
 
     // Session 2: the lifecycle recreated the array — same wiring, new array.
     liveHistory = [

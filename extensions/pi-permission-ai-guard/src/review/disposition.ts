@@ -23,15 +23,17 @@
  * (see the log-stream doctrine in decision-record.ts). One writer, one place where the "never
  * demote reviewer judgment" rule is enforced.
  *
- * The pure deciding rules stay where they are (`resolveMapping` /
- * `applyVerdictMode` in verdict-rule): this module performs, it does not
- * decide. Gates declare verdict + facts; the ritual lives here.
+ * The ladder's deciding rules stay in verdict-rule (`resolveMapping` /
+ * `applyVerdictMode`); this module applies their outcome — the machinery lane's
+ * consequence (breaker credit, deny copy), the record annotation, the notice,
+ * and the agent instruction. Gates declare verdict + facts; the ritual lives
+ * here.
  */
 
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 import { type DecisionRecordEntry, mapped } from "#src/audit/decision-record.ts";
-import type { Mode } from "#src/config/config-schema.ts";
+import type { ModePolicy } from "#src/config/mode-policy.ts";
 import type { PreCallMachineryKind } from "#src/model/machinery-kinds.ts";
 import type { RiskLevel } from "#src/model/model-verdict.ts";
 import type { NotifyFn } from "#src/notice.ts";
@@ -63,8 +65,8 @@ export interface VerdictRelease {
  * transcript-error, auth-failed).
  */
 export interface MachineryGate {
-  /** The effective mode (the machinery lane's only input). */
-  mode: Mode;
+  /** The effective mode policy (the machinery lane's only input). */
+  policy: ModePolicy;
   /** The classified machinery failure (pre-call: the review never opened). */
   kind: PreCallMachineryKind;
   /** The gate's decision record (verdict "defer" — the review never opened). */
@@ -78,8 +80,8 @@ export interface MachineryGate {
  * (cache-hit and fresh model).
  */
 export interface VerdictGate {
-  /** The effective mode (the mapping's policy input). */
-  mode: Mode;
+  /** The effective mode policy (the mapping's policy input). */
+  policy: ModePolicy;
   /** The gate's decision record (un-annotated). */
   record: DecisionRecordEntry;
   /** The reviewer's verdict (model or cached). */
@@ -136,11 +138,12 @@ export function createDisposition(deps: DispositionDeps): Disposition {
   let noticeShown = false;
 
   return {
-    releaseMachineryGate({ mode, kind, record, breaker }) {
+    releaseMachineryGate({ policy, kind, record, breaker }) {
+      const mode = policy.mode;
       // The pre-call gate never holds a parsed verdict, so it maps a bare
       // defer with no model-defer context: `applyVerdictMode` takes the
       // machinery lane, the ladder's single execution site for this axis.
-      const mappedVerdict = applyVerdictMode(mode, { kind: "defer" });
+      const mappedVerdict = applyVerdictMode(policy, { kind: "defer" });
       if (mappedVerdict.kind !== "deny") {
         // Forced defer interrupts the human with no dialog context of its
         // own — same doctrine as the breaker trip: name the cause.
@@ -158,7 +161,8 @@ export function createDisposition(deps: DispositionDeps): Disposition {
       };
     },
 
-    releaseVerdictGate({ mode, record, original, emitted, riskLevel, defer, cost }) {
+    releaseVerdictGate({ policy, record, original, emitted, riskLevel, defer, cost }) {
+      const mode = policy.mode;
       const decision = resolveMapping({
         original,
         emitted,

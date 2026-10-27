@@ -6,14 +6,31 @@
 
 import type { PromptRequestFacts } from "@gotgenes/pi-permission-system";
 
+import type { CommandFacts } from "#src/review/request/command-facts.ts";
 import { cacheKey, normalizeEmpty, shortHash } from "#src/utils.ts";
 
 import type { AskContext } from "./ask.ts";
+import { readCommandFacts } from "./command-facts.ts";
+import { type ObservedFacts, snapshotObservedFacts } from "./observed-facts.ts";
 import type { StrippedTranscript } from "./transcript-stripper.ts";
 
 export interface ReviewRequestContext {
   readonly ask: AskContext;
   target: string;
+  /**
+   * The deterministic command facts for this review, computed once from
+   * the command text before the cache lookup. The verdict layer reads them;
+   * the model request never carries them — the model's residual judgment is
+   * exactly what the facts cannot answer.
+   */
+  readonly commandFacts?: CommandFacts | null;
+  /**
+   * The per-review observed-facts snapshot. The pipeline takes this once per
+   * review, before the cache lookup; the state builder, the cache material,
+   * and both lane renderers consume it, so a file change mid-review cannot
+   * put B's verdict under A's key. The next review re-snapshots.
+   */
+  readonly observedFacts?: ObservedFacts | null;
 }
 
 /**
@@ -109,7 +126,104 @@ export function reviewRequestCacheMaterial(request: ReviewRequestContext): strin
     readPath: normalizeEmpty(ask.readPath),
     resolvedAlias: normalizeEmpty(ask.resolvedAlias),
     toolInputPreview: normalizeEmpty(ask.toolInputPreview),
+    // Observed facts: the script text is decision-relevant evidence —
+    // a package.json edit invalidates the cached verdict, and so does the
+    // owning manifest moving (`manifestDir`). The absence reason is keyed
+    // too: evidence appearing where none was keyed is the same invalidation.
+    observedFacts: request.observedFacts
+      ? request.observedFacts.source === null
+        ? `absent:${request.observedFacts.reason}`
+        : JSON.stringify({
+            source: request.observedFacts.source,
+            scope: request.observedFacts.scope,
+            runner: request.observedFacts.runner,
+            lifecycleDeclared: request.observedFacts.lifecycleDeclared,
+            keys: request.observedFacts.keys,
+            scripts: request.observedFacts.scripts,
+            manifestDir: request.observedFacts.manifestDir,
+          })
+      : null,
+    // Deterministic command facts: a symlink retarget after caching must
+    // miss — the path scope the verdict rested on may have moved.
+    commandFacts: request.commandFacts
+      ? JSON.stringify({
+          pathScope: request.commandFacts.pathScope,
+          namedBuildOutput: request.commandFacts.namedBuildOutput,
+          recursive: request.commandFacts.recursive,
+          publishesArtifact: request.commandFacts.publishesArtifact,
+          sensitivePathName: request.commandFacts.sensitivePathName,
+          publicSystemPath: request.commandFacts.publicSystemPath,
+          rewritesHistory: request.commandFacts.rewritesHistory,
+          rawCopy: request.commandFacts.rawCopy,
+          allInterfaces: request.commandFacts.allInterfaces,
+          network: request.commandFacts.network,
+          dumpsEnvironment: request.commandFacts.dumpsEnvironment,
+          installsPersistence: request.commandFacts.installsPersistence,
+          grantsBeyondOwner: request.commandFacts.grantsBeyondOwner,
+          sendsData: request.commandFacts.sendsData,
+          commandEffect: request.commandFacts.commandEffect,
+          secretVariable: request.commandFacts.secretVariable,
+          routineDevCommand: request.commandFacts.routineDevCommand,
+        })
+      : null,
   });
+}
+
+/**
+ * The per-review evidence snapshot: both fact layers from one manifest read.
+ *
+ * The pipeline takes this once per review, before the cache lookup. Every
+ * consumer — the cache key, the state builder, both lane renderers — reads
+ * this one value, so a file change mid-review cannot put B's verdict under
+ * A's key.
+ */
+export interface RequestSnapshot {
+  /** The observed package evidence; null for non-bash entries. */
+  readonly observedFacts: ObservedFacts | null;
+  /** The deterministic command facts; null for non-bash entries. */
+  readonly commandFacts: CommandFacts | null;
+}
+
+/**
+ * Take the per-review evidence snapshot for a request context. Call once per
+ * review, before the cache lookup.
+ *
+ * Both layers come from the one manifest read: the command facts derive
+ * `declaredTasks` from the observed snapshot rather than re-reading the file,
+ * so they can never disagree about what the project declares.
+ *
+ * Pure read of one capped regular file plus the command text (and one
+ * `realpath` per path word — read-only metadata, never file content); every
+ * failure is an absence reason, never a throw.
+ *
+ * @param ask - The ask context to snapshot evidence for.
+ * @returns The frozen snapshot; both layers null for non-bash entries.
+ */
+export function snapshotRequest(ask: AskContext): RequestSnapshot {
+  const observedFacts = snapshotObservedFacts(ask.kind, ask.fullCommand, ask.workingDirectory);
+  return { observedFacts, commandFacts: commandFactsFrom(ask, observedFacts) };
+}
+
+function commandFactsFrom(
+  ask: AskContext,
+  observedFacts: ObservedFacts | null,
+): CommandFacts | null {
+  if (ask.kind !== "bash" || !ask.fullCommand) return null;
+  return readCommandFacts(ask.fullCommand, {
+    cwd: ask.workingDirectory,
+    declaredTasks: declaredTasksOf(observedFacts),
+  });
+}
+
+// The declared project tasks of the owning manifest, keyed by entry name.
+// Absent vouches for nothing: a command naming an undeclared task simply
+// misses the routine-command gate. Kept private — the verdict layer reads
+// `routineDevCommand`, never this map.
+function declaredTasksOf(
+  observed: ObservedFacts | null,
+): Readonly<Record<string, string>> | undefined {
+  if (observed?.source === null) return undefined;
+  return observed?.scripts;
 }
 
 /** The cache identity: the two hashes the verdict cache keys on. */

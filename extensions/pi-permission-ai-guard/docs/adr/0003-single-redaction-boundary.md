@@ -1,4 +1,4 @@
-# 4. The stripper is the single sanitization boundary for transcript entries
+# 3. The stripper is the single sanitization boundary for transcript entries
 
 Date: 2026-09-03
 

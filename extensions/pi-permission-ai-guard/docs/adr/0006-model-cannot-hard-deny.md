@@ -1,0 +1,8 @@
+# 0006 — a model cannot hard-deny; the deterministic screen can
+
+- Status: accepted. Replaces the earlier risk-label floor.
+- Context: the model's unoverridable deny was kept while no deterministic replacement existed, because demoting first would turn `rm -rf /` into a dialog. That replacement now exists: `src/review/screen/` runs after the policy gate and before the circuit breaker and the model, and hard-denies a closed set of literal commands. A model can misread a command, so an unoverridable model deny converts a misreading into a block no human can lift.
+- Decision: deny authority, not the model's self-reported `riskLevel`, selects the mapping tier (`denyTier(authority)` in `src/review/verdict-rule.ts`). A screen deny is hard in every mode; every model deny is soft (default and lenient ask, strict and permissive deny). `riskLevel` is audit-only. The model verdict stays `deny`, so notices, the denied panel, the cache and the circuit breaker behave as before. There is no legacy switch; rollback is `git revert`.
+- Screen scope: six rules plus the pipe-to-shell pipeline rule, matching only commands whose every word is literal. Anything with a variable, substitution or unparseable text passes to the model.
+- Consequences: a model false positive costs one ask instead of a block. A model false negative is unchanged. Corpus expectations treat every model deny as soft; screen-covered cases are expected to be screen denies.
+- Alternatives considered: rewriting a model deny to a defer at the pipeline (rejected: the notice, reason and breaker machinery assume the original verdict is the model's); keeping `riskLevel` as the tier (rejected: it lets the model's own opinion decide whether a human may override it).

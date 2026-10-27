@@ -1,7 +1,7 @@
 /**
  * The read-only audit panels: `/ai-guard report` (repeated same-context
  * asks, with copy-paste rule fragments) and `/ai-guard denied` (this
- * session's model-gate denies). Both are browse surfaces over data the
+ * session's denials). Both are browse surfaces over data the
  * settings surface does not own — the permission-review log's tail and the
  * session's deny history — so they live beside it rather than inside it:
  * the list rides the host's standard `ui.select` (the shared
@@ -11,12 +11,26 @@
  */
 
 import type { LogEntry } from "#src/audit/decision-log-reader.ts";
-import { buildReportCandidates } from "#src/audit/report.ts";
+import {
+  DEFAULT_MIN_OCCURRENCES,
+  type ReportCandidate,
+  buildReportCandidates,
+} from "#src/audit/report.ts";
 import type { NotifyFn } from "#src/notice.ts";
 import type { DenyRecord } from "#src/review/review-pipeline.ts";
 import type { AiGuardUiContext } from "#src/session/command/ui-context.ts";
 
 import { type RecordDetail, showRecordDetail } from "./record-detail.ts";
+
+/**
+ * One candidate's list line: how often, what, on which surface.
+ *
+ * @param c - The candidate.
+ * @returns The label.
+ */
+function suggestionLabel(c: ReportCandidate): string {
+  return `${c.occurrences}× ${c.target} (${c.surface})`;
+}
 
 /**
  * What the panels read. Kept apart from
@@ -32,7 +46,7 @@ export interface PanelReaders {
    * Returns undefined when the log cannot be read.
    */
   readDecisionLog: () => LogEntry[] | undefined;
-  /** This session's model-gate deny history (empty when no session). */
+  /** This session's deny history (empty when no session). */
   readDenyHistory: () => readonly DenyRecord[];
 }
 
@@ -89,7 +103,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
   // detail for the picked suggestion.
   const top = candidates.slice(0, 10);
   for (const c of top.slice(0, 5)) {
-    deps.notify(`${c.occurrences}× ${c.target} (${c.surface})`, "info");
+    deps.notify(suggestionLabel(c), "info");
   }
   if (!ctx.hasUI) {
     deps.notify("pass a picker-capable UI to browse the suggested rule fragments", "info");
@@ -99,7 +113,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
     ctx,
     "ai-guard report — pick a suggestion to view its rule",
     top,
-    (c) => `${c.occurrences}× ${c.target} (${c.surface})`,
+    suggestionLabel,
   );
   if (!picked) return;
   const detail: RecordDetail = {
@@ -108,7 +122,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
     body: [
       {
         kind: "text",
-        text: "reviewed 3+ times with no terminal deny — confirm and paste into pi-permission-system config",
+        text: `reviewed ${DEFAULT_MIN_OCCURRENCES}+ times with no terminal deny — confirm and paste into pi-permission-system config`,
         tone: "muted",
       },
       { kind: "emphasis", text: picked.suggestedRule },
@@ -118,7 +132,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
 }
 
 /**
- * The denied panel: this session's model-gate denies, most recent first —
+ * The denied panel: this session's denials, most recent first —
  * what the reviewer itself refused. Read-only memory, no log dependency
  * (the panel is session-scoped by construction).
  *
@@ -128,7 +142,7 @@ export async function openReportPanel(deps: PanelDeps, ctx: AiGuardUiContext): P
 export async function openDeniedPanel(deps: PanelDeps, ctx: AiGuardUiContext): Promise<void> {
   const history = deps.readDenyHistory();
   if (history.length === 0) {
-    deps.notify("no model-gate denies in this session", "info");
+    deps.notify("no denials in this session", "info");
     return;
   }
   if (!ctx.hasUI) {

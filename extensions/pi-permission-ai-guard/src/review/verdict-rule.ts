@@ -4,15 +4,17 @@
  *
  * This module owns the verdict-bearing side of the leniency ladder — the
  * hard/soft deny tiers, the soft-deny/model-defer/machinery application.
- * The ladder's operational facts (cut lines, cycle membership, emphasis,
- * config warnings) are single-sourced in {@link ../config/mode-table.ts} and
- * consumed here as data.
+ * The ladder's geometry lives in {@link ../config/suspicion.ts}; the
+ * effective policy (built-in row or resolved custom pair) arrives as a
+ * {@link ../config/mode-policy.ts!ModePolicy} — this module never indexes
+ * the table by a mode name.
  *
- * The doctrine stays local: hard-tier denies (riskLevel high|critical, or
- * missing) are terminal in every mode; reviewer machinery failures never
- * map to allow in ANY mode (a broken reviewer must not rubber-stamp) —
- * they deny under the two extremes and defer under the remaining two;
- * allow is never transformed.
+ * The doctrine stays local: a hard-tier deny (only the deterministic screen's) is
+ * terminal in every mode, and every model deny is soft, so the ladder maps it like
+ * any other doubt; danger-leaned defers ask in `default` and deny in `strict` and
+ * `auto` (neither has an ask path for danger); reviewer machinery failures never map
+ * to allow in any mode (a broken reviewer must not rubber-stamp) — they deny under
+ * `strict` and `auto` and defer under `default`; allow is never transformed.
  *
  * Pure functions: the fresh-model path and the cache-hit path both run
  * the mapping, so a cached verdict maps identically to a fresh one.
@@ -21,12 +23,8 @@
 import type { AuthorizerVerdict } from "@gotgenes/pi-permission-system";
 
 import type { Mode } from "#src/config/config-schema.ts";
-import {
-  MODE_TABLE,
-  type ModeEntry,
-  type Suspicion,
-  suspicionRank,
-} from "#src/config/mode-table.ts";
+import type { ModePolicy } from "#src/config/mode-policy.ts";
+import { type Suspicion, suspicionBand } from "#src/config/suspicion.ts";
 import { isModelDefer } from "#src/model/machinery-kinds.ts";
 import { GENERIC_DENY_REASON } from "#src/model/model-verdict.ts";
 import type { ModelCallDeferKind, RiskLevel, VerdictLean } from "#src/model/model-verdict.ts";
@@ -62,37 +60,11 @@ export interface ModelDeferInfo {
 }
 
 /**
- * The two deny tiers the ladder splits a deny into — hard (terminal in
- * every mode) and soft (mapped by the mode's cut lines).
+ * Who issued a deny. Authority, not the model's self-reported severity,
+ * decides the tier: a model can misread a command, so its deny never binds
+ * a human who can see the command; only the deterministic screen binds.
  */
-type DenyTier = "hard" | "soft";
-
-/**
- * Which mapping tier a deny falls into.
- *
- * @param riskLevel - The model's risk assessment for the deny.
- * @returns `"hard"` for high|critical or a missing risk level (absence of
- *   signal must not buy leniency), `"soft"` for low|medium.
- */
-export function denyTier(riskLevel: RiskLevel | undefined): DenyTier {
-  return riskLevel === undefined || riskLevel === "high" || riskLevel === "critical"
-    ? "hard"
-    : "soft";
-}
-
-/**
- * The machinery lane's target for a mode: deny under the two extremes
- * (`strict` — fail closed by doctrine; `permissive` — a broken reviewer
- * must not rubber-stamp), defer otherwise. Exported for the pipeline's
- * pre-call gates (no-target, model-unresolved, auth-failed,
- * transcript-error), which never hold a parsed verdict.
- *
- * @param mode - The effective mode.
- * @returns The machinery lane's target (never allow).
- */
-export function machineryTarget(mode: Mode): ModeEntry["machinery"] {
-  return MODE_TABLE[mode].machinery;
-}
+export type DenyAuthority = "screen" | "model";
 
 /**
  * Audit marker for a model defer the mode mapped to allow: the reviewer's
@@ -105,53 +77,58 @@ export const CLARIFICATION_SUPPRESSED_REASON = "clarification-suppressed";
 /**
  * Apply the configured mode to a model verdict.
  *
- * @param policy - The effective mode.
+ * @param policy - The effective mode policy (mode name plus its cut lines).
  * @param verdict - The model's (or cached) verdict.
  * @param modelDefer - Deferred-call context when the verdict is a fresh model defer.
- * @param riskLevel - The model's risk assessment for a deny verdict.
+ * @param authority - Who issued a deny verdict (default: the model).
  * @returns The verdict the link emits.
  */
 export function applyVerdictMode(
-  policy: Mode,
+  policy: ModePolicy,
   verdict: AuthorizerVerdict,
   modelDefer?: ModelDeferInfo,
-  riskLevel?: RiskLevel,
+  authority: DenyAuthority = "model",
 ): AuthorizerVerdict {
   if (verdict.kind === "allow") {
+    return verdict;
+  }
+  // The deterministic screen's deny is terminal in every mode: it never
+  // enters the ladder, so no pair of cut lines — built-in or custom — can
+  // lift it (ADR 0006). Only the screen issues hard-tier denies.
+  if (authority === "screen") {
     return verdict;
   }
   // Machinery failures are their own axis (a failure to obtain a verdict),
   // never on the suspicion line — map through the mode's machinery lane,
   // which never allows: a broken reviewer must not rubber-stamp.
   if (verdict.kind === "defer" && !isModelDefer(modelDefer?.kind)) {
-    return MODE_TABLE[policy].machinery === "deny"
-      ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy) }
+    return policy.onReviewFailure === "deny"
+      ? { kind: "deny", reason: machineryDenyReason(modelDefer?.kind, policy.mode) }
       : verdict;
   }
-  // Everything else sits on the suspicion line: a deny by its tier (a
-  // hard-tier deny is terminal in every mode — the one judgment the ladder
-  // never loosens), a model defer by its lean.
+  // Everything else sits on the suspicion line: a deny is soft (the hard rung
+  // returned above — only the screen sits there), a model defer by its lean.
+  // The lean is the reviewer's directional inclination, an audit-and-routing
+  // fact: it selects the defer lane, never surfaces to the human, and a
+  // deny-leaned defer can at best ask (never allow).
   const suspicion: Suspicion =
     verdict.kind === "deny"
-      ? denyTier(riskLevel) === "hard"
-        ? "hard-deny"
-        : "soft-deny"
+      ? "soft-deny"
       : modelDefer?.lean === "allow"
         ? "defer-benign"
         : modelDefer?.lean === "deny"
           ? "defer-danger"
           : "defer-neutral";
-  const { acceptAtOrBelow, rejectAtOrAbove } = MODE_TABLE[policy].cuts;
-  const rank = suspicionRank(suspicion);
-  if (rank <= suspicionRank(acceptAtOrBelow)) {
+  const band = suspicionBand(policy.cuts, suspicion);
+  if (band === "allow") {
     return { kind: "allow" };
   }
-  if (rank >= suspicionRank(rejectAtOrAbove)) {
+  if (band === "deny") {
     // A deny keeps its teaching reason; a rejected defer synthesizes one
     // (the model's clarification request, or the generic uncertainty copy).
     return verdict.kind === "deny"
       ? verdict
-      : { kind: "deny", reason: modelDefer?.reason ?? uncertainDenyReason(policy) };
+      : { kind: "deny", reason: modelDefer?.reason ?? uncertainDenyReason(policy.mode) };
   }
   // The ask band: a defer passes through; a softened deny becomes a defer.
   return verdict.kind === "defer" ? verdict : { kind: "defer" };
@@ -195,7 +172,7 @@ export interface MappingDecision {
    * silent. Five kinds: a model deny that HOLDS or escalates (the host renders no
    * dialog for denials, so the notify line is the operator's only copy), a mapped
    * defer (the ask tail corrects the operator's read), the once-per-pipeline
-   * fail-open notice (the mode auto-approving against the model's explicit verdict
+   * fail-open notice (the mode allowing against the model's explicit verdict
    * or its neutral uncertainty), a model defer that emitted as defer (its reason,
    * which no dialog would show), and a machinery defer that emitted as defer (the
    * cause notice).
@@ -257,8 +234,7 @@ interface MappingInput {
  * @returns The record-annotation, notify, and instruction-source decision.
  */
 export function resolveMapping(input: MappingInput): MappingDecision {
-  const { original, emitted, riskLevel, deferKind, deferReason, deferLean, mode, noticeShown } =
-    input;
+  const { original, emitted, riskLevel, deferKind, deferReason, deferLean, noticeShown } = input;
   // The agent instruction's source: machinery iff what was denied is a
   // machinery defer (the review failed — retry-later copy); content
   // otherwise (the request itself was judged — stop-pursuing copy). One
@@ -344,7 +320,7 @@ export function resolveMapping(input: MappingInput): MappingDecision {
     // "I would allow this", confirmed — allows never notify). Once per
     // pipeline: the first occurrence teaches, the rest stay quiet.
     markNoticeShown = true;
-    notice = { message: failOpenNotice(mode), level: "warning" };
+    notice = { message: failOpenNotice(), level: "warning" };
   }
   const verdict: AuthorizerVerdict =
     emitted.kind === "deny"

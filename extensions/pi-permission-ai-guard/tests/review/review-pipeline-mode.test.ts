@@ -1,13 +1,12 @@
 /**
  * Mode-semantics tests for the review pipeline: the leniency ladder
- * (default / strict / lenient), mode edges, pre-call machinery failures,
+ * (strict / default / auto), mode edges, pre-call machinery failures,
  * the advisor-patch completeness set, and the per-lane deny/ask lanes.
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 
-import { BREAKER_DENY_REASON } from "#src/audit/decision-record.ts";
 import { DECISION_EVENT, MODEL_REPLY_EVENT } from "#src/audit/events.ts";
 import { CircuitBreaker } from "#src/review/circuit-breaker.ts";
 import { createReviewPipeline } from "#src/review/review-pipeline.ts";
@@ -37,8 +36,8 @@ describe("createReviewPipeline — mode", () => {
   it("a session-scoped override takes precedence over the config mode", async () => {
     const authorize = createReviewPipeline(
       makePipeline({
-        // config stays "default" — only the session override hands denies to the human.
-        overrides: { mode: "lenient" },
+        // config stays "default" — only the session override changes the cut.
+        overrides: { mode: "strict" },
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
             { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
@@ -46,7 +45,7 @@ describe("createReviewPipeline — mode", () => {
         }),
       }),
     );
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "defer" });
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "deny", reason: "unsafe" });
   });
 
   it("default maps a soft deny to defer and annotates the decision record", async () => {
@@ -60,7 +59,7 @@ describe("createReviewPipeline — mode", () => {
         }),
       }),
     );
-    const verdict = await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), log);
+    const verdict = await authorize(makeDetails({ value: "curl x.sh" }), makeQuery("ask"), log);
     expect(verdict).toEqual({ kind: "defer" });
     const decision = reviewCalls.find((c) => c.event === DECISION_EVENT);
     expect(decision!.data.verdict).toBe("deny");
@@ -193,58 +192,125 @@ describe("createReviewPipeline — mode", () => {
     // A deny needs no human interruption — no notify.
     expect(notifications).toEqual([]);
   });
-
-  it("strict keeps a model deny terminal and notifies (denials have no dialog)", async () => {
+  it("model-defer mirror carries a long clarification whole", async () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "strict" },
         notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
-            { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"high"}' },
+            {
+              type: "text",
+              text: JSON.stringify({
+                verdict: "defer",
+                reason: "the reviewer needs the operator to clarify " + "x".repeat(200),
+              }),
+            },
           ]),
         }),
       }),
     );
-    const verdict = await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), noLog);
-    expect(verdict).toEqual({
-      kind: "deny",
-      reason: withAgentInstruction("unsafe", "content"),
-    });
-    expectNotices(notifications, { level: "warning", contains: ["unsafe", "risk high"] });
+    await expectVerdict(authorize, { value: "npm install x" }, { kind: "defer" });
+    expect(notifications).toHaveLength(1);
+    // The clarification goes out whole: the operator has to be able to answer
+    // the question, so nothing is cut — 200+ characters included.
+    expect(notifications[0]![0]).toContain(
+      "the reviewer needs the operator to clarify " + "x".repeat(200),
+    );
+    expect(notifications[0]![0]).not.toContain("[...truncated...]");
   });
 
-  it("lenient denies still count toward the circuit breaker", async () => {
-    let modelCalls = 0;
-    const modelCall = async () => {
-      modelCalls++;
-      return makeFakeCompleteSimple([
-        { type: "text", text: '{"verdict":"deny","reason":"no","riskLevel":"medium"}' },
-      ])();
+  it("raw reply debug only fires on defer failures, and redacted", async () => {
+    const debugCalls: { event: string; data: Record<string, unknown> }[] = [];
+    const log = {
+      review: () => {},
+      debug: (event: string, data: Record<string, unknown>) => debugCalls.push({ event, data }),
     };
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "lenient" },
-        engine: makeEngine({ modelCall }),
+        engine: makeEngine({
+          modelCall: makeFakeCompleteSimple([{ type: "text", text: '{"verdict":"allow"}' }]),
+        }),
       }),
     );
-    for (let i = 0; i < 3; i++) {
-      await expectVerdict(authorize, { value: `cmd-${i}` }, { kind: "defer" });
-    }
-    expect(modelCalls).toBe(3);
+    await authorize(makeDetails({ value: "ls" }), makeQuery("ask"), log);
+    expect(debugCalls.some((c) => c.event === MODEL_REPLY_EVENT)).toBe(false);
+  });
+});
 
-    // 3 consecutive model denies (even though all mapped to defers) trip the breaker.
-    const fourth = await authorize(makeDetails({ value: "cmd-3" }), makeQuery("ask"), noLog);
-    expect(fourth).toEqual({
-      kind: "deny",
-      reason: withAgentInstruction(BREAKER_DENY_REASON, "machinery"),
-    });
-    expect(modelCalls).toBe(3); // breaker short-circuited without a model call
+describe("createReviewPipeline — custom mode", () => {
+  const customMode = {
+    allowThrough: "soft-deny",
+    denyFrom: "hard-deny",
+    onReviewFailure: "defer",
+  } as const;
+
+  it("disposes by its own cuts: a soft deny passes where default would ask", async () => {
+    const authorize = createReviewPipeline(
+      makePipeline({
+        config: { ...baseConfig, mode: "custom", customMode: { ...customMode } },
+        engine: makeEngine({
+          modelCall: makeFakeCompleteSimple([
+            { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
+          ]),
+        }),
+      }),
+    );
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "allow" });
+  });
+
+  it("a machinery failure follows the custom failure lane, never allow", async () => {
+    const { notifications, notify } = makeNotifySpy();
+    const authorize = createReviewPipeline(
+      makePipeline({
+        config: { ...baseConfig, mode: "custom", customMode: { ...customMode } },
+        notify,
+        engine: makeEngine({
+          modelCall: makeFakeCompleteSimple([{ type: "text", text: "not json" }]),
+        }),
+      }),
+    );
+    // onReviewFailure "defer": the failure interrupts the human with its
+    // classified cause, and never becomes an allow.
+    await expectVerdict(authorize, { value: "ls" }, { kind: "defer" });
+    expectNotices(notifications, { level: "warning", contains: ["review unavailable"] });
   });
 });
 
 describe("createReviewPipeline — mode edges", () => {
+  it("a benign-leaned defer asks in default mode — the intent question reaches the authorizer", async () => {
+    const { notifications, notify } = makeNotifySpy();
+    const { log, reviewCalls } = makeRecordingLog();
+    const authorize = createReviewPipeline(
+      makePipeline({
+        notify,
+        engine: makeEngine({
+          modelCall: makeFakeCompleteSimple([
+            {
+              type: "text",
+              text: '{"verdict":"defer","reason":"reads a research file outside CWD","lean":"allow"}',
+            },
+          ]),
+        }),
+      }),
+    );
+    // baseConfig mode is default — an unresolved verdict keeps its ask
+    // path here: the lean is recorded, but the human answers the intent
+    // question (the thing the model structurally cannot see).
+    const verdict = await authorize(
+      makeDetails({ value: "cat /tmp/research.md" }),
+      makeQuery("ask"),
+      log,
+    );
+    expect(verdict).toEqual({ kind: "defer" });
+    expectNotices(notifications, { level: "info", contains: ["research file outside CWD"] });
+    // The audit record keeps the model's lean.
+    const record = reviewCalls.at(-1)!.data;
+    expect(record.verdict).toBe("defer");
+    expect(record.lean).toBe("allow");
+    expect(record.emittedVerdict).toBeUndefined();
+  });
+
   it("strict keeps a cached deny terminal on a cache hit (no model call, both passes notify)", async () => {
     let modelCalls = 0;
     const modelCall = async () => {
@@ -328,7 +394,7 @@ describe("createReviewPipeline — pre-call machinery failures by mode", () => {
     }),
   } as const;
 
-  // strict and permissive are the fail-closed stops: the mode denies what
+  // strict and auto are the fail-closed stops: the mode denies what
   // would fall to the human, silently (the human asked for exactly this).
   it.each(
     (
@@ -336,7 +402,7 @@ describe("createReviewPipeline — pre-call machinery failures by mode", () => {
         { mode: "strict", failure: "model-unresolved" },
         { mode: "strict", failure: "auth-failed" },
         { mode: "strict", failure: "transcript-error" },
-        { mode: "permissive", failure: "model-unresolved" },
+        { mode: "auto", failure: "model-unresolved" },
       ] as const
     ).map(({ mode, failure }) => ({
       mode,
@@ -368,22 +434,20 @@ describe("createReviewPipeline — pre-call machinery failures by mode", () => {
     },
   );
 
-  // default and lenient defer the same failure to the human and say why.
-  it.each(["default", "lenient"] as const)(
-    "notifies when a pre-call machinery failure forces a defer in %s mode",
-    async (mode) => {
-      const { notifications, notify } = makeNotifySpy();
-      const authorize = createReviewPipeline(
-        makePipeline({
-          config: { ...baseConfig, mode },
-          engine: makeEngine({ registry: defaultRegistry({ find: () => undefined }) }),
-          notify,
-        }),
-      );
-      await expectVerdict(authorize, { value: "npm test" }, { kind: "defer" });
-      expectNotices(notifications, { level: "warning", contains: ["model-unresolved"] });
-    },
-  );
+  // default defers a pre-call failure to the human and says why.
+  it("notifies when a pre-call machinery failure forces a defer in default mode", async () => {
+    const mode = "default";
+    const { notifications, notify } = makeNotifySpy();
+    const authorize = createReviewPipeline(
+      makePipeline({
+        config: { ...baseConfig, mode },
+        engine: makeEngine({ registry: defaultRegistry({ find: () => undefined }) }),
+        notify,
+      }),
+    );
+    await expectVerdict(authorize, { value: "npm test" }, { kind: "defer" });
+    expectNotices(notifications, { level: "warning", contains: ["model-unresolved"] });
+  });
 
   it("notifies when an in-call machinery failure (empty reply) forces a defer — every time", async () => {
     const { notifications, notify } = makeNotifySpy();
@@ -463,7 +527,7 @@ describe("createReviewPipeline — advisor patches (strict completeness + audit)
     expect(record.emittedReason).toMatch(OPERATOR_COPY_SHAPE);
   });
 
-  it("default/lenient model-defer mirrors the clarification request to the human", async () => {
+  it("default model-defer mirrors the clarification request to the human", async () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
       makePipeline({
@@ -482,134 +546,6 @@ describe("createReviewPipeline — advisor patches (strict completeness + audit)
     expectNotices(notifications, {
       level: "info",
       contains: ["which package manager does this project use?"],
-    });
-  });
-
-  it("model-defer mirror carries a long clarification whole", async () => {
-    const { notifications, notify } = makeNotifySpy();
-    const authorize = createReviewPipeline(
-      makePipeline({
-        notify,
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([
-            {
-              type: "text",
-              text: JSON.stringify({
-                verdict: "defer",
-                reason: "the reviewer needs the operator to clarify " + "x".repeat(200),
-              }),
-            },
-          ]),
-        }),
-      }),
-    );
-    await expectVerdict(authorize, { value: "npm install x" }, { kind: "defer" });
-    expect(notifications).toHaveLength(1);
-    // The clarification goes out whole: the operator has to be able to answer
-    // the question, so nothing is cut — 200+ characters included.
-    expect(notifications[0]![0]).toContain(
-      "the reviewer needs the operator to clarify " + "x".repeat(200),
-    );
-    expect(notifications[0]![0]).not.toContain("[...truncated...]");
-  });
-
-  it("a benign-leaned defer asks in default mode — the intent question reaches the authorizer", async () => {
-    const { notifications, notify } = makeNotifySpy();
-    const { log, reviewCalls } = makeRecordingLog();
-    const authorize = createReviewPipeline(
-      makePipeline({
-        notify,
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([
-            {
-              type: "text",
-              text: '{"verdict":"defer","reason":"reads a research file outside CWD","lean":"allow"}',
-            },
-          ]),
-        }),
-      }),
-    );
-    // baseConfig mode is default — an unresolved verdict keeps its ask
-    // path here: the lean is recorded, but the human answers the intent
-    // question (the thing the model structurally cannot see).
-    const verdict = await authorize(
-      makeDetails({ value: "cat /tmp/research.md" }),
-      makeQuery("ask"),
-      log,
-    );
-    expect(verdict).toEqual({ kind: "defer" });
-    expectNotices(notifications, { level: "info", contains: ["research file outside CWD"] });
-    // The audit record keeps the model's lean.
-    const record = reviewCalls.at(-1)!.data;
-    expect(record.verdict).toBe("defer");
-    expect(record.lean).toBe("allow");
-    expect(record.emittedVerdict).toBeUndefined();
-  });
-
-  it("a benign-leaned defer passes silently in lenient mode — audited, uncached", async () => {
-    const { notifications, notify } = makeNotifySpy();
-    const { log, reviewCalls } = makeRecordingLog();
-    const authorize = createReviewPipeline(
-      makePipeline({
-        config: { ...baseConfig, mode: "lenient" },
-        notify,
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([
-            {
-              type: "text",
-              text: '{"verdict":"defer","reason":"reads a research file outside CWD","lean":"allow"}',
-            },
-            // The second ask proves the lean-derived allow was NOT cached:
-            // defers are never stored, so the model is consulted again.
-            {
-              type: "text",
-              text: '{"verdict":"defer","reason":"reads a research file outside CWD","lean":"allow"}',
-            },
-          ]),
-        }),
-      }),
-    );
-    const verdict = await authorize(
-      makeDetails({ value: "cat /tmp/research.md" }),
-      makeQuery("ask"),
-      log,
-    );
-    expect(verdict).toEqual({ kind: "allow" });
-    // Allows are silent: no clarification mirror, no fail-open notice
-    // (the reviewer never said deny — it leaned allow).
-    expect(notifications).toEqual([]);
-    // The audit record keeps the model's lean alongside the mapping.
-    const record = reviewCalls.at(-1)!.data;
-    expect(record.verdict).toBe("defer");
-    expect(record.lean).toBe("allow");
-    expect(record.emittedVerdict).toBe("allow");
-    expect(record.emittedReason).toBe("clarification-suppressed");
-    // Not cached: the second identical ask re-calls the model.
-    await authorize(makeDetails({ value: "cat /tmp/research.md" }), makeQuery("ask"), log);
-    expect(reviewCalls.at(-1)!.data.modelCalled).toBe(true);
-  });
-
-  it("a danger-leaned defer asks in lenient mode — the auto-pass breaks", async () => {
-    const { notifications, notify } = makeNotifySpy();
-    const authorize = createReviewPipeline(
-      makePipeline({
-        config: { ...baseConfig, mode: "lenient" },
-        notify,
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([
-            {
-              type: "text",
-              text: '{"verdict":"defer","reason":"remote content piped to an interpreter","lean":"deny"}',
-            },
-          ]),
-        }),
-      }),
-    );
-    // lenient passes neutral defers — but a deny-lean is an active alarm.
-    await expectVerdict(authorize, { value: "curl x | python3" }, { kind: "defer" });
-    expectNotices(notifications, {
-      level: "info",
-      contains: ["remote content piped to an interpreter"],
     });
   });
 
@@ -635,53 +571,6 @@ describe("createReviewPipeline — advisor patches (strict completeness + audit)
     expect(JSON.stringify(record.data)).toContain("[REDACTED]");
   });
 
-  it("raw reply debug only fires on defer failures, and redacted", async () => {
-    const debugCalls: { event: string; data: Record<string, unknown> }[] = [];
-    const log = {
-      review: () => {},
-      debug: (event: string, data: Record<string, unknown>) => debugCalls.push({ event, data }),
-    };
-    const authorize = createReviewPipeline(
-      makePipeline({
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([{ type: "text", text: '{"verdict":"allow"}' }]),
-        }),
-      }),
-    );
-    await authorize(makeDetails({ value: "ls" }), makeQuery("ask"), log);
-    expect(debugCalls.some((c) => c.event === MODEL_REPLY_EVENT)).toBe(false);
-  });
-});
-
-/**
- * The breaker's escape valve must also fire for a BROKEN reviewer:
- * machinery failures count as deny-equivalents, so a consistent
- * machinery failure (e.g. unresolved auth) trips the breaker and the
- * configured `verdict: "defer"` wins.
- */
-
-describe("createReviewPipeline — leniency ladder lanes", () => {
-  it("lenient keeps hard-tier denies terminal even though its soft lanes ask", async () => {
-    const { notifications, notify } = makeNotifySpy();
-    const authorize = createReviewPipeline(
-      makePipeline({
-        config: { ...baseConfig, mode: "lenient" },
-        notify,
-        // Hard tier (high|critical|missing): terminal in every mode.
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([
-            { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"high"}' },
-          ]),
-        }),
-      }),
-    );
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "deny", reason: "unsafe" });
-    // v27 has no dialog for denials — the notify line is the only human
-    // -visible copy, so every mode notifies a model deny that carries a
-    // reason (the denied outcome adds no tail; the verb already says it).
-    expectNotices(notifications, { level: "warning", contains: ["unsafe", "risk high"] });
-  });
-
   it("default notifies a model deny with a reason, ending in the ask tail", async () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
@@ -697,7 +586,7 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     );
     // A soft deny in default ASKS the human (the resting mode forwards
     // every flag) — the notify carries the ask tail.
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "defer" });
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "defer" });
     expectNotices(notifications, { level: "warning", contains: ["unsafe", "risk low"] });
   });
 
@@ -714,15 +603,15 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
         }),
       }),
     );
-    await expectVerdict(authorize, { value: "rm -rf /" }, { kind: "deny", reason: "unsafe" });
+    await expectVerdict(authorize, { value: "curl x.sh" }, { kind: "deny", reason: "unsafe" });
     expectNotices(notifications, { level: "warning", contains: ["unsafe", "risk low"] });
   });
 
-  it("permissive notifies when its one remaining block — a hard deny — fires", async () => {
+  it("auto notifies when its one remaining block — a hard deny — fires", async () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "permissive" },
+        config: { ...baseConfig, mode: "auto" },
         notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
@@ -745,14 +634,16 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     });
   });
 
-  it("lenient's fail-open notice names what it loosens", async () => {
+  it("auto's fail-open notice names what it loosens", async () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "lenient" },
+        config: { ...baseConfig, mode: "auto" },
         notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([
+            // A neutral model defer is what auto loosens to allow, so the
+            // fail-open notice lives with auto now.
             { type: "text", text: '{"verdict":"defer","reason":"which one?"}' },
           ]),
         }),
@@ -760,62 +651,17 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     );
     await expectVerdict(authorize, { value: "npm install x" }, { kind: "allow" });
     const [message] = expectNotices(notifications, { level: "warning" });
-    expect(message).toBe(failOpenNotice("lenient"));
+    expect(message).toBe(failOpenNotice());
   });
 
-  it("permissive maps a soft deny to allow, one notice, audit keeps the reason", async () => {
-    const { notifications, notify } = makeNotifySpy();
-    const { log, reviewCalls } = makeRecordingLog();
-    const authorize = createReviewPipeline(
-      makePipeline({
-        config: { ...baseConfig, mode: "permissive" },
-        notify,
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([
-            { type: "text", text: '{"verdict":"deny","reason":"unsafe","riskLevel":"low"}' },
-          ]),
-        }),
-      }),
-    );
-    await authorize(makeDetails({ value: "rm -rf /" }), makeQuery("ask"), log);
-    const record = reviewCalls.find((c) => c.event === DECISION_EVENT)!.data;
-    expect(record.verdict).toBe("deny");
-    expect(record.emittedVerdict).toBe("allow");
-    expect(record.emittedReason).toBe("unsafe");
-    expect(record.mode).toBe("permissive");
-    // Once per pipeline instance, warning-level.
-    const [message] = expectNotices(notifications, { level: "warning" });
-    expect(message).toBe(failOpenNotice("permissive"));
-  });
-
-  it("lenient maps a model defer to allow and marks the swallowed clarification", async () => {
-    const { log, reviewCalls } = makeRecordingLog();
-    const authorize = createReviewPipeline(
-      makePipeline({
-        config: { ...baseConfig, mode: "lenient" },
-        engine: makeEngine({
-          modelCall: makeFakeCompleteSimple([
-            { type: "text", text: '{"verdict":"defer","reason":"which package manager?"}' },
-          ]),
-        }),
-      }),
-    );
-    const verdict = await authorize(makeDetails({ value: "npm install x" }), makeQuery("ask"), log);
-    expect(verdict).toEqual({ kind: "allow" });
-    const record = reviewCalls.find((c) => c.event === DECISION_EVENT)!.data;
-    expect(record.verdict).toBe("defer");
-    expect(record.emittedVerdict).toBe("allow");
-    expect(record.emittedReason).toBe("clarification-suppressed");
-  });
-
-  it("permissive still denies machinery failures and counts them into the breaker", async () => {
+  it("auto still denies machinery failures and counts them into the breaker", async () => {
     const { notifications, notify } = makeNotifySpy();
     const breaker = new CircuitBreaker();
     const authorize = createReviewPipeline(
       makePipeline({
         config: {
           ...baseConfig,
-          mode: "permissive",
+          mode: "auto",
           circuitBreaker: { consecutive: 2, total: 20, verdict: "defer" },
         },
         circuitBreaker: breaker,
@@ -831,7 +677,7 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
       { value: "rm x" },
       {
         kind: "deny",
-        reason: machineryDenyReason("no-json", "permissive"),
+        reason: machineryDenyReason("no-json", "auto"),
       },
       "ask",
       "machinery",
@@ -845,7 +691,7 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     const { notifications, notify } = makeNotifySpy();
     const authorize = createReviewPipeline(
       makePipeline({
-        config: { ...baseConfig, mode: "permissive" },
+        config: { ...baseConfig, mode: "auto" },
         notify,
         engine: makeEngine({
           modelCall: makeFakeCompleteSimple([{ type: "text", text: '{"verdict":"defer"}' }]),
@@ -870,18 +716,16 @@ describe("createReviewPipeline — leniency ladder lanes", () => {
     expect(record.verdict).toBe("defer");
     expect(record.emittedVerdict).toBeUndefined();
 
-    // permissive: same ask denies with the machinery reason and a mapped record.
-    const { log: permissiveLog, reviewCalls: permissiveCalls } = makeRecordingLog();
-    const permissive = createReviewPipeline(
-      makePipeline({ config: { ...baseConfig, mode: "permissive" } }),
-    );
-    await permissive(makeDetails({ value: "", command: "" }), makeQuery("ask"), permissiveLog);
-    const deny = permissiveCalls.at(-1)!.data;
+    // auto: same ask denies with the machinery reason and a mapped record.
+    const { log: autoLog, reviewCalls: autoCalls } = makeRecordingLog();
+    const auto = createReviewPipeline(makePipeline({ config: { ...baseConfig, mode: "auto" } }));
+    await auto(makeDetails({ value: "", command: "" }), makeQuery("ask"), autoLog);
+    const deny = autoCalls.at(-1)!.data;
     expect(deny.gate).toBe("no-target");
     expect(deny.verdict).toBe("defer");
     expect(deny.emittedVerdict).toBe("deny");
     expect(deny.emittedReason).toContain("no-target");
-    expect(deny.emittedReason).toContain("permissive");
+    expect(deny.emittedReason).toContain("auto");
     expect(deny.emittedReason).toMatch(OPERATOR_COPY_SHAPE);
   });
 });

@@ -4,10 +4,10 @@ import type {
   ClassifierQuestion,
   ClassifierResult,
   JsonObject,
-  JsonValue,
 } from "@earendil-works/pi-ai";
 
 import type { ClassifierQuestionId } from "#src/config/config-schema.ts";
+import { CLASSIFIER_QUESTION_SET } from "#src/review/axes/questions.ts";
 import type { ClassifierPoolEndpoint } from "#src/review/pool.ts";
 import type { ReviewRequestContext } from "#src/review/request/review-request.ts";
 import type { StrippedTranscript } from "#src/review/request/transcript-stripper.ts";
@@ -18,7 +18,6 @@ import {
   type ClassifierOverlay,
   type ClassifierQuestionEntry,
 } from "./instructions.ts";
-import { DANGER_CRITERIA, INTENT_MATCH_CRITERIA, RISK_RUBRIC } from "./questions.ts";
 
 /**
  * Options for one classifier call: the pi-ai classifier knobs the lane
@@ -78,7 +77,7 @@ const CLASSIFIER_REVIEWER_BACKGROUND =
  */
 function buildState(request: ReviewRequestContext, transcript: StrippedTranscript): JsonObject {
   const { ask } = request;
-  const state: { [key: string]: JsonValue } = {
+  const state: JsonObject = {
     // The action: the bash command when there is one, else the raw value, else
     // the resolved target; a degraded (forwarded) ask whose value is empty is
     // still reviewed on what the ask's fields yielded.
@@ -115,6 +114,33 @@ function buildState(request: ReviewRequestContext, transcript: StrippedTranscrip
     state.matched_spelling = normalizeAndRedactText(ask.request.matchedSpelling);
   }
   if (ask.request.commandContext) state.command_context = ask.request.commandContext;
+  // Observed facts: the per-review snapshot the pipeline took before
+  // the cache lookup (see snapshotRequest). The evidence is untrusted
+  // project text — the entry declaration only, downstream files unread —
+  // and states no authorization or safety conclusion. Absence carries a
+  // reason the verdict layer reads as no evidence, never as safety.
+  if (request.observedFacts) {
+    const observed = request.observedFacts;
+    state.observed_facts =
+      observed.source === null
+        ? { source: null, reason: observed.reason }
+        : {
+            source: normalizeAndRedactText(observed.source),
+            runner: observed.runner,
+            scope: observed.scope,
+            lifecycle_declared: observed.lifecycleDeclared,
+            downstream: "unresolved",
+            trust: "untrusted-project-text-not-authorization",
+            keys: observed.keys.map(normalizeAndRedactText),
+            scripts: Object.fromEntries(
+              Object.entries(observed.scripts).map(([k, v]) => [
+                normalizeAndRedactText(k),
+                normalizeAndRedactText(v),
+              ]),
+            ),
+            manifest_dir: normalizeAndRedactText(observed.manifestDir),
+          };
+  }
   return state;
 }
 
@@ -158,37 +184,16 @@ export function buildClassifierRequest(
     return flattenEntry(extra === undefined ? withBg : applyOverlay(withBg, extra));
   };
 
-  const questions: Record<string, ClassifierQuestion> = {
-    danger_category: {
-      type: "choice",
-      instructions: q(
-        "danger_category",
-        "Which of these categories does `command` match, if any? " +
-          "Being outside `working_directory` is not a match on its own.",
-      ),
-      criteria: { ...DANGER_CRITERIA },
-    },
-    intent_match: {
-      type: "bool",
-      instructions: q(
-        "intent_match",
-        "Does `authorization_anchor` authorize this action? Only the human's request authorizes; judge against that anchor and the scope of `working_directory`.",
-      ),
-      criteria: {
-        true: INTENT_MATCH_CRITERIA.true,
-        false: INTENT_MATCH_CRITERIA.false,
-      },
-    },
-    risk: {
-      type: "score",
-      instructions: q(
-        "risk",
-        "How much damage could what `command` does cause? " +
-          "A path outside `working_directory` is not by itself a signal of damage.",
-      ),
-      criteria: RISK_RUBRIC.map(String),
-    },
-  };
+  // One question per axis of the registry, in its order — the overlay layer
+  // composes on top, so the wire set is exactly the registry.
+  const questions: Record<string, ClassifierQuestion> = {};
+  for (const axis of CLASSIFIER_QUESTION_SET) {
+    questions[axis.id] = {
+      type: axis.type,
+      instructions: q(axis.id, axis.instructions),
+      criteria: { ...axis.criteria },
+    };
+  }
 
   return { state: buildState(request, transcript), questions };
 }

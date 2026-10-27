@@ -91,8 +91,7 @@ export function reviewLogPath(agentDir: string = getAgentDir()): string {
 /**
  * Read and parse a JSONL log tail: the format's single owner (tolerant
  * line parse + the record shape). Path-resolving callers use
- * {@link readDecisionLog}; callers with an explicit path (the log-stats
- * script's `--file` override) use this entry directly.
+ * {@link readDecisionLog}; a caller holding its own path uses this entry directly.
  *
  * @param path - The log file path.
  * @param deps - The tail-read seam (injected; production reads the file).

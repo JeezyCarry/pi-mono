@@ -68,9 +68,9 @@ describe("human-facing messages", () => {
     expect(named).toMatch(OPERATOR_COPY_SHAPE);
 
     // A missing kind still has to say so, and still has to name the mode.
-    const unknown = machineryDenyReason(undefined, "permissive");
+    const unknown = machineryDenyReason(undefined, "auto");
     expect(unknown).toContain("unknown");
-    expect(unknown).toContain("permissive");
+    expect(unknown).toContain("auto");
     expect(unknown).toMatch(OPERATOR_COPY_SHAPE);
   });
 
@@ -89,11 +89,8 @@ describe("human-facing messages", () => {
     expect(fresh).toContain("42ms");
     expect(fresh).toMatch(OPERATOR_COPY_SHAPE);
 
-    const mode = approvalNotice(
-      { kind: "mode", mode: "permissive" },
-      { kind: "fresh", latencyMs: 1500 },
-    );
-    expect(mode).toContain("permissive");
+    const mode = approvalNotice({ kind: "mode", mode: "auto" }, { kind: "fresh", latencyMs: 1500 });
+    expect(mode).toContain("auto");
     expect(mode).toContain("1.5s");
     // The auto-approval says whose decision it was, not just the cost.
     expect(mode).not.toBe(fresh);

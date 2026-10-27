@@ -27,8 +27,8 @@ describe("provider union", () => {
     const parsed = configSchema.safeParse(classifierBase);
     expect(parsed.success).toBe(true);
     if (!parsed.success) return;
-    expect(parsed.data.classifier.intentThreshold).toBe(0.5);
-    expect(parsed.data.classifier.riskThreshold).toBe(0.5);
+    // The one threshold, with its retained 0.5 default — and no transport
+    // knobs inside the policy block.
     expect(parsed.data.classifier.confidenceThreshold).toBe(0.5);
     expect("timeoutMs" in parsed.data.classifier).toBe(false);
   });
@@ -37,7 +37,8 @@ describe("provider union", () => {
     // A stripped typo would leave the reviewer on 0.5 with no feedback, while
     // the JSON schema (additionalProperties: false) flags it in the editor.
     expect(
-      configSchema.safeParse({ ...classifierBase, classifier: { intentTreshold: 0.9 } }).success,
+      configSchema.safeParse({ ...classifierBase, classifier: { confidenceTreshold: 0.9 } })
+        .success,
     ).toBe(false);
   });
 
@@ -52,7 +53,7 @@ describe("provider union", () => {
     expect(parsed.success).toBe(true);
     if (!parsed.success) return;
     expect("typesafe" in parsed.data).toBe(false);
-    expect(parsed.data.classifier.intentThreshold).toBe(0.5);
+    expect(parsed.data.classifier.confidenceThreshold).toBe(0.5);
   });
 });
 
@@ -140,7 +141,7 @@ describe("instructions", () => {
     expect(
       configSchema.safeParse({
         ...classifierBase,
-        instructions: { classifier: { questions: { risk: "x" } } },
+        instructions: { classifier: { questions: { ban: "x" } } },
       }).success,
     ).toBe(true);
   });
@@ -226,7 +227,7 @@ describe("modelType", () => {
     const parsed = configSchema.safeParse({
       ...chatBase,
       modelType: "classifier",
-      instructions: { classifier: { background: "x", questions: { risk: "y" } } },
+      instructions: { classifier: { background: "x", questions: { intent: "y" } } },
     });
     expect(parsed.success).toBe(true);
   });

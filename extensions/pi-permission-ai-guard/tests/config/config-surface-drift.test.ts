@@ -23,6 +23,7 @@ import {
   configSchema,
   registryFallbackSchema,
 } from "#src/config/config-schema.ts";
+import { SUSPICION_ORDER } from "#src/config/suspicion.ts";
 import { isObjectRecord } from "#src/utils.ts";
 
 /** The schema shape this test reads: enough of draft-07 to walk it. */
@@ -30,11 +31,16 @@ interface SchemaNode {
   default?: unknown;
   description?: string;
   enum?: unknown[];
+  exclusiveMinimum?: unknown;
+  exclusiveMaximum?: unknown;
+  maximum?: unknown;
+  minimum?: unknown;
   properties?: Record<string, SchemaNode>;
   anyOf?: SchemaNode[];
   oneOf?: SchemaNode[];
   items?: SchemaNode;
   propertyNames?: { enum?: unknown[] };
+  type?: unknown;
 }
 
 const schemaJson = JSON.parse(
@@ -140,6 +146,67 @@ function jsonDefaults(node: SchemaNode, base = ""): Record<string, unknown> {
 }
 
 /**
+ * Look a dotted path up in the JSON schema's properties.
+ *
+ * @param path - The dotted path.
+ * @returns The schema node there, or undefined.
+ */
+function schemaNodeAt(path: string): SchemaNode | undefined {
+  let node: SchemaNode | undefined = { properties: schemaJson.properties };
+  for (const segment of path.split(".")) {
+    // Array leaves live one `items` level down (`fallbacks[].timeoutMs`).
+    node = node?.properties?.[segment] ?? node?.items?.properties?.[segment];
+  }
+  return node;
+}
+
+/**
+ * Look a dotted path up in a parsed config.
+ *
+ * @param parsed - The parsed config.
+ * @param path - The dotted path.
+ * @returns The value there, or undefined.
+ */
+function atPath(parsed: unknown, path: string): unknown {
+  let node: unknown = parsed;
+  for (const segment of path.split(".")) {
+    if (!isObjectRecord(node) || !Object.hasOwn(node, segment)) return undefined;
+    node = node[segment];
+  }
+  return node;
+}
+
+/**
+ * Build a minimal config input with one numeric leaf set.
+ *
+ * @param path - The dotted path of the leaf.
+ * @param value - The value to set.
+ * @returns The config input.
+ */
+function withValueAt(path: string, value: number): Record<string, unknown> {
+  const root: Record<string, unknown> = { provider: "x", model: "x" };
+  const segments = path.split(".");
+  // The `fallbacks` leaves live inside array items; every other leaf is a
+  // plain object path.
+  if (segments[0] === "fallbacks") {
+    const leaf = segments[segments.length - 1] as string;
+    return {
+      ...root,
+      fallbacks: [{ provider: "x", model: "x", [leaf]: value }],
+    };
+  }
+  const leaf = segments.pop() ?? path;
+  let node = root;
+  for (const segment of segments) {
+    const next: Record<string, unknown> = {};
+    node[segment] = next;
+    node = next;
+  }
+  node[leaf] = value;
+  return root;
+}
+
+/**
  * Collect the defaults `jsonDefaults` cannot reach: the ones inside an
  * `anyOf` branch. That walk stops at a scalar default, so a union arm's
  * own defaults (`instructions`'s slot defaults sit behind
@@ -206,14 +273,7 @@ describe("config surface drift", () => {
     const claimed = readmeDefaults(readme);
     expect(Object.keys(claimed).length).toBeGreaterThanOrEqual(12);
     const parsed = configSchema.parse({ provider: "x", model: "x" });
-    const at = (path: string): unknown => {
-      let node: unknown = parsed;
-      for (const segment of path.split(".")) {
-        if (!isObjectRecord(node) || !Object.hasOwn(node, segment)) return undefined;
-        node = node[segment];
-      }
-      return node;
-    };
+    const at = (path: string): unknown => atPath(parsed, path);
     const mismatched: string[] = [];
     const unresolved: string[] = [];
     for (const [key, cell] of Object.entries(claimed)) {
@@ -256,6 +316,14 @@ describe("config surface drift", () => {
 
   it("JSON-schema enums match the zod enums", () => {
     expect(schemaJson.properties.mode.enum).toEqual([...MODE_VALUES]);
+    // The custom row's two cut lines range over the same ladder the zod
+    // schema imports — a fourth copy of the rung list, pinned here.
+    expect(schemaJson.properties.customMode.properties!.allowThrough!.enum).toEqual([
+      ...SUSPICION_ORDER,
+    ]);
+    expect(schemaJson.properties.customMode.properties!.denyFrom!.enum).toEqual([
+      ...SUSPICION_ORDER,
+    ]);
     expect(schemaJson.properties.reasoning.enum).toEqual([...REASONING_VALUES]);
     expect(schemaJson.properties.modelType.enum).toEqual([...MODEL_TYPE_VALUES]);
     expect(schemaJson.properties.notifyLevel.enum).toEqual([...NOTIFY_LEVEL_VALUES]);
@@ -268,7 +336,69 @@ describe("config surface drift", () => {
     ]);
   });
 
-  it("the curated mode prose twins carry the final wording, not the superseded one", () => {
+  it("JSON-schema numeric bounds match the zod checks", () => {
+    // The hand-edited schema's bounds must equal the loader's checks: a
+    // bound the editor promises but the loader rejects (or accepts but the
+    // editor forbids) is a silent contract fork. Each entry is the exact
+    // bound object the JSON schema carries, verified field-by-field so a
+    // drift names its path.
+    const bounds: Record<string, Record<string, number>> = {
+      timeoutMs: { exclusiveMinimum: 0, maximum: 300000 },
+      maxTokens: { minimum: 16, maximum: 32768 },
+      temperature: { minimum: 0, maximum: 2 },
+      "classifier.confidenceThreshold": { minimum: 0, maximum: 1 },
+      "circuitBreaker.consecutive": { minimum: 1, maximum: 50 },
+      "circuitBreaker.total": { minimum: 1, maximum: 200 },
+      "cache.maxEntries": { minimum: 0, maximum: 1000 },
+      "transcript.maxUserMessages": { minimum: 1, maximum: 50 },
+      "transcript.maxToolCalls": { minimum: 1, maximum: 50 },
+      "transcript.maxCharsPerEntry": { minimum: 100, maximum: 20000 },
+      // Array-item leaves: the hand-edited schema bounds them separately,
+      // and the loader reuses the same zod leaves for them.
+      "fallbacks.timeoutMs": { exclusiveMinimum: 0, maximum: 300000 },
+      "fallbacks.temperature": { minimum: 0, maximum: 2 },
+    };
+    for (const [path, expected] of Object.entries(bounds)) {
+      const node = schemaNodeAt(path);
+      const actual = Object.fromEntries(
+        ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
+          .filter((key) => key in (node ?? {}))
+          .map((key) => [key, (node as Record<string, unknown>)[key]]),
+      );
+      expect(actual).toEqual(expected);
+    }
+
+    // And the loader really enforces those numbers: every bound is accepted
+    // at its stated edge and rejected one step outside it. The table is built
+    // first so every assertion below is unconditional.
+    const edges: Array<{ path: string; value: number; parses: boolean }> = [];
+    for (const [path, declared] of Object.entries(bounds)) {
+      // Integers step by one, floats by a fractional step (temperature and
+      // the threshold are the only floats here).
+      const step = path.endsWith("temperature") || path.endsWith("confidenceThreshold") ? 0.5 : 1;
+      const minimum = declared.minimum;
+      const maximum = declared.maximum;
+      const exclusiveLow = declared.exclusiveMinimum;
+      if (minimum !== undefined) {
+        edges.push({ path, value: minimum, parses: true });
+        edges.push({ path, value: minimum - step, parses: false });
+      }
+      if (exclusiveLow !== undefined) {
+        edges.push({ path, value: exclusiveLow, parses: false });
+        edges.push({ path, value: exclusiveLow + step, parses: true });
+      }
+      if (maximum !== undefined) {
+        edges.push({ path, value: maximum, parses: true });
+        edges.push({ path, value: maximum + step, parses: false });
+      }
+    }
+    for (const { path, value, parses: expected } of edges) {
+      expect(configSchema.safeParse(withValueAt(path, value)).success).toBe(expected);
+    }
+  });
+
+  it("the curated mode prose carries the final wording, not the superseded one", () => {
+    const readme = readFileSync(new URL("../../README.md", import.meta.url), "utf-8");
     const zodSource = readFileSync(
       fileURLToPath(import.meta.resolve("#src/config/config-schema.ts")),
       "utf-8",
@@ -279,17 +409,18 @@ describe("config surface drift", () => {
     );
     const description = schemaJson.properties.mode.description;
     const stale = "you decide everything";
-    // Short enough to sit on one line of the zod comment block (the twins
-    // have different line-wrapping; only the phrase itself must not drift).
     const canonical = "judge every flag";
-    // One pair per curated surface: the twins drift independently unless
-    // each is pinned separately (this test exists because the mode prose
-    // once drifted this exact way).
+    // The two operator-facing surfaces restate the rows, so each is pinned
+    // separately: they drift independently unless both are checked (this
+    // test exists because the mode prose once drifted this exact way).
     expect(description).toContain(canonical);
     expect(description).not.toContain(stale);
-    expect(zodSource).toContain(canonical);
+    expect(readme).toContain(canonical);
+    expect(readme).not.toContain(stale);
+    // The code-side twins point at the README table instead of restating
+    // the rows, so there is no third copy left to drift.
+    expect(zodSource).toContain("README.md");
     expect(zodSource).not.toContain(stale);
-    expect(modeTableSource).toContain(canonical);
     expect(modeTableSource).not.toContain(stale);
   });
 });

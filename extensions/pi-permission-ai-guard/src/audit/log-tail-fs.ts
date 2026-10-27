@@ -12,7 +12,7 @@ import { closeSync, openSync, readSync, statSync } from "node:fs";
 /**
  * Read the last `lineCount` lines of a UTF-8 file, or undefined when
  * unreadable (missing file, permission) — the only file access the report
- * command and the log-stats script perform. Tail-bounded in BOTH the
+ * command and the log reader perform. Tail-bounded in BOTH the
  * parse window and memory: only the final chunk of the file is read (the
  * log grows without rotation, so a whole-file read would grow with it).
  * The chunk assumes ~1KB per line — when a pathological long line exceeds

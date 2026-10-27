@@ -3,18 +3,32 @@ import { z } from "zod";
 
 import { isObjectRecord } from "#src/utils.ts";
 
+import { SUSPICION_ORDER } from "./suspicion.ts";
+
 export const EXTENSION_ID = "pi-permission-ai-guard";
 export const LINK_NAME = "ai-guard";
 
 /**
  * How the link disposes the reviewer's non-allow verdicts — the leniency
- * ladder, strictest first. Hard-tier denies (riskLevel high|critical, or
- * missing) always deny; the mode maps soft-tier denies (low|medium) and
- * the model's own uncertainty against the ladder. The ctrl+alt+g cycle
- * visits `default`, `lenient`, and `permissive`; only `strict` is set
- * explicitly (`/ai-guard mode strict`).
+ * ladder, strictest first. Only the deterministic screen hard-denies; a
+ * model deny is always soft, whatever `riskLevel` it reports — that field is
+ * an audit label and never picks the tier. The mode maps the model's deny
+ * and its own uncertainty against the ladder. The ctrl+alt+g cycle visits
+ * `default` and `auto`; only `strict` is set explicitly (`/ai-guard mode
+ * strict`).
  */
-export const MODE_VALUES = ["strict", "default", "lenient", "permissive"] as const;
+export const BUILTIN_MODE_VALUES = ["strict", "default", "auto"] as const;
+
+/** A built-in mode: a row of the ladder table (`MODE_TABLE`). */
+export type BuiltinMode = (typeof BUILTIN_MODE_VALUES)[number];
+
+/**
+ * How the link disposes the reviewer's non-allow verdicts — a built-in
+ * ladder rung, or `custom` for the operator-defined cuts in `customMode`.
+ * `custom` is only selectable while `customMode` configures legal cuts;
+ * the resolver (`mode-policy.ts`) enforces that after parsing.
+ */
+export const MODE_VALUES = [...BUILTIN_MODE_VALUES, "custom"] as const;
 
 /** How the link disposes model deny/defer verdicts (see the `mode` field comment). */
 export type Mode = (typeof MODE_VALUES)[number];
@@ -51,15 +65,20 @@ export const REASONING_VALUES: readonly ModelThinkingLevel[] = [
 ];
 
 /**
- * The System One question ids — a config-level contract. The schema
- * validates instruction overlays against this list, and the classifier engine
- * builds its questions from it; both sides share the one source so a new
- * question is one entry, not two lists that can drift.
+ * The axis question ids — a config-level contract. The schema validates
+ * instruction overlays against this list, and the request builder keys its
+ * questions by it (via the question registry in questions.ts), so both sides
+ * share the one source and a new axis is one entry, not two lists that can
+ * drift. Order matches the registry: the ban wall, the effect, the target,
+ * then the intent.
  */
-export const CLASSIFIER_QUESTION_IDS = ["danger_category", "intent_match", "risk"] as const;
+export const CLASSIFIER_QUESTION_IDS = ["ban", "effect", "target", "intent"] as const;
 
-/** Membership check for the overlay ids (string-keyed: config keys are strings). */
-const CLASSIFIER_QUESTION_ID_SET: ReadonlySet<string> = new Set(CLASSIFIER_QUESTION_IDS);
+/**
+ * Membership check for the overlay ids (string-keyed: config keys are strings). Exported for the
+ * offline A/B harness's variant validation.
+ */
+export const CLASSIFIER_QUESTION_ID_SET: ReadonlySet<string> = new Set(CLASSIFIER_QUESTION_IDS);
 
 /** One of the System One question ids. */
 export type ClassifierQuestionId = (typeof CLASSIFIER_QUESTION_IDS)[number];
@@ -157,11 +176,18 @@ const instructionsSchema = z
   .nullable()
   .default(null);
 
-/** Classifier verdict thresholds — pure policy, no transport knobs. */
+/**
+ * Classifier verdict thresholds — pure policy, no transport knobs. The five
+ * axis questions leave one threshold: the minimum confidence at which a
+ * classifier reading is adopted (0–1, default 0.5, retained from the
+ * retired protocol rather than recalibrated). Below it that axis takes its
+ * uncertainty path. The threshold compares pi-ai's returned `confidence` —
+ * the label distribution's peak concentration — which is NOT an
+ * evidence-coverage measure; `unestablished` and the explicit evidence-
+ * missing paths stay a separate mechanism.
+ */
 const classifierThresholdsSchema = z
   .object({
-    intentThreshold: z.number().min(0).max(1).default(0.5),
-    riskThreshold: z.number().min(0).max(1).default(0.5),
     confidenceThreshold: z.number().min(0).max(1).default(0.5),
   })
   .strict();
@@ -187,6 +213,19 @@ const circuitBreakerSchema = z.object({
   verdict: z.enum(BREAKER_VERDICT_VALUES).default("deny"),
 });
 
+/**
+ * The operator-defined ladder row: two cut lines on `SUSPICION_ORDER` plus the
+ * reviewer-failure lane. There are no per-rung cells, so a custom row is
+ * contiguous by construction — the same shape the built-in rows have. A pair
+ * whose accept line touches or passes its reject line is legal (it has no ask
+ * band); the resolver decides whether the result is worth a warning.
+ */
+const customModeSchema = z.object({
+  allowThrough: z.enum(SUSPICION_ORDER),
+  denyFrom: z.enum(SUSPICION_ORDER),
+  onReviewFailure: z.enum(["deny", "defer"]),
+});
+
 const cacheSchema = z.object({
   maxEntries: z.number().int().min(0).max(1000).default(128),
 });
@@ -199,6 +238,7 @@ export const NESTED_CONFIG_KEYS: ReadonlyMap<string, ReadonlySet<string>> = new 
   ["transcript", new Set(Object.keys(transcriptSchema.shape))],
   ["circuitBreaker", new Set(Object.keys(circuitBreakerSchema.shape))],
   ["cache", new Set(Object.keys(cacheSchema.shape))],
+  ["customMode", new Set(Object.keys(customModeSchema.shape))],
 ]);
 
 const configBaseSchema = z.object({
@@ -223,10 +263,11 @@ const configBaseSchema = z.object({
 
   // Transcript stripping: how much context to keep for the model review.
   transcript: transcriptSchema
-    // Spelled out because zod 4's `.default()` does NOT re-parse the value
-    // through the inner schema (only `prefault` does): `.default({})` would
-    // reach consumers with every field above undefined.
-    .default({ maxUserMessages: 5, maxToolCalls: 10, maxCharsPerEntry: 1000 }),
+    // `prefault` runs the empty object through the inner schema, so the
+    // defaults above stay the only place those numbers are written. (zod 4's
+    // `.default()` does not re-parse — `.default({})` would reach consumers
+    // with every field undefined.)
+    .prefault({}),
 
   // Surfaces to review. Glob-style patterns where `*` matches any
   // character sequence:
@@ -248,20 +289,18 @@ const configBaseSchema = z.object({
   classifier: classifierThresholdsSchema.default(CLASSIFIER_THRESHOLD_DEFAULTS),
 
   // How the link disposes the reviewer's non-allow verdicts (the leniency
-  // ladder, strictest first). Hard-tier denies (riskLevel high|critical,
-  // or missing) always stay deny. Soft-tier denies (low|medium) and the
-  // model's own uncertainty (split by its lean field — benign-leaned
-  // doubts, neutral doubts, danger-leaned doubts) map per mode:
-  // - "strict": everything denies — the reviewer's allow is the only pass.
-  // - "default": you judge every flag but hard danger — soft denies and
-  //   every unresolved doubt (any lean) ask.
-  // - "lenient": benign and neutral doubts pass; soft denies and
-  //   danger-leaned doubts ask.
-  // - "permissive": everything passes except hard-tier denies.
-  // Reviewer machinery failures never map to allow in any mode: they deny
-  // under "strict" and "permissive" (a broken reviewer must not rubber-
-  // stamp), and defer under the other two.
+  // ladder, strictest first): `"custom"` runs the `customMode` row instead
+  // of a built-in one (see that field). Two cut lines on `SUSPICION_ORDER`,
+  // per-mode blurbs in `MODE_BLURBS`, reviewer-failure targets in each
+  // mode's `onReviewFailure`. The per-mode rows live in `README.md`'s mode
+  // table, the one operator-facing authority — this comment only points
+  // at it.
   mode: z.enum(MODE_VALUES).default("default"),
+
+  // The custom row's cut lines, read only when `mode` is "custom"; null
+  // means "not configured". The resolver validates the pair after parsing and
+  // falls back to `default` when `mode: "custom"` has nothing to resolve.
+  customMode: customModeSchema.nullable().default(null),
 
   // Ambient (review-loop) notification threshold. Levels mirror the TUI's
   // notify levels plus `off`; the total-tier breaker trip uses `error`.
@@ -277,8 +316,8 @@ const configBaseSchema = z.object({
   // (resets on trip so the model gets another chance); `total` is a hard
   // session cap (never resets, so once tripped it stays tripped).
   circuitBreaker: circuitBreakerSchema
-    // Spelled out for the same zod-4 reason as `transcript` above.
-    .default({ consecutive: 3, total: 20, verdict: "deny" }),
+    // `prefault`, for the same zod-4 reason as `transcript` above.
+    .prefault({}),
 
   // Verdict cache (session-level LRU). 0 disables; only commands that reach
   // the model (policy "ask") are cached. contextHash from trusted intent
@@ -286,8 +325,8 @@ const configBaseSchema = z.object({
   // repeated commands (git status, ls, pnpm test) hit the cache on the second
   // call — zero model cost, zero latency.
   cache: cacheSchema
-    // Spelled out for the same zod-4 reason as `transcript` above.
-    .default({ maxEntries: 128 }),
+    // `prefault`, for the same zod-4 reason as `transcript` above.
+    .prefault({}),
 });
 
 /** The config shape itself. `reasoning`/`maxTokens` are ignored in classifier mode. */
@@ -369,11 +408,14 @@ export const configSchema = registryShapeSchema.superRefine(
  * @param config - The validated config.
  * @returns The lane names the pool will run, primary first.
  */
-function configuredLanes(config: {
-  provider: unknown;
-  modelType?: unknown;
-  fallbacks?: readonly { provider: unknown; modelType?: unknown }[];
-}): Array<"chat" | "classifier"> {
+/** The fields the lane composition reads: the primary entry plus each fallback entry. */
+interface ReviewerPoolShape {
+  readonly provider: unknown;
+  readonly modelType?: unknown;
+  readonly fallbacks?: readonly { readonly provider: unknown; readonly modelType?: unknown }[];
+}
+
+function configuredLanes(config: ReviewerPoolShape): Array<"chat" | "classifier"> {
   const lanes: Array<"chat" | "classifier"> = [isClassifierMode(config) ? "classifier" : "chat"];
   for (const entry of config.fallbacks ?? []) {
     const lane = isClassifierMode(entry) ? "classifier" : "chat";
@@ -401,6 +443,11 @@ export function uncoveredInstructionLanes(config: AiGuardConfig): Array<"chat" |
 /** Validated extension configuration (zod schema inference). */
 export type AiGuardConfig = z.output<typeof configSchema>;
 
+/** The one field the lane decision reads, so a partial entry can be judged. */
+interface ModelTypeCarrier {
+  readonly modelType?: unknown;
+}
+
 /**
  * Whether the config runs the classifier lane: a registry string provider
  * with classifier modelType. The pool's lane selection, the
@@ -410,6 +457,6 @@ export type AiGuardConfig = z.output<typeof configSchema>;
  * @param config - The validated config, or one fallback entry.
  * @returns True when the primary reviewer is a classifier endpoint.
  */
-export function isClassifierMode(config: { modelType?: unknown }): boolean {
+export function isClassifierMode(config: ModelTypeCarrier): boolean {
   return config.modelType === "classifier";
 }

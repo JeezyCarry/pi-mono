@@ -1,6 +1,6 @@
 # pi-permission-ai-guard
 
-A Pi extension that reviews permission asks with a light model, using a token-optimized stripped transcript. The doctrine for writing the safety-rules prompt lives in [docs/prompt-principles.md](./docs/prompt-principles.md).
+A Pi extension that reviews permission asks with a light model. The doctrine for writing the safety-rules prompt lives in [docs/prompt-principles.md](./docs/prompt-principles.md).
 
 ## Language
 
@@ -11,11 +11,11 @@ A permission request submitted to the authorizer chain: a shell command, a tool 
 _Avoid_: request, prompt (reserved for model prompts)
 
 **Surface**:
-The tool type an ask targets (`bash`, `mcp`, `skill`, or a namespaced tool name like `my-ext:tool`). The first eligibility gate.
+The tool type an ask targets (`bash`, `mcp`, `skill`, or a namespaced tool name). The first eligibility gate.
 _Avoid_: tool, command (a surface is the type, not the specific invocation)
 
 **Review target**:
-The value being authorized (the command string, tool name, path). Resolved together with the surface; if no target can be extracted, the ask is not reviewable.
+The value being authorized (the command string, tool name, path).
 
 **Ask eligibility**:
 Whether an ask qualifies for AI review — the surface matches the configured list and a review target can be extracted.
@@ -23,99 +23,59 @@ Whether an ask qualifies for AI review — the surface matches the configured li
 ### Verdicts
 
 **Policy gate**:
-The deterministic engine queried before the model. When the policy already says `allow` or `deny`, the link defers; it only adds value on an undecided (`ask`) policy.
+The upstream deterministic engine queried before the model. When the policy already says `allow` or `deny`, the link defers; it only adds value on an undecided policy.
+_Avoid_: calling it the screen — the two deny for different reasons
+
+**Screen**:
+This extension's own deterministic rule set, evaluated before the model. Its denies are the only ones no mode can lift.
 
 **Verdict**:
-The link's ruling: `allow`, `deny` (with an optional teaching reason), or `defer`.
+The link's ruling: `allow`, `deny`, or `defer`.
 
 **Defer**:
-The fail-safe outcome — a missing model, invalid config, timeout, unparseable reply, or unsure verdict all defer, falling through to the normal permission prompt.
+A verdict that hands the decision to the next link in the authorizer chain, optionally carrying a lean.
+_Avoid_: defining defer as failure-only
 
 **Lean**:
-The reviewer's directional inclination on a defer (`allow`, `deny`, or omitted for neutral). A routing signal only: it selects the defer's band in the mode ladder and never surfaces to the human.
+The directional inclination on a defer (`allow`, `deny`, or omitted). A routing signal only — it never surfaces to the human.
 _Avoid_: treating the lean as the verdict
 
-**Suspicion order**:
-The total order the mode ladder is drawn on: `allow` < defer-by-lean < soft deny < hard deny. Each mode is two cut lines on this order, so the auto-pass, ask, and terminal-deny bands stay contiguous in every mode.
-
 **Mode**:
-The leniency ladder for the reviewer's non-allow verdicts, strictest first: `strict`, `default`, `lenient`, `permissive`. Hard-tier denies are terminal in every mode; soft-tier denies and the model's doubts map against the ladder.
-_Avoid_: mode as a verdict source (the model's judgment is always recorded; the mode maps only what the link emits)
+The leniency ladder for non-allow verdicts: the built-in rungs `strict`, `default`, `auto` (strictest first), or `custom` for the operator-defined row in `customMode` — two cut lines plus the reviewer-failure lane, only selectable while configured.
 
-**Hard tier / Soft tier**:
-The deny split by risk. A hard-tier deny (risk level high, critical, or missing) is terminal in every mode; a soft-tier deny (low or medium) maps against the ladder.
+**CustomMode**:
+The operator-defined ladder row (`allowThrough`, `denyFrom`, `onReviewFailure`), read only when `mode` is `custom`. Two boundaries, so contiguous by construction; the failure lane is `deny` or `defer`, never `allow`.
 
-**Reviewer machinery failure**:
-A failure to obtain any verdict — unresolved model, auth failure, transcript error, timeout, unparseable or empty reply, no review target. It never maps to allow in any mode; it denies under `strict` and `permissive`, and defers otherwise.
+**Hard deny / Soft deny**:
+The deny split by authority. A screen deny is hard — no mode lifts it. A model deny is soft — it maps against the ladder like any other doubt. The model's self-reported risk level is audit evidence and never picks the tier.
 
-### Session state
+### The question set
 
-**Node**:
-One session runtime with its own permissions service and lifecycle. The root session and every in-process subagent child run as separate nodes; a branch or rewind within a session is still the same node.
+**Effect**:
+The heaviest action the command's text describes: read, modify, delete, send out, run a program, or unresolved.
 
-**Circuit breaker**:
-The per-session, two-tier, fail-safe limiter on reviewer denials: `consecutive` trips after N consecutive denials and then resets, `total` never resets on its own.
+**Target**:
+The kind of thing the action touches — ordinary files, credential material, version history, a system or service, nothing, or unresolved. Kind only: where it sits belongs to path scope.
 
-**Verdict cache**:
-A per-session LRU keyed by a decision-relevant projection of the ask and a trusted-intent fingerprint. A repeated identical ask in a stable conversation skips the model.
+**Intent**:
+The model's reading of whether the trusted request named this action and whether the command stayed inside what it named.
+_Avoid_: auth (the retired axis name), authorization (intent is a relation to the request, not permission)
 
-**Deny history**:
-The session-memory list of what the reviewer itself refused, read by `/ai-guard denied`. Model-gate denies only — mapping artifacts and machinery denials are absent by design.
+**Ban**:
+Whether an in-force prohibition appears in the trusted record.
 
-**Command entry table**:
-The single table behind the `/ai-guard` command, one row per first token. Completion, the settings menu, and dispatch all traverse it, so adding a verb is one entry.
-
-### Review
-
-**Lane**:
-One reviewer implementation class: `chat` (a Pi chat model's text verdict) or `classifier` (calibrated probabilities). It is an endpoint's identity, not a transport.
-_Avoid_: calling a mode-ladder band a lane
-
-**ReviewerEngine**:
-The review-outcome producer seam. One pooled supervisor walks an ordered, heterogeneous endpoint list through one per-lane adapter each.
-
-**TypeSafe vs Jev**:
-Two independent axes. **TypeSafe** is the transport/provider surface, now owned by Pi (the registered provider, its auth, its wire shape) — the extension ships no client of its own. **Jev** is the model strategy (question set, calibration, overlay, verdict synthesis).
-
-**Model call path**:
-The chat lane's route through `ModelRegistry.streamSimple` — the agent's own call path. Never the provider layer directly.
-_Avoid_: provider-layer calls
-
-**Pi version floor**:
-The runtime Pi version the extension needs — a single `≥ 1.0.0` floor: the source type-checks against the 1.0 surface, and every supported host's registry provides `streamSimple`, `classify`, and `findOfType`. Pi erases types at load, so a host below the floor is a runtime contract violation, caught at session start.
-
-**pi-permission-system floor**:
-The host extension this one links into: peer `≥ 40.0.0 < 41.0.0`. Its own `≥ 37` requires Pi `≥ 1.0.0`, enforced by its own peer range, so the effective floor is a pair and is independent of this extension's Pi floor. The ceiling is deliberate — upstream ships breaking majors roughly weekly.
-
-**Lane fact inventory**:
-The cross-lane contract for ask facts (`tests/review/lane-facts.ts`): every `AskContext` / `PromptRequestFacts` field classified per lane as rendered (with its name and encoder) or excluded (with a reason). Exhaustive by construction, so a new upstream fact stops compilation until both lanes decide. It pins presence, not presentation — the lanes fork deliberately on some encodings (chat words vs classifier raw `commandContext`; chat-redacted vs verbatim cwd).
-
-**Full review**:
-The JSON-verdict review: the model receives a stripped transcript plus the permission request and returns a verdict, reason, and risk level. A tolerant parser extracts the JSON from prose-wrapped replies.
-
-**Upstream retry**:
-One retry per mechanism per review, budgeted inside the total timeout, so a review never exceeds one window.
-
-**Operator notices**:
-The notify-line doctrine: all lines go through the notify seam, split into the ambient channel (gated by the effective `notifyLevel`) and the feedback channel (never gated).
-
-**Ask context**:
-The structured projection of a permission ask that the review feeds the model — a kind-dispatched projection of the facts that can change a verdict, with evidence pre-resolved into named fields.
-
-**Decision record**:
-The audit-log entry emitted at each decision gate, split into the review stream (always on) and the debug stream (only while the permission system's debug log is on).
-
-**Disposition**:
-The single release seam for every gate that emits a verdict. The gate declares verdict and facts; the disposition owns the release ritual.
-_Avoid_: escalation footwork
-
-**Policy suggestion**:
-A report candidate for a deterministic permission rule: the same ask reached the model at least three times, each occurrence in one trusted-intent context, never refused by either side. Evidence, never authorization.
-
-### Transcript
-
-**Stripped transcript**:
-A token-optimized transcript fed to the model: trusted user messages and tool-call names+args kept; assistant text, tool results, and compaction summaries deleted.
+**Path scope**:
+Whether the command's literal paths sit inside the workspace, outside it, in scratch space, or nowhere the text can settle. Settled by code, never by the model.
 
 **Trusted intent**:
-The user-message portion of the stripped transcript — the only authorization source the model honors, with the latest message as the authorization anchor.
+The user-message portion fed to the model — the only authorization source it honors.
+_Avoid_: conflating it with intent — this is the source the model reads, intent is the model's reading of it
+
+**Impact record**:
+The blind, per-case statement of what actually happens if the command runs: the action, its reversibility, its blast radius, whether private content leaves, and whether the request named it. Expectations derive from it and from nothing else.
+
+**Impact class**:
+The expectation bucket a case lands in by its impact record alone: `harmless`, `likely_fine`, `unclear`, `needs_human`, `screen_only`.
+
+**Consequence**:
+The scoring headline: how many cases end a run with the same user-visible result their impact record requires, counted across all three modes.

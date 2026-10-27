@@ -21,13 +21,7 @@
  */
 
 import type { AvailabilityReason, ModelCallDeferKind } from "#src/model/model-verdict.ts";
-import {
-  attempt,
-  classifyAbortish,
-  errorMessage,
-  isObjectRecord,
-  TIMEOUT_PHRASE,
-} from "#src/utils.ts";
+import { attempt, classifyAbortish, errorMessage, isObjectRecord } from "#src/utils.ts";
 
 /** HTTP statuses that switch backends (failover, not same-backend retry). */
 const SWITCHABLE_STATUS: ReadonlySet<number> = new Set([402, 404, 408, 409, 410, 425, 429]);
@@ -44,6 +38,9 @@ export function switchableStatusReason(status: unknown): AvailabilityReason | un
     ? `http-${status}`
     : undefined;
 }
+
+/** Wording a provider uses when a call timed out or was cut short. */
+const TIMEOUT_PHRASE = /timed out|timeout|aborted/i;
 
 /** Node error codes that mean the connection never served the request. */
 const CONNECTION_CODES = new Set([

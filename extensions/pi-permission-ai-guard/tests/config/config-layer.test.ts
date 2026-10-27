@@ -29,7 +29,7 @@ const fullConfig = configSchema.parse({
   cache: { maxEntries: 100 },
   circuitBreaker: { consecutive: 3, total: 20, verdict: "deny" },
   surfaces: ["bash"],
-  mode: "lenient",
+  mode: "auto",
   instructions: null,
 });
 
@@ -67,7 +67,7 @@ describe("loadAiGuardConfig", () => {
     // prototype must not be able to set `mode`.
     vol.fromJSON({
       "/project/.pi/extensions/pi-permission-ai-guard/config.json":
-        '{"__proto__":{"mode":"permissive"},"provider":"anthropic","model":"claude-haiku-4-5"}',
+        '{"__proto__":{"mode":"auto"},"provider":"anthropic","model":"claude-haiku-4-5"}',
     });
     const result = loadAiGuardConfig(env({ trustedProject: true }));
     expect(result.config?.mode).toBe("default");
@@ -79,7 +79,7 @@ describe("loadAiGuardConfig", () => {
         provider: "typesafe",
         model: "jev-1.13",
         modelType: "classifier",
-        typesafe: { intentThreshold: 0.9 },
+        typesafe: { confidenceThreshold: 0.9 },
       }),
     });
 
@@ -94,7 +94,7 @@ describe("loadAiGuardConfig", () => {
     expect(named[0]?.sourcePath).toBe("/agent/extensions/pi-permission-ai-guard/config.json");
   });
 
-  it.each([[42], [null], [[]], [{ intentThreshold: 0.9 }]])(
+  it.each([[42], [null], [[]], [{ confidenceThreshold: 0.9 }]])(
     "fails the load on a retired `typesafe` key whatever its shape (%j)",
     (typesafe) => {
       // The check keys off the name, not on a parseable block. zod strips an
@@ -294,10 +294,10 @@ describe("loadAiGuardConfig", () => {
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "anthropic",
         model: "claude-haiku-4-5",
-        typesafe: { intentThreshold: 0.9 },
+        typesafe: { confidenceThreshold: 0.9 },
       }),
       "/project/.pi/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        typesafe: { riskThreshold: 0.8 },
+        typesafe: { confidenceThreshold: 0.8 },
       }),
     });
 
@@ -320,7 +320,7 @@ describe("loadAiGuardConfig", () => {
         classifier: { timeoutMs: 7_000 },
       }),
       "/project/.pi/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        classifier: { intentThreshold: 0.9 },
+        classifier: { confidenceThreshold: 0.9 },
       }),
     });
 
@@ -340,10 +340,10 @@ describe("loadAiGuardConfig", () => {
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "anthropic",
         model: "claude-haiku-4-5",
-        classifier: { intentThreshold: 0.2 },
+        classifier: { confidenceThreshold: 0.2 },
       }),
       "/project/.pi/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
-        typesafe: { intentThreshold: 0.9 },
+        typesafe: { confidenceThreshold: 0.9 },
       }),
     });
 
@@ -357,8 +357,8 @@ describe("loadAiGuardConfig", () => {
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "anthropic",
         model: "claude-haiku-4-5",
-        classifier: { intentThreshold: 0.2 },
-        typesafe: { intentThreshold: 0.9 },
+        classifier: { confidenceThreshold: 0.2 },
+        typesafe: { confidenceThreshold: 0.9 },
       }),
     });
 
@@ -372,7 +372,7 @@ describe("loadAiGuardConfig", () => {
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "anthropic",
         model: "claude-haiku-4-5",
-        classifier: { intentThreshold: 0.7, timeoutMs: 7_000 },
+        classifier: { confidenceThreshold: 0.7, timeoutMs: 7_000 },
       }),
     });
 
@@ -424,13 +424,13 @@ describe("loadAiGuardConfig", () => {
         provider: "typesafe",
         model: "jev-1.13",
         modelType: "classifier",
-        classifier: { intentThreshold: 0.9 },
+        classifier: { confidenceThreshold: 0.9 },
       }),
     });
 
     const result = loadAiGuardConfig(env());
     expect(result.issues).toEqual([]);
-    expect(result.config?.classifier.intentThreshold).toBe(0.9);
+    expect(result.config?.classifier.confidenceThreshold).toBe(0.9);
   });
 
   it("loads project config overriding global", () => {
@@ -989,19 +989,19 @@ describe("loadAiGuardConfig — mode", () => {
     expect(result.issues.some((i) => i.path === "mode")).toBe(true);
   });
 
-  it("warns on the permissive + breaker-defer combination (legal but interrupts)", () => {
+  it("warns on the auto + breaker-defer combination (legal but interrupts)", () => {
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "anthropic",
         model: "claude-haiku-4-5",
-        mode: "permissive",
+        mode: "auto",
         circuitBreaker: { verdict: "defer" },
       }),
     });
 
     const result = loadAiGuardConfig(env());
     // The config itself is valid — the escape valve is a designed feature.
-    expect(result.config?.mode).toBe("permissive");
+    expect(result.config?.mode).toBe("auto");
     expect(result.config?.circuitBreaker.verdict).toBe("defer");
     const warning = result.issues.find((i) => i.path === "mode");
     expect(warning?.message).toContain("circuitBreaker.verdict");
@@ -1048,13 +1048,104 @@ describe("config loader — JSONC", () => {
   // the reviewer model
   "provider": "anthropic",
   "model": "claude-haiku-4-5", // cheap + fast
-  "mode": "lenient",
+  "mode": "auto",
 }
 `,
     });
     const result = loadAiGuardConfig(env());
-    expect(result.config?.mode).toBe("lenient");
+    expect(result.config?.mode).toBe("auto");
     expect(result.issues).toEqual([]);
+  });
+
+  it("rewrites the retired `permissive` mode value to `auto` and reports the rename", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "permissive"
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.config?.mode).toBe("auto");
+    expect(result.issues.map((i) => i.message).join("\n")).toContain(
+      'mode "permissive" was renamed to "auto"',
+    );
+  });
+
+  it("falls a retired `lenient` mode value back to `default` and says what changed", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "lenient"
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.config?.mode).toBe("default");
+    const message = result.issues.map((i) => i.message).join("\n");
+    expect(message).toContain('mode "lenient" was removed');
+    expect(message).toContain("benign-leaned");
+  });
+
+  it("loads mode custom with its own cuts and warns about nothing redundant", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "custom",
+  "customMode": { "allowThrough": "defer-benign", "denyFrom": "hard-deny", "onReviewFailure": "defer" }
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.outcome).toBe("loaded");
+    expect(result.config?.mode).toBe("custom");
+    expect(result.config?.customMode).toEqual({
+      allowThrough: "defer-benign",
+      denyFrom: "hard-deny",
+      onReviewFailure: "defer",
+    });
+    expect(result.issues).toEqual([]);
+  });
+
+  it("repairs mode custom with no block to default and keeps the guard running", () => {
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "custom"
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.outcome).toBe("loaded");
+    expect(result.config?.mode).toBe("custom");
+    const modeIssues = result.issues.filter((i) => i.path === "mode");
+    expect(modeIssues).toHaveLength(1);
+    expect(modeIssues[0]!.message).toContain('running "default" instead');
+  });
+
+  it("warns about the resolved custom cuts, not the table default", () => {
+    // An ask-free custom paired with a deferring breaker warns, naming
+    // custom — the warning reads the resolved pair, not default's cuts
+    // (which would stay silent).
+    vol.fromJSON({
+      "/agent/extensions/pi-permission-ai-guard/config.json": `{
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "mode": "custom",
+  "customMode": { "allowThrough": "defer-neutral", "denyFrom": "defer-danger", "onReviewFailure": "deny" },
+  "circuitBreaker": { "consecutive": 3, "total": 20, "verdict": "defer" }
+}
+`,
+    });
+    const result = loadAiGuardConfig(env());
+    expect(result.outcome).toBe("loaded");
+    const message = result.issues.map((i) => i.message).join("\n");
+    expect(message).toContain('mode "custom"');
+    expect(message).toContain("circuitBreaker.verdict");
   });
 
   it("still records an issue on genuinely malformed JSONC", () => {
@@ -1122,7 +1213,7 @@ describe("persistConfigLayer", () => {
   // careful with models
   "provider": "anthropic",
   "model": "claude-haiku-4-5",
-  "mode": "lenient",
+  "mode": "auto",
   "circuitBreaker": { "consecutive": 3 }
 }
 `;
@@ -1156,7 +1247,7 @@ describe("persistConfigLayer", () => {
     const result = persistConfigLayer({
       target: "global",
       env: env(),
-      config: configSchema.parse({ ...fullConfig, provider: "anthropic", mode: "lenient" }),
+      config: configSchema.parse({ ...fullConfig, provider: "anthropic", mode: "auto" }),
     });
     expect(result.changed).toBe(true);
     const written = vol.readFileSync(
@@ -1165,7 +1256,7 @@ describe("persistConfigLayer", () => {
     ) as string;
     expect(written).toContain('"provider": "anthropic"');
     expect(JSON.parse(written)).toEqual(
-      configSchema.parse({ ...fullConfig, provider: "anthropic", mode: "lenient" }),
+      configSchema.parse({ ...fullConfig, provider: "anthropic", mode: "auto" }),
     );
   });
 
@@ -1228,7 +1319,7 @@ describe("persistConfigLayer", () => {
     // A "successful" save here would still read back "manual" next load.
     vol.fromJSON({
       "/agent/extensions/pi-permission-ai-guard/config.json":
-        '{ "provider": "anthropic", "model": "claude-haiku-4-5", "mode": "strict", "mode": "lenient" }',
+        '{ "provider": "anthropic", "model": "claude-haiku-4-5", "mode": "strict", "mode": "auto" }',
     });
     const result = persistConfigLayer({
       target: "global",
@@ -1238,7 +1329,7 @@ describe("persistConfigLayer", () => {
     expect(result.error).toContain("duplicate keys");
     expect(result.changed).toBe(false);
     expect(vol.readFileSync("/agent/extensions/pi-permission-ai-guard/config.json", "utf-8")).toBe(
-      '{ "provider": "anthropic", "model": "claude-haiku-4-5", "mode": "strict", "mode": "lenient" }',
+      '{ "provider": "anthropic", "model": "claude-haiku-4-5", "mode": "strict", "mode": "auto" }',
     );
   });
 
@@ -1352,7 +1443,7 @@ describe("persistConfigLayer", () => {
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "anthropic",
         model: "claude-haiku-4-5",
-        typesafe: { intentThreshold: 0.6 },
+        typesafe: { confidenceThreshold: 0.6 },
       }),
     });
     const result = persistConfigLayer({
@@ -1375,7 +1466,7 @@ describe("persistConfigLayer", () => {
       "/project/.pi/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "typesafe",
         model: "jev-latest",
-        typesafe: { intentThreshold: 0.6 },
+        typesafe: { confidenceThreshold: 0.6 },
       }),
     });
     const result = persistConfigLayer({
@@ -1395,7 +1486,7 @@ describe("persistConfigLayer", () => {
       "/agent/extensions/pi-permission-ai-guard/config.json": JSON.stringify({
         provider: "anthropic",
         model: "claude-haiku-4-5",
-        typesafe: { intentThreshold: 0.6 },
+        typesafe: { confidenceThreshold: 0.6 },
       }),
     });
     const result = persistConfigLayer({ target: "global", env: env(), config: fullConfig });
@@ -1602,13 +1693,13 @@ describe("config file discovery — jsonc preferred", () => {
     const result = persistConfigLayer({
       target: "global",
       env: env(),
-      config: { ...fullConfig, mode: "lenient" },
+      config: { ...fullConfig, mode: "auto" },
     });
     expect(result.path).toBe("/agent/extensions/pi-permission-ai-guard/config.jsonc");
     expect(result.changed).toBe(true);
     expect(
       vol.readFileSync("/agent/extensions/pi-permission-ai-guard/config.jsonc", "utf-8"),
-    ).toContain('"mode": "lenient"');
+    ).toContain('"mode": "auto"');
     // the legacy json is untouched
     expect(
       JSON.parse(

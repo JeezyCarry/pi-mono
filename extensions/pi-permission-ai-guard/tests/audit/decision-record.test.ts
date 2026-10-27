@@ -71,7 +71,7 @@ describe("DecisionRecord — shared schema (property test)", () => {
 describe("DecisionRecord — per-gate shape", () => {
   it("redacts a policy pattern before it reaches the record", () => {
     // The pattern comes from the policy engine's own matcher and can embed the
-    // ask's text, so the record factory redacts it once (ADR 0004).
+    // ask's text, so the record factory redacts it once (ADR 0003).
     const token = `ghp_${"a".repeat(36)}`;
     const r = DecisionRecord.policyDecided(base, {
       state: "deny",
@@ -295,8 +295,7 @@ describe("DecisionRecord — per-gate shape", () => {
 
   it("bounds the raw reply it records", () => {
     // The record goes to the review log, so an unbounded reply is an unbounded
-    // log line (ADR 0010 bounds what the logs accumulate). Mid-truncation keeps
-    // the tail, so a defer stays replayable.
+    // log line. Mid-truncation keeps the tail, so a defer stays replayable.
     const huge = `{"verdict":"defer"}${"x".repeat(50_000)}`;
     const bounded = DecisionRecord.model({
       base,

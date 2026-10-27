@@ -1,13 +1,9 @@
 import { describe, expect, it } from "vitest";
 
+import { CLASSIFIER_QUESTION_IDS } from "#src/config/config-schema.ts";
+import { BAN_LABELS, CLASSIFIER_QUESTION_SET } from "#src/review/axes/questions.ts";
 import { buildClassifierRequest, flattenEntry } from "#src/review/engines/classifier/client.ts";
 import type { ClassifierOverlay } from "#src/review/engines/classifier/instructions.ts";
-import {
-  DANGER_CRITERIA,
-  DANGER_NONE,
-  INTENT_MATCH_CRITERIA,
-  RISK_RUBRIC,
-} from "#src/review/engines/classifier/questions.ts";
 import type { AskContext } from "#src/review/request/ask.ts";
 import { buildAskContext } from "#src/review/request/ask.ts";
 import type { ReviewRequestContext } from "#src/review/request/review-request.ts";
@@ -53,33 +49,86 @@ describe("buildClassifierRequest", () => {
   // rather than the prose. The one exception is the DANGER_CRITERIA form
   // invariant below: it forbids an exclusion clause, so any legal reword
   // passes and only a convention violation fails.
-  it("builds the built-in questions in the pi-ai context shape", () => {
+  it("builds the axis questions in the pi-ai context shape", () => {
     const req = buildClassifierRequest(transcript(), request(), NO_INSTRUCTIONS);
-    expect(Object.keys(req.questions).toSorted()).toEqual([
-      "danger_category",
-      "intent_match",
-      "risk",
-    ]);
-    expect(req.questions.danger_category.type).toBe("choice");
-    expect(req.questions.risk.type).toBe("score");
-    expect(req.questions.intent_match.type).toBe("bool");
-    // Instructions are pi-ai's flat strings; the criteria keep their shapes.
+    // One question per registry axis, keyed by the config-level ids — the
+    // two lists cannot drift because this pin reads both.
+    expect(Object.keys(req.questions).toSorted()).toEqual([...CLASSIFIER_QUESTION_IDS].toSorted());
+    expect(CLASSIFIER_QUESTION_SET.map((axis) => axis.id).toSorted()).toEqual(
+      [...CLASSIFIER_QUESTION_IDS].toSorted(),
+    );
+    // Instructions are pi-ai's flat strings; every axis answers as a choice
+    // (the per-label confidence channel), with a populated criteria menu.
     for (const q of Object.values(req.questions)) {
+      expect(q.type).toBe("choice");
       expect(typeof q.instructions).toBe("string");
       expect(q.instructions.length).toBeGreaterThan(0);
+      expect(Object.keys(q.criteria).length).toBeGreaterThan(0);
     }
-    expect(req.questions.intent_match.criteria).toMatchObject({
-      true: expect.any(String),
-      false: expect.any(String),
+    // A sample of the wire shape: legal labels only, one definition each.
+    expect(req.questions.ban.criteria).toMatchObject({
+      forbids: expect.any(String),
+      none: expect.any(String),
+      unestablished: expect.any(String),
     });
-    expect(req.questions.risk.criteria).toHaveLength(5);
+    expect(req.questions.effect.criteria).toMatchObject({
+      read: expect.any(String),
+      modify: expect.any(String),
+      delete: expect.any(String),
+      send_out: expect.any(String),
+      run_program: expect.any(String),
+      cannot_determine: expect.any(String),
+    });
+    expect(req.questions.target.criteria).toMatchObject({
+      ordinary_files: expect.any(String),
+      credential_material: expect.any(String),
+      vcs_history: expect.any(String),
+      system_or_service: expect.any(String),
+      none: expect.any(String),
+      cannot_determine: expect.any(String),
+    });
+    expect(req.questions.intent.criteria).toMatchObject({
+      requested: expect.any(String),
+      not_requested: expect.any(String),
+      cannot_determine: expect.any(String),
+    });
   });
 
-  it("keeps the no-hit answer reachable in the criteria map", () => {
-    // The allow path turns on `dangerCategory !== DANGER_NONE`. Renaming the
-    // map's key without the constant would turn every clean review into a
-    // deny, and a test that reads the constant on both sides cannot see it.
-    expect(DANGER_CRITERIA).toHaveProperty(DANGER_NONE);
+  it("declares a coherent label/criteria contract per axis", () => {
+    for (const axis of CLASSIFIER_QUESTION_SET) {
+      // The declared legal labels are exactly the criteria keys: the model
+      // sees one positive definition per legal label (the choice menu), and
+      // the verdict layer reads each label directly off the five axes.
+      expect(Object.keys(axis.criteria).toSorted()).toEqual([...axis.labels].toSorted());
+      for (const label of axis.labels) {
+        expect(axis.criteria[label].length).toBeGreaterThan(0);
+      }
+    }
+    // The ban wall keeps an independent unestablished route (not confidence).
+    expect(BAN_LABELS).toContain("unestablished");
+  });
+
+  it("keeps the no-hit answer reachable in the target criteria map", () => {
+    // The release rows read `none` and `ordinary_files`: dropping either
+    // without the policy would turn clean reviews into defers, and a test
+    // that derives the label from the registry cannot see it.
+    const axis = CLASSIFIER_QUESTION_SET.find((a) => a.id === "target");
+    expect(axis?.criteria).toHaveProperty("none");
+    expect(axis?.criteria).toHaveProperty("ordinary_files");
+  });
+
+  it("states the request scope in the intent criterion", () => {
+    // `requested` requires the command to stay inside what the request
+    // named: extra files, stronger flags, and chained extra commands all
+    // exceed the named scope and read `not_requested`.
+    const axis = CLASSIFIER_QUESTION_SET.find((a) => a.id === "intent");
+    const criterion = axis?.criteria.requested ?? "";
+    expect(criterion).toMatch(/stays inside what/i);
+    expect(criterion).toMatch(/named/i);
+    // Positive phrasing only: no exclusion or carve-out vocabulary.
+    expect(criterion).not.toMatch(
+      /is not|are not|never|not this|excluding|rather than|instead of|as opposed to/i,
+    );
   });
 
   it("puts the anchor, earlier context, and command in state", () => {
@@ -95,6 +144,75 @@ describe("buildClassifierRequest", () => {
       tool_calls: ["ls"],
       working_directory: "/project",
     });
+  });
+
+  it("carries observed facts in state for a package-script entry", () => {
+    // The snapshot rides the request context — buildState consumes it,
+    // never the disk. A null snapshot (non-bash, or no snapshot taken)
+    // leaves the field absent.
+    const withFacts = buildClassifierRequest(
+      transcript(),
+      {
+        ...request(),
+        observedFacts: {
+          source: "package.json:scripts.migrate",
+          runner: "npm",
+          scripts: { migrate: "node scripts/migrate-db.js" },
+          scope: "entry-declaration-only",
+          lifecycleDeclared: false,
+          keys: ["migrate"],
+          manifestDir: "/project",
+        },
+      },
+      NO_INSTRUCTIONS,
+    );
+    expect(withFacts.state).toMatchObject({
+      observed_facts: {
+        source: "package.json:scripts.migrate",
+        runner: "npm",
+        scope: "entry-declaration-only",
+        lifecycle_declared: false,
+        downstream: "unresolved",
+        trust: "untrusted-project-text-not-authorization",
+        keys: ["migrate"],
+        scripts: { migrate: "node scripts/migrate-db.js" },
+        manifest_dir: "/project",
+      },
+    });
+    const req = buildClassifierRequest(transcript(), request(), NO_INSTRUCTIONS);
+    expect(req.state).not.toHaveProperty("observed_facts");
+  });
+
+  it("redacts credential-shaped source and keys on the way to the service", () => {
+    // The observed-facts evidence is untrusted project text: its source,
+    // keys, and scripts all go through the same normalizeAndRedactText as
+    // the command (the chat prompt's twin). A secret embedded in a script
+    // name or the source annotation must not reach the service in the clear.
+    const aws = "AKIAIOSFODNN7EXAMPLE";
+    const withFacts = buildClassifierRequest(
+      transcript(),
+      {
+        ...request(),
+        observedFacts: {
+          source: `package.json:scripts.${aws}`,
+          runner: "npm",
+          scripts: { [aws]: `node ${aws}.js` },
+          scope: "entry-declaration-only",
+          lifecycleDeclared: true,
+          keys: [`deploy-${aws}`, aws, `${aws}-post`],
+          manifestDir: `/srv/${aws}/pkg`,
+        },
+      },
+      NO_INSTRUCTIONS,
+    );
+    const state = withFacts.state as { observed_facts: Record<string, unknown> };
+    expect(JSON.stringify(state.observed_facts)).not.toContain(aws);
+    expect(state.observed_facts.source).toContain("[REDACTED]");
+    for (const key of state.observed_facts.keys as string[]) {
+      expect(key).toContain("[REDACTED]");
+    }
+    expect(JSON.stringify(state.observed_facts.scripts)).toContain("[REDACTED]");
+    expect(state.observed_facts.manifest_dir).toContain("[REDACTED]");
   });
 
   it("carries tool input in state for a tool ask with empty flagged elements", () => {
@@ -165,34 +283,39 @@ describe("buildClassifierRequest", () => {
       );
     }
     // The answer contract is untouched by the overlay: ids, types, criteria.
-    expect(req.questions.danger_category.type).toBe("choice");
-    expect(req.questions.danger_category.criteria).toHaveProperty("irreversible_destruction");
-    expect(req.questions.risk.type).toBe("score");
-    expect(req.questions.risk.criteria).toHaveLength(5);
+    expect(req.questions.ban.type).toBe("choice");
+    expect(req.questions.ban.criteria).toHaveProperty("forbids");
+    expect(req.questions.effect.criteria).toHaveProperty("send_out");
   });
 
   it("overlays a per-question string only on that question", () => {
     const req = buildClassifierRequest(transcript(), request(), {
-      questions: { intent_match: "A deploy without a service name is not authorization." },
+      questions: { intent: "Authorization covers exactly the scope the anchor names." },
     });
-    expect(String(req.questions.intent_match.instructions)).toContain("not authorization");
-    expect(String(req.questions.risk.instructions)).not.toContain("not authorization");
+    expect(String(req.questions.intent.instructions)).toContain(
+      "exactly the scope the anchor names",
+    );
+    expect(String(req.questions.ban.instructions)).not.toContain(
+      "exactly the scope the anchor names",
+    );
   });
 
-  it("overlays a per-question string on danger_category", () => {
+  it("overlays a per-question string on ban", () => {
     const req = buildClassifierRequest(transcript(), request(), {
-      questions: { danger_category: "A deploy tool wiping its cache counts as none." },
+      questions: { ban: "A later instruction that explicitly lifts a ban ends its effect." },
     });
-    expect(String(req.questions.danger_category.instructions)).toContain("wiping its cache");
-    expect(String(req.questions.risk.instructions)).not.toContain("wiping its cache");
+    expect(String(req.questions.ban.instructions)).toContain("lifts a ban");
+    expect(String(req.questions.intent.instructions)).not.toContain("lifts a ban");
   });
 
-  it("overlays a per-question string on risk", () => {
+  it("overlays a per-question string on effect", () => {
     const req = buildClassifierRequest(transcript(), request(), {
-      questions: { risk: "Railway deploys are reversible — score accordingly." },
+      questions: {
+        effect: "An `observed_facts` record about the content itself decides.",
+      },
     });
-    expect(String(req.questions.risk.instructions)).toContain("reversible");
-    expect(String(req.questions.danger_category.instructions)).not.toContain("reversible");
+    expect(String(req.questions.effect.instructions)).toContain("content itself decides");
+    expect(String(req.questions.ban.instructions)).not.toContain("content itself decides");
   });
 
   it("composes object overlays as structured context inside the flat instructions", () => {
@@ -202,8 +325,8 @@ describe("buildClassifierRequest", () => {
     const req = buildClassifierRequest(transcript(), request(), {
       background: { deploy_tool: "railway up", forbidden: ["kubectl"] },
     });
-    expect(req.questions.risk.instructions).toContain("Structured context:");
-    expect(req.questions.risk.instructions).toContain(
+    expect(req.questions.ban.instructions).toContain("Structured context:");
+    expect(req.questions.ban.instructions).toContain(
       JSON.stringify({ deploy_tool: "railway up", forbidden: ["kubectl"] }),
     );
   });
@@ -211,22 +334,20 @@ describe("buildClassifierRequest", () => {
   it("keeps the shared background context when a question adds its own", () => {
     const req = buildClassifierRequest(transcript(), request(), {
       background: { deploy_tool: "railway up" },
-      questions: { risk: { rubric_note: "reversible" } },
+      questions: { ban: { ban_note: "lifted ends its effect" } },
     });
-    expect(req.questions.risk.instructions).toContain(
-      JSON.stringify({ deploy_tool: "railway up", rubric_note: "reversible" }),
+    expect(req.questions.ban.instructions).toContain(
+      JSON.stringify({ deploy_tool: "railway up", ban_note: "lifted ends its effect" }),
     );
   });
 
   it("appends a per-question string to the question text, keeping the background context", () => {
     const req = buildClassifierRequest(transcript(), request(), {
       background: { deploy_tool: "railway up" },
-      questions: { risk: "score conservatively" },
+      questions: { ban: "judge the still-effective instruction" },
     });
-    expect(req.questions.risk.instructions).toContain("score conservatively");
-    expect(req.questions.risk.instructions).toContain(
-      JSON.stringify({ deploy_tool: "railway up" }),
-    );
+    expect(req.questions.ban.instructions).toContain("judge the still-effective instruction");
+    expect(req.questions.ban.instructions).toContain(JSON.stringify({ deploy_tool: "railway up" }));
   });
 
   it("falls back to the resolved target when the ask carries no action text", () => {
@@ -268,17 +389,43 @@ describe("DANGER_CRITERIA form", () => {
     // merged changeset. Both the exclusion literal and the exclusion
     // sentence shapes are caught: a category says what it IS, and neither
     // what it is not nor what stays elsewhere.
-    const offenders = Object.entries(DANGER_CRITERIA)
-      .filter(([, criteria]) => EXCLUSION.test(criteria))
-      .map(([category]) => category);
+    const offenders = CLASSIFIER_QUESTION_SET.flatMap((axis) =>
+      Object.entries(axis.criteria)
+        .filter(([, criteria]) => EXCLUSION.test(criteria))
+        .map(([label]) => `${axis.id}.${label}`),
+    );
     expect(offenders).toEqual([]);
   });
 
-  it("keeps the intent and risk criteria positive too", () => {
-    // Same convention, extended to the other two questions: each grades one
-    // axis by what the action or link IS, and cross-references the sibling
-    // questions only through the verdict compositor named in their comments.
-    const texts = [INTENT_MATCH_CRITERIA.true, INTENT_MATCH_CRITERIA.false, ...RISK_RUBRIC];
+  it("keeps the anchor state key out of every non-intent criteria text", () => {
+    // One axis per question, made machine-checkable. Only `ban` and `intent`
+    // judge the record — the standing instruction, and the request's word —
+    // so they may name it. The exclusion scan above checks PHRASING
+    // ("not-X" shapes) and is blind to this coupling.
+    const anchorAxes = new Set(["ban", "intent"]);
+    const offenders = CLASSIFIER_QUESTION_SET.flatMap((axis) =>
+      anchorAxes.has(axis.id)
+        ? []
+        : Object.entries(axis.criteria)
+            .filter(([, criteria]) => criteria.includes("authorization_anchor"))
+            .map(([label]) => `${axis.id}.${label}`),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it("tells the intent question that exceeding the named scope is not requested", () => {
+    // Single-select cannot express partial coverage, so a command that adds
+    // files, flags, or chained commands beyond the named scope must read
+    // `not_requested`: the exceeding part still needs its own naming.
+    const intent = CLASSIFIER_QUESTION_SET.find((axis) => axis.id === "intent");
+    expect(intent?.criteria.not_requested).toContain("exceeds");
+  });
+
+  it("keeps every question instruction positive too", () => {
+    // Same convention, extended to the question lines themselves: each grades
+    // one axis by what the action IS, and cross-references a sister axis only
+    // by naming it in a comment, never by an exclusion clause.
+    const texts = CLASSIFIER_QUESTION_SET.map((axis) => axis.instructions);
     expect(texts.filter((text) => EXCLUSION.test(text))).toEqual([]);
   });
 });

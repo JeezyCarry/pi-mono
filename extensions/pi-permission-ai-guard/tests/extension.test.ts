@@ -295,8 +295,8 @@ describe("createAiGuardExtension lifecycle", () => {
     const live = calls[0]!;
 
     // A session override reaches the pipeline's overrides object.
-    await pi.commands.get("ai-guard")!.handler("mode lenient", makeUiCtx());
-    expect(live.overrides.mode).toBe("lenient");
+    await pi.commands.get("ai-guard")!.handler("mode auto", makeUiCtx());
+    expect(live.overrides.mode).toBe("auto");
 
     // Re-dispatched session_start (no shutdown in between).
     pi.fire("session_start", {}, makeSessionCtx());
@@ -551,13 +551,12 @@ describe("createAiGuardExtension lifecycle", () => {
         reasoning: "off" as const,
         instructions: null,
         classifier: {
-          intentThreshold: 0.5,
-          riskThreshold: 0.5,
           confidenceThreshold: 0.5,
         },
         mode: "default" as const,
         notifyLevel: "info" as const,
         notifyApprovals: false,
+        customMode: null,
       },
       issues: [],
       outcome: "loaded" as const,
@@ -633,12 +632,12 @@ describe("createAiGuardExtension — /ai-guard command + ctrl+alt+g shortcut", (
     expect(deps.overrides.mode).toBeUndefined();
 
     const ctx = makeUiCtx();
-    await pi.commands.get("ai-guard")!.handler("mode lenient", ctx);
+    await pi.commands.get("ai-guard")!.handler("mode auto", ctx);
 
     // The pipeline closed over this exact object at registration — the
     // override takes effect without re-registering the authorizer.
-    expect(deps.overrides.mode).toBe("lenient");
-    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "lenient (session)");
+    expect(deps.overrides.mode).toBe("auto");
+    expect(ctx.ui.setStatus).toHaveBeenCalledWith("ai-guard", "\x1b[1;31mauto (session)\x1b[0m");
   });
 });
 
@@ -676,10 +675,10 @@ describe("createAiGuardExtension — official-pattern follow-ups", () => {
   it("session_tree re-derives the override from the new active branch", () => {
     const setStatus = vi.fn<() => void>();
     const { pi, calls } = setupExtension({
-      sessionManager: { getBranch: () => [settingEntry("lenient")] },
+      sessionManager: { getBranch: () => [settingEntry("auto")] },
       ui: { setStatus },
     });
-    expect(calls[0]!.overrides.mode).toBe("lenient");
+    expect(calls[0]!.overrides.mode).toBe("auto");
 
     // Rewind past the setting entry: the new active branch has none.
     const treeStatus = vi.fn<() => void>();

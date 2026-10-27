@@ -5,11 +5,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   approvalNotice,
-  classifierCostlyReason,
-  classifierDangerCriteria,
-  classifierDangerNote,
+  classifierInsufficientInfoReason,
   classifierIntentGapReason,
-  classifierUncertainReason,
+  classifierNeutralAskReason,
   escalationMessage,
   failOpenNotice,
   machineryDeferNotice,
@@ -173,22 +171,20 @@ describe("notify skeleton — builder-rendered lines", () => {
     const rendered = [
       // The classifier danger defer rides notify whole (verdict-rule defers
       // emit their reason verbatim), so the full lines are checked here.
-      `${classifierDangerCriteria("secrets credentials")} (${classifierDangerNote(true)})`,
-      `${classifierDangerCriteria("secrets credentials")} (${classifierDangerNote(false)})`,
-      classifierUncertainReason(true),
-      classifierUncertainReason(false),
-      classifierCostlyReason(),
+      classifierInsufficientInfoReason("target"),
+      classifierInsufficientInfoReason("effect"),
+      classifierInsufficientInfoReason("ban"),
       classifierIntentGapReason(),
+      classifierNeutralAskReason(),
       machineryDeferNotice("timeout"),
       machineryDenyReason("timeout", "strict"),
       uncertainDenyReason("strict"),
       withAgentInstruction("secrets in the command", "content"),
       approvalNotice({ kind: "reviewer" }, { kind: "fresh", latencyMs: 1200 }),
-      approvalNotice({ kind: "mode", mode: "lenient" }, { kind: "cached" }),
+      approvalNotice({ kind: "mode", mode: "auto" }, { kind: "cached" }),
       escalationMessage({ kind: "deny", reason: "secrets in the command" }, "high", "denied"),
       escalationMessage({ kind: "deny", reason: "secrets in the command" }, undefined, "asked"),
-      failOpenNotice("lenient"),
-      failOpenNotice("permissive"),
+      failOpenNotice(),
     ];
     expect(rendered.filter((text) => !OPERATOR_COPY_SHAPE.test(text))).toEqual([]);
   });

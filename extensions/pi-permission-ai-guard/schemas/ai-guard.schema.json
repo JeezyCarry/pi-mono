@@ -21,26 +21,12 @@
       "type": "object",
       "description": "Classifier verdict thresholds — pure policy, no transport knobs.",
       "properties": {
-        "intentThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Intent probability at or above which the anchor counts as authorizing the action."
-        },
-        "riskThreshold": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 1,
-          "default": 0.5,
-          "description": "Risk score at or above which the action denies; the tier follows the fixed quartile bands. Raising it widens what auto-allows in every mode."
-        },
         "confidenceThreshold": {
           "type": "number",
           "minimum": 0,
           "maximum": 1,
           "default": 0.5,
-          "description": "Minimum answer confidence; below it the verdict defers."
+          "description": "Minimum confidence at which a classifier reading is adopted (0–1, default 0.5); below it that axis takes its uncertainty path. Compares the returned confidence (the label distribution's peak concentration); it does not measure evidence completeness."
         }
       },
       "additionalProperties": false
@@ -107,9 +93,48 @@
     },
     "mode": {
       "type": "string",
-      "enum": ["strict", "default", "lenient", "permissive"],
+      "enum": ["strict", "default", "auto", "custom"],
       "default": "default",
-      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Hard-tier denies (riskLevel high|critical, or missing) always deny. Soft-tier denies (low/medium) and the model's own uncertainty (split by its lean: benign-leaned, neutral, danger-leaned) map per mode: 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger (soft denies and every unresolved doubt ask); 'lenient' — benign and neutral doubts pass, soft denies and danger-leaned doubts ask; 'permissive' — everything passes except hard-tier denies. Reviewer machinery failures never map to allow: they deny under strict and permissive, and defer otherwise."
+      "description": "The leniency ladder for the reviewer's non-allow verdicts, strictest first. Only the deterministic screen hard-denies: a model deny is soft whatever riskLevel it reports, and riskLevel is an audit label that never picks the tier. The model's own uncertainty is split by its lean (benign-leaned, neutral, danger-leaned): 'strict' — everything denies, the reviewer's allow is the only pass; 'default' — you judge every flag but hard danger, so soft denies and every unresolved doubt ask; 'auto' — no prompt is ever raised, benign and neutral doubts pass, danger-leaned doubts and every deny deny. 'auto' is not the yolo mode of Codex, Claude Code, or Gemini CLI: those neither ask nor block, while auto still blocks every deny and every danger-leaned doubt. Reviewer machinery failures never map to allow: they deny under strict and auto, and defer under default. 'custom' runs the two cut lines and the failure lane from customMode; it is only selectable while that block is present, and an unconfigured custom falls back to 'default' with a config issue."
+    },
+
+    "customMode": {
+      "type": ["object", "null"],
+      "default": null,
+      "additionalProperties": false,
+      "description": "The operator-defined ladder row, read only when mode is 'custom'. Two cut lines and the reviewer-failure lane, nothing else: a mode is two boundaries, so a custom row is contiguous by construction and cannot express an incoherent per-rung table. allowThrough at or above denyFrom is legal and leaves no ask band (the mode never prompts); the footer then renders it in warning red once the casual cycle can reach it. A pair drawing exactly a built-in row is reported as redundant.",
+      "properties": {
+        "allowThrough": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "defer-benign",
+            "defer-neutral",
+            "defer-danger",
+            "soft-deny",
+            "hard-deny"
+          ],
+          "description": "At or below this rung the mode allows (inclusive). 'defer-neutral' is the ask-free-but-still-blocking posture: benign and neutral doubts pass, danger-leaned doubts deny."
+        },
+        "denyFrom": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "defer-benign",
+            "defer-neutral",
+            "defer-danger",
+            "soft-deny",
+            "hard-deny"
+          ],
+          "description": "At or above this rung the mode denies (inclusive). The deterministic screen's hard deny is terminal in every mode."
+        },
+        "onReviewFailure": {
+          "type": "string",
+          "enum": ["deny", "defer"],
+          "description": "How a review that produced no verdict is disposed of. Never allow: a broken reviewer must not rubber-stamp."
+        }
+      },
+      "required": ["allowThrough", "denyFrom", "onReviewFailure"]
     },
     "notifyLevel": {
       "type": "string",
@@ -120,7 +145,7 @@
     "notifyApprovals": {
       "type": "boolean",
       "default": false,
-      "description": "Opt in to info-level notices when AI Guard emits an allow (fresh or cached). Fresh reviews carry their total review cost in a duration tail; cache replays say (cached). Mapped allows name the mode (`mode (permissive) auto-approved`); path and external_directory families are excluded because the host caps their allows to defer. Subject to notifyLevel; commands and targets are never shown."
+      "description": "Opt in to info-level notices when AI Guard emits an allow (fresh or cached). Fresh reviews carry their total review cost in a duration tail; cache replays say (cached). Mapped allows name the mode (`mode (auto) allowed without asking`); path and external_directory families are excluded because the host caps their allows to defer. Subject to notifyLevel; commands and targets are never shown."
     },
     "circuitBreaker": {
       "type": "object",
@@ -237,7 +262,7 @@
                   "type": "object",
                   "description": "Per-question additions keyed by question id.",
                   "propertyNames": {
-                    "enum": ["danger_category", "intent_match", "risk"]
+                    "enum": ["ban", "effect", "target", "intent"]
                   },
                   "additionalProperties": {
                     "anyOf": [
@@ -256,7 +281,7 @@
                 }
               },
               "additionalProperties": false,
-              "description": "Classifier-lane slot (append-only): shared background plus per-question additions keyed by stable question id (danger_category, intent_match, risk). The built-in reviewer background, questions, and criteria are the answer contract the verdict thresholds are calibrated against, so nothing here replaces them."
+              "description": "Classifier-lane slot (append-only): shared background plus per-question additions keyed by stable axis question id. The built-in reviewer background, questions, and criteria are the answer contract the verdict thresholds are calibrated against, so nothing here replaces them."
             }
           },
           "additionalProperties": false,

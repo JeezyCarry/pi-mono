@@ -5,6 +5,27 @@
  */
 export const DECISION_EVENT = "ai_guard.decision";
 
+/**
+ * The gate names a decision record carries: which stage produced the verdict.
+ * Writers (the pipeline's gates) and readers (the report builder, the
+ * pipeline's own log scan) share these for the same reason the event names
+ * are shared — a drifted literal would make a reader silently blind to one
+ * stage. Machinery failures are the exception: their gate is the failure kind
+ * itself, single-sourced in `PRE_CALL_MACHINERY_KINDS`.
+ */
+export const DECISION_GATES = {
+  /** The policy table already decided; the link defers. */
+  policyDecided: "policy-decided",
+  /** The deterministic screen hard-denied. */
+  screen: "screen",
+  /** The circuit breaker short-circuited. */
+  circuitBreaker: "circuit-breaker",
+  /** The session cache answered. */
+  cacheHit: "cache-hit",
+  /** The reviewer model answered. */
+  model: "model",
+} as const;
+
 export const SHORT_CIRCUIT_EVENT = "ai_guard.short_circuit";
 
 export const MODEL_REPLY_EVENT = "ai_guard.model_reply";

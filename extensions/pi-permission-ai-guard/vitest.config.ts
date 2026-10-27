@@ -15,6 +15,7 @@ export default defineProject({
     alias: {
       "#src": fileURLToPath(new URL("./src/", import.meta.url)),
       "#test": fileURLToPath(new URL("./tests/", import.meta.url)),
+      "#scripts": fileURLToPath(new URL("./scripts/", import.meta.url)),
     },
   },
 });
