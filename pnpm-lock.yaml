@@ -67,8 +67,8 @@ importers:
         specifier: ^1.1.0
         version: 1.1.0
       '@gotgenes/pi-permission-system':
-        specifier: ^40.1.2
-        version: 40.1.2(@earendil-works/pi-coding-agent@1.1.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-tui@1.1.0)
+        specifier: ^41.0.0
+        version: 41.0.0(@earendil-works/pi-coding-agent@1.1.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-tui@1.1.0)
       '@tsconfig/node22':
         specifier: 'catalog:'
         version: 22.0.6
@@ -511,8 +511,8 @@ packages:
       '@modelcontextprotocol/sdk':
         optional: true
 
-  '@gotgenes/pi-permission-system@40.1.2':
-    resolution: {integrity: sha512-wYH0uQsq7R9ZqtgDdOSlmroPv6B/1cXiEoHUblpz0f53m22vSmAX7J3PfXS7haPAPq//Nt/H7OZLq5xqrclblQ==}
+  '@gotgenes/pi-permission-system@41.0.0':
+    resolution: {integrity: sha512-BJHnj4yrtVMT5A5Tzss+yRhdvRndJSEBMr4j3QGa+T5MxmHof1xTKlVlDA6Xiq3hFQ7LcvTTCxzvXfPW85zftA==}
     engines: {node: '>=22'}
     peerDependencies:
       '@earendil-works/pi-coding-agent': '>=1.0.0'
@@ -2581,7 +2581,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@gotgenes/pi-permission-system@40.1.2(@earendil-works/pi-coding-agent@1.1.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-tui@1.1.0)':
+  '@gotgenes/pi-permission-system@41.0.0(@earendil-works/pi-coding-agent@1.1.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.5))(@earendil-works/pi-tui@1.1.0)':
     dependencies:
       '@earendil-works/pi-coding-agent': 1.1.0(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(supports-color@7.2.0)(ws@8.22.0)(zod@4.6.5)
       '@earendil-works/pi-tui': 1.1.0

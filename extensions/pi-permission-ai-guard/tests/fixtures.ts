@@ -45,6 +45,7 @@ export function payload(
       matchedSpelling: null,
       commandContext: null,
       executedUnit: null,
+      decidingPath: null,
       ...request,
     },
     evidence,

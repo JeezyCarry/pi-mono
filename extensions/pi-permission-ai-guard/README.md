@@ -86,6 +86,7 @@ Chain facts that shape how this link behaves:
 - **Only `ask` reaches the chain**: a request the deterministic policy already decided (`allow`/`deny`) never consults the link.
 - **Config order fixes chain order**, never registration order. A missing link is skipped fail-safe: absence means more prompting, never less.
 - **The chain owner caps a link's `allow` on the `external_directory`/`path` surface families to `defer`**: reviewing those surfaces can deny or defer, never allow. The default `surfaces` list stays clear of them.
+  - One exception since pi-permission-system 41: a link's `allow` on a bash `external_directory` ask is honored when the ask carries the **nothing-on-disk license**. Every flagged path must be a literal absolute path whose first entry below `/` does not exist, and none may be a proven write (for example, the spreadsheet cell in `officecli set data.xlsx /Sheet1/B1`). The host logs each such approval as `authorizer_allow_licensed`. AI Guard does not announce these approvals with `notifyApprovals`.
 - **A subagent's ask is reviewed one hop up**, by the chain of the session serving it, so your links review subagent asks in the session you are watching.
 - The chain ends at the default terminal: the interactive prompt (or a headless deny).
 

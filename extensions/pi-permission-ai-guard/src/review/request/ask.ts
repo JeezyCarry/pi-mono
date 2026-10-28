@@ -94,8 +94,9 @@ export interface AskContext {
    * canonical alias of a flagged path. For `path`/`external_directory` (one
    * path) this is exact. For `bash_external_directory` (possibly many flagged
    * paths) this is the alias of the first external-path entry that carries
-   * one, not per-path attribution — a known, bounded limitation (see
-   * GLOSSARY.md: `allow` is capped to `defer` on this surface regardless).
+   * one, not per-path attribution — a known, bounded limitation. The host caps
+   * `allow` to `defer` on this surface, except on an ask that carries the
+   * nothing-on-disk license (pi-permission-system 41+; see README.md).
    */
   readonly resolvedAlias?: string;
   /** Canonical boundary from `details.accessIntent.boundaryValue` (path surfaces). */
@@ -254,6 +255,10 @@ function surfaceFamilyOf(surface: string): string {
 /**
  * Host caps allows on these surfaces to defer; do not announce an approval.
  *
+ * Since pi-permission-system 41 the host honors an allow on a bash
+ * `external_directory` ask that carries the nothing-on-disk license. This check
+ * reads only the surface, so such an approval is not announced (a known gap).
+ *
  * @param surface - The requested surface (bare or directional).
  * @returns Whether the host caps this surface's allows to defer.
  */
@@ -272,8 +277,8 @@ export function isBoundedDelegationSurface(surface: string): boolean {
  * - Exact surface name (e.g. "bash", "mcp")
  * - "!pattern": exclude (negate) a pattern; exclusions take priority over inclusions. Useful for
  *   surfaces like `external_directory` and `path` that pi-permission-system's bounded-delegation
- *   checkpoint downgrades to `defer` regardless of the verdict. Empty array or excludes-only (no
- *   includes) = review nothing.
+ *   checkpoint downgrades to `defer` (since 41, a licensed bash `external_directory` ask keeps an
+ *   `allow`). Empty array or excludes-only (no includes) = review nothing.
  * - Directional members (`path_read`, `external_directory_write`, …) match their bare family:
  *   configuring `"path"` reviews the path family in both directions; configuring a directional
  *   member explicitly reviews that direction only.
@@ -310,9 +315,10 @@ function matchSurface(configured: readonly string[], surface: string): boolean {
  * the symlink-blindness of taking only the first.
  *
  * Note: `external_directory`/`path` allows are capped to `defer` by the host's
- * bounded-delegation checkpoint regardless of target correctness (see
- * GLOSSARY.md "Ask eligibility") — the link's value there is limited to a
- * confident `deny`.
+ * bounded-delegation checkpoint regardless of target correctness. The one
+ * exception (pi-permission-system 41+) is a bash `external_directory` ask that
+ * carries the nothing-on-disk license (see README.md). Elsewhere the link's
+ * value there is limited to a confident `deny`.
  *
  * @param details - The permission ask details.
  * @returns The extracted review target string, or undefined if no field yielded a value.

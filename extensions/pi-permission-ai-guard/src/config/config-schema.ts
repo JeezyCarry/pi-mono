@@ -309,7 +309,9 @@ const configBaseSchema = z.object({
 
   // Opt-in info notices for emitted allows (fresh model and cache hits).
   // Bounded path-family allows are capped to defer by the chain owner and
-  // must never be described as approvals.
+  // must never be described as approvals. Since pi-permission-system 41, the
+  // host honors an allow on a licensed bash external_directory ask; those
+  // allows are not announced either (see isBoundedDelegationSurface).
   notifyApprovals: z.boolean().default(false),
 
   // Circuit breaker (session-level, fail-safe). `consecutive` is recoverable

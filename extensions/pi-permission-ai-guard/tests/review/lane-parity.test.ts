@@ -65,6 +65,7 @@ const S = {
   surface: "SENTINEL-surface",
   toolName: "SENTINEL-tool-name",
   invokedToolName: "SENTINEL-invoked-tool",
+  decidingPath: "/SENTINEL-deciding-path",
   annotation: "SENTINEL-annotation",
 } as const;
 
@@ -82,6 +83,7 @@ function baseContext(): ReviewRequestContext {
         matchedSpelling: null,
         commandContext: null,
         executedUnit: null,
+        decidingPath: null,
       },
       flaggedElements: [],
       workingDirectory: "/project",
@@ -209,6 +211,14 @@ const CASES: Record<InventoryFactKey, FactCase> = {
   invokedToolName: {
     context: ctx({ request: { invokedToolName: S.invokedToolName } }),
     sentinel: S.invokedToolName,
+    chat: null,
+    classifier: null,
+  },
+  decidingPath: {
+    context: ctx({
+      request: { decidingPath: { path: S.decidingPath, effect: "write", effectSource: "syntax" } },
+    }),
+    sentinel: S.decidingPath,
     chat: null,
     classifier: null,
   },

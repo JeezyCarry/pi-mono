@@ -176,6 +176,9 @@ export function createDisposition(deps: DispositionDeps): Disposition {
       if (decision.notice) deps.notify(decision.notice.message, decision.notice.level);
       // Only this gate emits reviewer-backed allows (fresh or cached). The host
       // caps path/external-directory allows to defer, so those are not approvals.
+      // Known gap: a licensed bash external_directory allow (pi-permission-system
+      // 41+) is honored, but is not announced here; the host logs it as
+      // authorizer_allow_licensed.
       // Never echo the target: commands may contain secrets or control text.
       if (
         deps.notifyApprovals &&

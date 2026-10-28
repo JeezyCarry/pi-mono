@@ -77,6 +77,8 @@ export const EXCLUDED_REQUEST_FACTS: Record<
   toolName: "gate label, same doctrine as surface",
   invokedToolName: "gate label (alias re-exposure), same doctrine",
   matchedPattern: "rule name — rendered but instructed noise",
+  decidingPath:
+    "host attribution of a bash path ask (pi-permission-system 41+) — not rendered to either lane, so it cannot change the verdict",
 };
 
 /**
@@ -89,7 +91,8 @@ export const EXCLUDED_REQUEST_FACTS: Record<
  *
  * Excluded by design (do not affect the verdict the model can reach):
  * `matchedPattern`, `invokedToolName`, `requester`, `annotations`, `toolName`,
- * `surface`, and `agentReason` (free text whose wording varies per call).
+ * `surface`, `decidingPath` (not rendered), and `agentReason` (free text
+ * whose wording varies per call).
  *
  * `matchedPattern` is excluded and `matchedSpelling` is not: the pattern is a
  * rule name the prompt teaches the model to ignore, while the spelling is the

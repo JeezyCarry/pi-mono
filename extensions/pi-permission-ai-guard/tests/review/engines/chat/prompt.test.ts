@@ -58,6 +58,7 @@ function makeAsk(
       matchedSpelling: overrides.matchedSpelling ?? null,
       commandContext: overrides.commandContext ?? null,
       executedUnit: overrides.executedUnit ?? null,
+      decidingPath: null,
     },
     flaggedElements: overrides.flaggedElements ?? [value],
     workingDirectory: overrides.workingDirectory ?? "/test",

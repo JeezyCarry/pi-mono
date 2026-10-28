@@ -284,6 +284,7 @@ describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
     // CURRENT sets so a deliberate edit is an explicit, reviewed change.
     expect(Object.keys(EXCLUDED_ASK_FIELDS).toSorted()).toEqual(["agentReason", "annotations"]);
     expect(Object.keys(EXCLUDED_REQUEST_FACTS).toSorted()).toEqual([
+      "decidingPath",
       "invokedToolName",
       "matchedPattern",
       "requester",

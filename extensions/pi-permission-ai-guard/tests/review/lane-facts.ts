@@ -121,6 +121,10 @@ export const LANE_REQUEST_FACTS: Record<keyof PromptRequestFacts, LaneFact> = {
     chat: { rendered: true, name: "executed unit", encode: "action" },
     classifier: { rendered: true, name: "executed_unit", encode: "redact" },
   },
+  decidingPath: {
+    chat: { rendered: false, reason: "host attribution of a bash path ask — not rendered" },
+    classifier: { rendered: false, reason: "host attribution of a bash path ask — not carried" },
+  },
 };
 
 /** `ReviewRequestContext` outside the ask; `target` folds into the action line/key. */
