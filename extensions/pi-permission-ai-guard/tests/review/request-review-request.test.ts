@@ -15,6 +15,31 @@ import {
 import { shortHash } from "#src/utils.ts";
 import { ev, makeDetails, payload } from "#test/fixtures.ts";
 
+/**
+ * Build a bash ask on `/tmp/x` that the host attributed with the given direction.
+ *
+ * @param effect - The direction the host resolved the path on.
+ * @param effectSource - What established that direction.
+ * @returns The review request context.
+ */
+function decided(effect: "read" | "write", effectSource: "core" | "declared-project") {
+  return {
+    ask: buildAskContext(
+      makeDetails({
+        value: "tool /tmp/x",
+        command: "tool /tmp/x",
+        payload: payload("bash", {
+          surface: "bash",
+          value: "tool /tmp/x",
+          decidingPath: { path: "/tmp/x", effect, effectSource },
+        }),
+      }),
+      "/p",
+    ),
+    target: "tool /tmp/x",
+  };
+}
+
 describe("reviewRequestCacheMaterial", () => {
   it("keeps the complete bash action and canonical path boundary together", () => {
     // boundaryValue is non-null only for path surfaces (upstream contract:
@@ -177,6 +202,27 @@ describe("reviewRequestCacheMaterial", () => {
     expect(reviewRequestCacheMaterial(absent)).toBe(reviewRequestCacheMaterial(explicitNull));
   });
 
+  it("distinguishes cache material by the deciding path's effect", () => {
+    // The same command can be read in another direction after a
+    // `commandEffects` config edit: the reviewer sees the new direction, so
+    // the cached verdict must not carry over.
+    expect(reviewRequestCacheMaterial(decided("read", "core"))).not.toBe(
+      reviewRequestCacheMaterial(decided("write", "declared-project")),
+    );
+
+    // Absent (an older host) and null (not a path ask) share one key.
+    const base = decided("read", "core");
+    const absent = {
+      ...base,
+      ask: { ...base.ask, request: { ...base.ask.request, decidingPath: undefined } },
+    } as unknown as typeof base;
+    const explicitNull = {
+      ...base,
+      ask: { ...base.ask, request: { ...base.ask.request, decidingPath: null } },
+    };
+    expect(reviewRequestCacheMaterial(absent)).toBe(reviewRequestCacheMaterial(explicitNull));
+  });
+
   it("normalizes empty-string and absent fields to the same cache key", () => {
     // An empty value and an absent value mean the same thing ("this ask carried
     // no such fact") and must not be cache-distinct. `JSON.stringify` keeps ""
@@ -284,7 +330,6 @@ describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
     // CURRENT sets so a deliberate edit is an explicit, reviewed change.
     expect(Object.keys(EXCLUDED_ASK_FIELDS).toSorted()).toEqual(["agentReason", "annotations"]);
     expect(Object.keys(EXCLUDED_REQUEST_FACTS).toSorted()).toEqual([
-      "decidingPath",
       "invokedToolName",
       "matchedPattern",
       "requester",
@@ -301,7 +346,7 @@ describe("cache-identity exclusion doctrine (compile-time tripwires)", () => {
 });
 
 describe("cache-identity key set (single source pinned)", () => {
-  it("materializes exactly the fourteen decision-relevant facts — no silent additions or drops", () => {
+  it("materializes exactly the sixteen decision-relevant facts — no silent additions or drops", () => {
     // The exclusion doctrine makes tripwires one-way: adding an excluded
     // field breaks the compile, but DROPPING a keyed field from the
     // material would compile silently. This pins the key set at runtime:
@@ -318,6 +363,7 @@ describe("cache-identity key set (single source pinned)", () => {
       // The deterministic command facts join the cache material so a
       // symlink retarget can never hide behind a stale entry.
       "commandFacts",
+      "decidingPath",
       "executedUnit",
       "flaggedElements",
       "fullCommand",

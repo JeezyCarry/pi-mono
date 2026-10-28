@@ -122,8 +122,8 @@ export const LANE_REQUEST_FACTS: Record<keyof PromptRequestFacts, LaneFact> = {
     classifier: { rendered: true, name: "executed_unit", encode: "redact" },
   },
   decidingPath: {
-    chat: { rendered: false, reason: "host attribution of a bash path ask — not rendered" },
-    classifier: { rendered: false, reason: "host attribution of a bash path ask — not carried" },
+    chat: { rendered: true, name: "deciding path", encode: "action" },
+    classifier: { rendered: true, name: "deciding_path", encode: "redact" },
   },
 };
 

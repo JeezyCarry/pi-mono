@@ -114,6 +114,17 @@ function buildState(request: ReviewRequestContext, transcript: StrippedTranscrip
     state.matched_spelling = normalizeAndRedactText(ask.request.matchedSpelling);
   }
   if (ask.request.commandContext) state.command_context = ask.request.commandContext;
+  // The host's attribution of a bash path ask (pi-permission-system 41+). The
+  // path comes from the command, so it is redacted; the two enums are host
+  // labels and pass through.
+  if (ask.request.decidingPath) {
+    const { path, effect, effectSource } = ask.request.decidingPath;
+    state.deciding_path = {
+      path: normalizeAndRedactText(path),
+      effect,
+      effect_source: effectSource,
+    };
+  }
   // Observed facts: the per-review snapshot the pipeline took before
   // the cache lookup (see snapshotRequest). The evidence is untrusted
   // project text — the entry declaration only, downstream files unread —

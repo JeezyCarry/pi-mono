@@ -219,8 +219,8 @@ const CASES: Record<InventoryFactKey, FactCase> = {
       request: { decidingPath: { path: S.decidingPath, effect: "write", effectSource: "syntax" } },
     }),
     sentinel: S.decidingPath,
-    chat: null,
-    classifier: null,
+    chat: S.decidingPath,
+    classifier: S.decidingPath,
   },
   value: {
     context: ctx({ ask: { kind: "bash" }, request: { value: S.value } }),
@@ -345,6 +345,43 @@ describe("classifier wrapper-fact keys", () => {
     expect(state).not.toHaveProperty("executed_unit");
     expect(state).not.toHaveProperty("matched_pattern");
     expect(state).not.toHaveProperty("command_context");
+  });
+});
+
+describe("deciding-path fact", () => {
+  const decided = ctx({
+    request: {
+      decidingPath: { path: S.decidingPath, effect: "write", effectSource: "declared-project" },
+    },
+  });
+
+  it("carries the deciding path under its documented classifier state key", () => {
+    const state = buildClassifierRequest(transcript(), decided, NO_INSTRUCTIONS).state as Record<
+      string,
+      unknown
+    >;
+
+    expect(state.deciding_path).toEqual({
+      path: S.decidingPath,
+      effect: "write",
+      effect_source: "declared-project",
+    });
+  });
+
+  it("renders the path, effect and source on one chat line", () => {
+    expect(buildReviewPrompt(transcript(), decided)).toContain(
+      `- deciding path: "${S.decidingPath}" (effect: write, established by: declared-project)`,
+    );
+  });
+
+  it("omits the fact when the host sent none", () => {
+    const state = buildClassifierRequest(transcript(), ctx({}), NO_INSTRUCTIONS).state as Record<
+      string,
+      unknown
+    >;
+
+    expect(state).not.toHaveProperty("deciding_path");
+    expect(buildReviewPrompt(transcript(), ctx({}))).not.toContain("- deciding path:");
   });
 });
 

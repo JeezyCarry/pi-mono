@@ -98,6 +98,8 @@ Review one permission request and decide whether it should run.
   An unseen part of the command stays unseen: DEFER it.
 - **Structured Facts**: When the request shows an \`executed unit\`, judge that unit;
   a \`matched rule\` carries no authorization; \`command context\` covers its own span.
+  A \`deciding path\` is the host's reading of which path decided the ask and in
+  which direction; an \`unproven\` effect means the direction is not established.
 
 ## Block
 
@@ -278,6 +280,17 @@ function buildPermissionRequestSection(request: ReviewRequestContext): string {
   if (ask.kind === "bash_external_directory" && ask.flaggedElements.length > 0) {
     const paths = ask.flaggedElements.map((p) => encodeActionTextForPrompt(p)).join(", ");
     lines.push(`- external path(s): ${paths}`);
+  }
+
+  // The host's attribution of a bash path ask (pi-permission-system 41+): the
+  // path that decided it, and what established the direction it was resolved
+  // on. A host reading of the command text, not authorization. Older hosts
+  // do not send the fact, so the line is absent there.
+  const decidingPath = ask.request.decidingPath;
+  if (decidingPath) {
+    lines.push(
+      `- deciding path: ${encodeActionTextForPrompt(decidingPath.path)} (effect: ${decidingPath.effect}, established by: ${decidingPath.effectSource})`,
+    );
   }
 
   if (ask.toolInputPreview) {

@@ -58,7 +58,12 @@ type KeyedAskFields =
   | "workingDirectory";
 
 /** Upstream request facts the cache identity keys on (via the material below). */
-type KeyedRequestFacts = "value" | "commandContext" | "executedUnit" | "matchedSpelling";
+type KeyedRequestFacts =
+  | "value"
+  | "commandContext"
+  | "executedUnit"
+  | "matchedSpelling"
+  | "decidingPath";
 
 /** Every other AskContext field — excluded by doctrine, one entry each. */
 export const EXCLUDED_ASK_FIELDS: Record<Exclude<keyof AskContext, KeyedAskFields>, string> = {
@@ -77,8 +82,6 @@ export const EXCLUDED_REQUEST_FACTS: Record<
   toolName: "gate label, same doctrine as surface",
   invokedToolName: "gate label (alias re-exposure), same doctrine",
   matchedPattern: "rule name — rendered but instructed noise",
-  decidingPath:
-    "host attribution of a bash path ask (pi-permission-system 41+) — not rendered to either lane, so it cannot change the verdict",
 };
 
 /**
@@ -91,8 +94,10 @@ export const EXCLUDED_REQUEST_FACTS: Record<
  *
  * Excluded by design (do not affect the verdict the model can reach):
  * `matchedPattern`, `invokedToolName`, `requester`, `annotations`, `toolName`,
- * `surface`, `decidingPath` (not rendered), and `agentReason` (free text
- * whose wording varies per call).
+ * `surface`, and `agentReason` (free text whose wording varies per call).
+ *
+ * `decidingPath` is keyed: both lanes render it, and its effect can change
+ * with a `commandEffects` config edit while the command text stays the same.
  *
  * `matchedPattern` is excluded and `matchedSpelling` is not: the pattern is a
  * rule name the prompt teaches the model to ignore, while the spelling is the
@@ -124,6 +129,14 @@ export function reviewRequestCacheMaterial(request: ReviewRequestContext): strin
     commandContext: normalizeEmpty(ask.request.commandContext),
     executedUnit: normalizeEmpty(ask.request.executedUnit),
     matchedSpelling: normalizeEmpty(ask.request.matchedSpelling),
+    // Absent (an older host) and null (not a bash path ask) share one key.
+    decidingPath: ask.request.decidingPath
+      ? JSON.stringify({
+          path: ask.request.decidingPath.path,
+          effect: ask.request.decidingPath.effect,
+          effectSource: ask.request.decidingPath.effectSource,
+        })
+      : null,
     canonicalBoundary: normalizeEmpty(ask.canonicalBoundary),
     workingDirectory: normalizeEmpty(ask.workingDirectory),
     readPath: normalizeEmpty(ask.readPath),
